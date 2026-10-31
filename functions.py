@@ -846,22 +846,24 @@ def _format_span(seconds):
 def get_pool_view():
     """[v77 P0-3 port] Per-account operational view.
 
-    Status, load and timers are given as render-ready strings, with no
-    credential fields at all: the token column is deliberately absent — this
+    Status, load and timers are given as render-ready strings. No usable
+    credential fields: the full token column is deliberately absent — this
     output goes straight into HTML, which browsers cache and screenshots
-    capture.
+    capture. token_head exposes only the first 8 + last 4 characters for
+    eyeball account separation (the old dashboard already showed 12).
     """
     now = time.time()
     conn = get_db()
     rows = conn.execute(
-        "SELECT id, alias, status, rate_limited_until, last_used, consecutive_403 "
+        "SELECT id, alias, status, rate_limited_until, last_used, consecutive_403, token "
         "FROM tokens ORDER BY id"
     ).fetchall()
     conn.close()
 
     view = []
-    for tid, alias, status, until, last_used, streak in rows:
+    for tid, alias, status, until, last_used, streak, token in rows:
         streak = streak or 0
+        token_head = f"{(token or '')[:8]}…{((token or '')[-4:] if len(token or '') > 12 else '')}" if token else "—"
         if status == "QUARANTINED":
             state_class, cooldown = "err", "—"
             note = "quarantined — manual return required"
@@ -881,6 +883,7 @@ def get_pool_view():
             {
                 "id": tid,
                 "label": alias if alias else f"untagged #{tid}",
+                "token_head": token_head,
                 "status": status,
                 "state_class": state_class,
                 "state_note": note,

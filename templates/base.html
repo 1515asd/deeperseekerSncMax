@@ -4,14 +4,34 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>{% block title %}DeeperSeeker{% endblock %}</title>
-    <link rel="stylesheet" href="/static/style.css">
+    <style>
+        :root{
+            --font:-apple-system,BlinkMacSystemFont,"SF Pro","Helvetica Neue",Helvetica,Arial,sans-serif;
+            --blue:#007aff;--bg:#f5f5f7;--glass:hsla(0,0%,100%,.8);
+            --p1:rgba(0,0,0,.85);--p2:rgba(0,0,0,.5);--div:rgba(0,0,0,.12);
+        }
+        @media(prefers-color-scheme:dark){:root{
+            --blue:#0a84ff;--bg:#151515;--glass:rgba(30,30,30,.8);
+            --p1:rgba(255,255,255,.85);--p2:rgba(255,255,255,.55);--div:rgba(255,255,255,.1);
+        }}
+        body{background:var(--bg);color:var(--p1);font-family:var(--font);margin:0;
+             -webkit-font-smoothing:antialiased}
+        nav{position:sticky;top:0;z-index:100;background:var(--glass);
+            -webkit-backdrop-filter:saturate(240%) blur(60px);backdrop-filter:saturate(240%) blur(60px);
+            border-bottom:.5px solid var(--div);padding:14px 30px;display:flex;align-items:center;gap:16px}
+        nav a{color:var(--blue);text-decoration:none;font-size:14px}
+        nav a:hover{opacity:.75}
+        nav .sep{color:var(--p2);opacity:.5}
+        nav .brand{margin-left:auto;color:var(--p2);font-weight:600;letter-spacing:-.01em}
+        main{max-width:1120px;margin:0 auto;padding:34px 30px 60px}
+    </style>
+    {% block head %}{% endblock %}
 </head>
 <body>
     <nav>
         <a href="/">Dashboard</a>
         <span class="sep">|</span>
-        <a href="/logout">Log Out</a>
-        <span class="sep">|</span>
+        <a href="/logout">Log out</a>
         <span class="brand">DeeperSeeker</span>
     </nav>
     <main>

@@ -1,106 +1,266 @@
 {% extends "base.html" %}
 {% block title %}Dashboard - DeeperSeeker{% endblock %}
 {% block content %}
-<h1>Dashboard</h1>
+<style>
+  :root{
+    --font:-apple-system,BlinkMacSystemFont,"SF Pro","Helvetica Neue",Helvetica,Arial,sans-serif;
+    --blue:#007aff;--blue-h:#0045b7;--green:#28cd41;--orange:#ff9500;--red:#ff3b30;--gray:#8e8e93;
+    --bg:#f5f5f7;--card:#ffffff;--glass:hsla(0,0%,100%,.8);
+    --p1:rgba(0,0,0,.85);--p2:rgba(0,0,0,.5);--p3:rgba(0,0,0,.25);--div:rgba(0,0,0,.12);
+    --sh-card:inset 0 0 0 1px rgba(255,255,255,.05),0 0 0 .5px rgba(0,0,0,.12),0 4px 24px rgba(0,0,0,.08);
+    --sh-hover:0 12px 48px rgba(0,0,0,.16);
+    --r-sm:9px;--r-md:12px;--r-lg:17px;--r-full:1000px;
+    --tr:.2s ease-out;
+  }
+  @media(prefers-color-scheme:dark){:root{
+    --blue:#0a84ff;--blue-h:#47c1ff;--green:#32d74b;--orange:#ff9f0a;--red:#ff453a;--gray:#98989d;
+    --bg:#151515;--card:#1f1f1f;--glass:rgba(30,30,30,.8);
+    --p1:rgba(255,255,255,.85);--p2:rgba(255,255,255,.55);--p3:rgba(255,255,255,.25);--div:rgba(255,255,255,.1);
+    --sh-card:inset 0 0 0 1px rgba(255,255,255,.05),0 0 0 .5px rgba(0,0,0,.4),0 4px 24px rgba(0,0,0,.35);
+    --sh-hover:0 12px 48px rgba(0,0,0,.55);
+  }}
+  *{box-sizing:border-box}
+  body{background:var(--bg);color:var(--p1);font-family:var(--font);font-size:14px;line-height:1.4;
+       -webkit-font-smoothing:antialiased;margin:0}
+  nav{position:sticky;top:0;z-index:100;background:var(--glass);
+      -webkit-backdrop-filter:saturate(240%) blur(60px);backdrop-filter:saturate(240%) blur(60px);
+      border-bottom:.5px solid var(--div);padding:14px 30px;display:flex;align-items:center;gap:16px}
+  nav a{color:var(--blue);text-decoration:none;font-size:14px}
+  nav a:hover{opacity:.75}
+  nav .brand{margin-left:auto;color:var(--p2);font-weight:600;letter-spacing:-.01em}
+  main{max-width:1120px;margin:0 auto;padding:34px 30px 60px}
+  h1{font-size:26px;font-weight:700;letter-spacing:-.02em;margin:0 0 6px;display:flex;align-items:center;gap:12px}
+  .sub{color:var(--p2);font-size:13px;margin:0 0 26px}
+  h2{font-size:17px;font-weight:700;letter-spacing:-.01em;margin:34px 0 14px;display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+  .cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(158px,1fr));gap:14px}
+  .card{background:var(--card);border-radius:var(--r-lg);box-shadow:var(--sh-card);padding:18px 20px;
+        transition:transform var(--tr),box-shadow var(--tr)}
+  .card:hover{transform:translateY(-2px);box-shadow:var(--sh-hover)}
+  .card .num{font-size:28px;font-weight:700;letter-spacing:-.02em;font-variant-numeric:tabular-nums;line-height:1.15}
+  .card .lbl{color:var(--p2);font-size:12px;margin-top:5px}
+  .c-green .num{color:var(--green)}.c-red .num{color:var(--red)}.c-orange .num{color:var(--orange)}.c-blue .num{color:var(--blue)}
+  .wrap{background:var(--card);border-radius:var(--r-lg);box-shadow:var(--sh-card);overflow:auto}
+  table{border-collapse:collapse;width:100%;font-size:13px}
+  th,td{padding:11px 18px;text-align:left;border-bottom:.5px solid var(--div);white-space:nowrap}
+  th{color:var(--p2);font-weight:600;font-size:12px}
+  tbody tr{transition:background var(--tr)}
+  tbody tr:hover{background:rgba(var(--blue-rgb,0,122,255),.04)}
+  tbody tr:last-child td{border-bottom:0}
+  .badge{display:inline-flex;align-items:center;padding:3px 10px;border-radius:var(--r-full);font-size:12px;font-weight:600}
+  .b-ok{color:var(--green);background:rgba(40,205,65,.14)}
+  .b-warn{color:var(--orange);background:rgba(255,149,0,.14)}
+  .b-err{color:var(--red);background:rgba(255,59,48,.14)}
+  .b-idle{color:var(--p2);background:var(--div)}
+  button,.btn{background:var(--blue);color:#fff;border:0;border-radius:var(--r-sm);padding:8px 18px;cursor:pointer;
+              font-size:13px;font-weight:600;font-family:var(--font);transition:background var(--tr),transform var(--tr)}
+  button:hover{background:var(--blue-h)}
+  button:active{transform:scale(.97)}
+  .btn-sm{padding:4px 12px;font-size:12px;border-radius:7px}
+  .btn-danger{background:var(--red)}.btn-danger:hover{opacity:.85}
+  .btn-ghost{background:var(--div);color:var(--p1)}.btn-ghost:hover{opacity:.8}
+  input[type=text],input[type=password]{background:var(--card);border:.5px solid var(--div);color:var(--p1);
+        border-radius:var(--r-sm);padding:9px 12px;font-size:13px;font-family:var(--font);transition:border var(--tr),box-shadow var(--tr)}
+  input:focus{outline:0;border-color:var(--blue);box-shadow:0 0 0 3.5px rgba(0,122,255,.22)}
+  .hint,.meta{color:var(--p2);font-size:12px}
+  .warning{background:rgba(255,149,0,.1);border:.5px solid rgba(255,149,0,.35);border-radius:var(--r-md);
+           padding:12px 16px;font-size:13px;color:var(--p1);margin:12px 0}
+  details{background:var(--card);border-radius:var(--r-lg);box-shadow:var(--sh-card);padding:6px 20px;margin-top:12px}
+  summary{cursor:pointer;color:var(--blue);font-size:14px;font-weight:600;padding:10px 0;list-style:none}
+  summary::-webkit-details-marker{display:none}
+  summary::before{content:"›";display:inline-block;margin-right:8px;transition:transform var(--tr);color:var(--p2)}
+  details[open] summary::before{transform:rotate(90deg)}
+  code{background:var(--div);border-radius:5px;padding:2px 7px;font-size:12px;word-break:break-all}
+  pre{background:var(--div);border-radius:var(--r-md);padding:12px 14px;font-size:12px;overflow:auto}
+  pre code{background:none;padding:0}
+  a{color:var(--blue);text-decoration:none}a:hover{opacity:.75}
+  .dot{display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:8px;animation:pulse 2s ease-in-out infinite}
+  @keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
+  .sec{margin-left:auto;font-weight:400;font-size:12px;display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+  .info-card p{margin:9px 0;font-size:13px}
+  @media(max-width:640px){main{padding:22px 18px}th,td{white-space:normal;padding:9px 12px;font-size:12px}nav{padding:12px 18px}}
+</style>
+
+<h1>DeeperSeeker <span id="ver" class="badge b-idle">…</span></h1>
+<p class="sub">Data refreshes every 10s · deep upstream probe every 30s · <span id="ts">—</span></p>
+
+<div class="cards">
+  <div class="card c-green"><div class="num" id="c-active">—</div><div class="lbl">Active tokens</div></div>
+  <div class="card"><div class="num" id="c-tokens">—</div><div class="lbl">Total tokens</div></div>
+  <div class="card c-orange"><div class="num" id="c-flight">—</div><div class="lbl">In-flight requests</div></div>
+  <div class="card c-blue"><div class="num" id="c-req">—</div><div class="lbl">Today's requests</div></div>
+  <div class="card c-blue"><div class="num" id="c-tok">—</div><div class="lbl">Today's tokens</div></div>
+  <div class="card"><div class="num" id="c-sess">—</div><div class="lbl">Session mappings</div></div>
+</div>
+
+<h2>Upstream health<span class="sec">Deep probe (real end-to-end round-trip incl. PoW) <button class="btn-sm btn-ghost" onclick="refreshDeep()">Probe now</button></span></h2>
+<div class="cards">
+  <div class="card" id="d-up"><div class="num">…</div><div class="lbl">Upstream reachable / PoW</div></div>
+  <div class="card c-blue"><div class="num" id="d-lat">—</div><div class="lbl">End-to-end latency (ms)</div></div>
+  <div class="card"><div class="num" id="d-cookie">—</div><div class="lbl">Backup cookie</div></div>
+</div>
+
+<h2>Token pool<span class="sec"><span class="badge b-ok">Active</span> <span class="badge b-warn">Rate-limited</span> <span class="badge b-err">Quarantined</span></span></h2>
+<div class="wrap">
+<table id="pool">
+  <thead><tr><th>ID</th><th>Alias</th><th>Token</th><th>Status</th><th>Note</th><th>In-flight</th><th>Last used</th><th>Cooldown</th><th>Actions</th></tr></thead>
+  <tbody></tbody>
+</table>
+</div>
+
+<h2>Usage statistics<span class="sec">By day × API key</span></h2>
+<div class="wrap">
+<table id="usage">
+  <thead><tr><th>Date</th><th>Key</th><th>Channel</th><th>Requests</th><th>Input tokens</th><th>Output tokens</th></tr></thead>
+  <tbody></tbody>
+</table>
+</div>
 
 <section>
-    <h2>Add Auth Token</h2>
-    <div class="steps">
-        <p><strong>Steps:</strong></p>
-        <ol>
-            <li>Open a browser <strong>incognito/private window</strong></li>
-            <li>Visit <a href="https://chat.deepseek.com" target="_blank">chat.deepseek.com</a> and log in</li>
-            <li>Extract the token — <strong>pick one method for your device</strong> (both are kept, either works):</li>
-        </ol>
+  <h2>Add an auth token</h2>
+  <div class="warning">A token is equivalent to your DeepSeek account: paste it only into your own dashboard, never share it. Logging out of DeepSeek in the browser invalidates it.</div>
+  <div class="card" style="padding:20px">
+    <form method="post" action="/tokens/add" style="display:flex;gap:10px;flex-wrap:wrap">
+      <input type="text" name="alias" placeholder="Alias (optional, e.g. alt-1)" style="width:200px">
+      <input type="text" name="auth_token" placeholder="Paste the token (no quotes)" style="flex:1;min-width:280px">
+      <button type="submit">Add token</button>
+    </form>
+  </div>
 
-        <p><strong>Method A · Desktop / Android (with developer tools)</strong></p>
-        <p>Open developer tools (F12) → Console → paste:</p>
-        <code>JSON.parse(localStorage.getItem("userToken")).value</code>
+  <details>
+    <summary>How do I get a token? Pick any one of the three methods</summary>
+    <div style="padding:4px 2px 14px">
+      <p><strong>Method A · Desktop / Android (easiest)</strong></p>
+      <ol>
+        <li>Open an <strong>incognito window</strong> and sign in at <a href="https://chat.deepseek.com" target="_blank">chat.deepseek.com</a></li>
+        <li>Press <strong>F12</strong> to open DevTools → switch to the Console tab → paste this line and hit Enter:</li>
+      </ol>
+      <pre><code>JSON.parse(localStorage.getItem("userToken")).value</code></pre>
+      <p class="hint">The long string it prints is the token — copy it.</p>
 
-        <p><strong>Method B · iPhone / iPad (Shortcuts) — recommended, verified to work</strong></p>
-        <p>Use the Shortcuts action "Run JavaScript on Web Page" to extract it. It has full page access and, <strong>unlike</strong> bookmarks, won't be blocked by iOS with "The operation is insecure":</p>
-        <ol>
-            <li>Shortcuts app → tap <strong>+</strong> in the top-right to create a new one → add the action "<strong>Run JavaScript on Web Page</strong>" → paste this into the script box:</li>
-        </ol>
-        <pre style="white-space:pre-wrap;word-break:break-all;background:#f6f8fa;padding:10px;border-radius:6px;font-size:12px"><code>var out = '';
+      <p><strong>Method B · iPhone / iPad (Shortcuts — verified working)</strong></p>
+      <ol>
+        <li>Open the Shortcuts app → tap <strong>+</strong> to create a new one → add the action "<strong>Run JavaScript on Web Page</strong>" and paste this into the script box:</li>
+      </ol>
+      <pre><code>var out = '';
 try {
   var r = localStorage.getItem('userToken');
   if (r) { try { out = JSON.parse(r).value || r; } catch(e) { out = r; } }
 } catch(e) { out = ''; }
-if (out) { completion(out); } else { completion('Nothing retrieved: make sure Safari is logged in to chat.deepseek.com'); }</code></pre>
-        <ol start="2">
-            <li>Add another action "<strong>Copy to Clipboard</strong>"</li>
-            <li><strong>Crucial step (missing it causes "no result after running")</strong>: at the bottom of the shortcut editor, set "Receives" → type to "<strong>Safari Web Page</strong>", and make sure the JS action's "Web Page" input is connected to the previous step</li>
-            <li>Usage: in Safari, open <strong>chat.deepseek.com</strong> while logged in (after the page fully loads) → tap <strong>Share</strong> → <strong>Run Shortcut</strong> → the token goes to your clipboard and a popup shows it</li>
-        </ol>
+if (out) { completion(out); } else { completion('Nothing found: make sure Safari is signed in to chat.deepseek.com'); }</code></pre>
+      <ol start="2">
+        <li>Add another action: "<strong>Copy to Clipboard</strong>"</li>
+        <li><strong>Crucial step (skip it and the shortcut silently returns nothing)</strong>: at the bottom of the shortcut editor, tap the receiving-types row → pick "<strong>Safari Web Page</strong>", and make sure the JS action's "Web Page" input is wired to the previous step</li>
+        <li>Usage: open the signed-in chat.deepseek.com in Safari (wait for full load) → Share → Run the shortcut → the token lands in your clipboard</li>
+      </ol>
 
-        <details style="margin-top:10px">
-            <summary style="cursor:pointer">Method C · Safari bookmarklet (fallback: some iOS versions report "The operation is insecure" — if that happens, use Method B)</summary>
-            <div style="padding:8px 12px">
-                <p>iOS doesn't allow running <code>javascript:</code> directly in the address bar, so bookmarks are the only entry point. However, some iOS versions block localStorage access from bookmark scripts (a SecurityError, unrelated to the "Block All Cookies" setting) — if you hit this, use Method B instead.</p>
-                <ol>
-                    <li>In Safari, open any normal page → <strong>Share</strong> → <strong>Add Bookmark</strong> → Save</li>
-                    <li>Bookmarks list → <strong>Edit</strong> that entry → replace the entire "URL" field with the code below → Save</li>
-                    <li>On a logged-in chat.deepseek.com page, tap the bookmark to run it → auto-copies</li>
-                </ol>
-                <pre style="white-space:pre-wrap;word-break:break-all;background:#f6f8fa;padding:10px;border-radius:6px;font-size:12px;max-height:220px;overflow:auto"><code>javascript:(function(){var t='';try{var r=localStorage.getItem('userToken');if(r){try{t=JSON.parse(r).value||r;}catch(e){t=r;}}}catch(e){alert('Read failed: '+e.message+' (use Method B Shortcuts instead)');return;}if(!t||t.length&lt;20){alert('userToken not found. Make sure you are logged in and the page has fully loaded');return;}var a=document.createElement('textarea');a.value=t;a.style.cssText='position:fixed;left:-9999px';document.body.appendChild(a);a.select();a.setSelectionRange(0,999999);var ok=document.execCommand('copy');a.remove();alert((ok?'Copied to clipboard ✓\n\n':'Copy failed, long-press to copy manually\n\n')+'Length '+t.length+'\n'+t.substring(0,12)+'...');})();</code></pre>
-            </div>
-        </details>
-        <p class="hint">Android can also use the Method C bookmark (newer Chrome versions also block javascript: in the address bar), or keep using the F12 console.</p>
+      <details style="margin-top:10px">
+        <summary>Method C · Safari bookmarklet (fallback: some iOS builds report "The operation is insecure" — if so, use Method B)</summary>
+        <div style="padding:8px 0">
+          <p>iOS does not allow running <code>javascript:</code> from the address bar; a bookmark is the only entry point. Some iOS builds also block localStorage reads from bookmarklets — if you hit an error, switch to Method B.</p>
+          <ol>
+            <li>Open any normal page in Safari → Share → Add Bookmark → Save</li>
+            <li>In the bookmarks list → Edit that bookmark → replace the entire URL with the code below → Save</li>
+            <li>On the signed-in chat.deepseek.com page, tap the bookmark to run it → auto-copied</li>
+          </ol>
+          <pre><code>javascript:(function(){var t='';try{var r=localStorage.getItem('userToken');if(r){try{t=JSON.parse(r).value||r;}catch(e){t=r;}}}catch(e){alert('Read failed: '+e.message+'(please switch to Method B shortcut)');return;}if(!t||t.length&lt;20){alert('userToken not found. Make sure you are signed in and the page has fully loaded');return;}var a=document.createElement('textarea');a.value=t;a.style.cssText='position:fixed;left:-9999px';document.body.appendChild(a);a.select();a.setSelectionRange(0,999999);var ok=document.execCommand('copy');a.remove();alert((ok?'Copied to clipboard ✓\n\n':'Copy failed, long-press to copy manually\n\n')+'Length '+t.length+'\n'+t.substring(0,12)+'...');})();</code></pre>
+          <p class="hint">On Android you can also use the Method C bookmarklet (recent Chrome versions likewise block javascript: in the address bar), or just use the F12 console.</p>
+        </div>
+      </details>
     </div>
-    <div class="warning">
-        Note: if you log out of DeepSeek in your browser, this token will become invalid.
-    </div>
-    <form method="post" action="/tokens/add">
-        <input type="text" name="alias" placeholder="Alias (optional, e.g.: main, alt1)" style="width:220px">
-        <input type="text" name="auth_token" placeholder="Paste token here (no quotes)" style="width:400px">
-        <button type="submit">Add Token</button>
-    </form>
+  </details>
 </section>
 
 <section>
-    <h2>Token Pool ({{ tokens|length }})</h2>
-    {% if tokens %}
-    <table>
-        <thead>
-            <tr>
-                <th>ID</th>
-                <th>Alias</th>
-                <th>Token</th>
-                <th>Status</th>
-                <th>Actions</th>
-            </tr>
-        </thead>
-        <tbody>
-            {% for tok in tokens %}
-            <tr>
-                <td>{{ tok['id'] }}</td>
-                <td>{{ tok['alias'] or '—' }}</td>
-                <td><code>{{ tok['token'][:12] }}…{{ tok['token'][-4:] }}</code></td>
-                <td>
-                    <span class="status {% if tok['status'] == 'ACTIVE' %}ok{% elif tok['status'] == 'RATE_LIMITED' %}warn{% else %}err{% endif %}">
-                        {{ {'ACTIVE':'Active','RATE_LIMITED':'Rate-Limited'}.get(tok['status'], tok['status']) }}
-                    </span>
-                </td>
-                <td>
-                    <form method="post" action="/tokens/{{ tok['id'] }}/delete" style="display:inline"
-                          onsubmit="return confirm('Delete this token?')">
-                        <button type="submit" class="btn-sm btn-danger">Delete</button>
-                    </form>
-                </td>
-            </tr>
-            {% endfor %}
-        </tbody>
-    </table>
-    {% else %}
-    <p>No tokens yet. Add one above.</p>
-    {% endif %}
+  <h2>Endpoint info</h2>
+  <div class="card info-card" style="padding:20px">
+    <p>OpenAI-compatible endpoint: <code id="ep-openai">…</code></p>
+    <p>Anthropic-compatible endpoint: <code id="ep-anthropic">…</code></p>
+    <p>Default model: <code>deepseek-v4.1-flash</code> (other exposed models can be requested per call)</p>
+    <p class="hint">Point any OpenAI / Anthropic-compatible client (Claude Code, Cherry Studio, Open WebUI, etc.) at either address above and it just works.</p>
+  </div>
 </section>
 
-<section>
-    <h2>API Endpoints</h2>
-    <p>OpenAI-compatible: <code>http://free-bots.heavencloud.in:3383/v1</code></p>
-    <p>Anthropic-compatible: <code>http://free-bots.heavencloud.in:3383</code></p>
-    <p>Model: <code>v4.1flash</code> (DeepSeek default model)</p>
-</section>
+<script>
+const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const fmt = n => (n ?? 0).toLocaleString();
+
+async function refreshPool() {
+  try {
+    const pool = await fetch('/v1/pool').then(r => r.json());
+    const tb = document.querySelector('#pool tbody'); tb.innerHTML = '';
+    let flight = 0;
+    for (const t of (pool.pool || [])) {
+      flight += t.in_flight || 0;
+      const cls = t.state_class || '';
+      const badge = cls.includes('ok') ? 'b-ok' : cls.includes('warn') ? 'b-warn' : cls.includes('err') ? 'b-err' : 'b-idle';
+      const tr = document.createElement('tr');
+      tr.innerHTML = `<td>${t.id}</td><td>${esc(t.label)}</td>`
+        + `<td><code>${esc(t.token_head || '—')}</code></td>`
+        + `<td><span class="badge ${badge}">${esc(t.status)}</span></td>`
+        + `<td>${esc(t.state_note)}</td><td>${t.in_flight}</td>`
+        + `<td>${esc(t.last_used)}</td><td>${esc(t.cooldown)}</td>`
+        + `<td>${t.can_restore ? `<button class="btn-sm" onclick="restore(${t.id})">Restore</button> ` : ''}`
+        + `<button class="btn-sm btn-danger" onclick="del(${t.id})">Delete</button></td>`;
+      tb.appendChild(tr);
+    }
+    document.getElementById('c-flight').textContent = fmt(flight);
+    if (!(pool.pool || []).length) tb.innerHTML = '<tr><td colspan="9" class="hint" style="text-align:center;padding:24px">Pool is empty — add your first account under “Add an auth token” below</td></tr>';
+  } catch (e) { console.error('pool', e); }
+}
+
+async function refreshUsage() {
+  try {
+    const u = await fetch('/v1/usage').then(r => r.json());
+    const tb = document.querySelector('#usage tbody'); tb.innerHTML = '';
+    for (const row of (u.usage || [])) {
+      const tr = document.createElement('tr');
+      tr.innerHTML = `<td>${esc(row.day)}</td><td>${esc(row.key)}</td><td>${esc(row.surfaces || '—')}</td>`
+        + `<td>${fmt(row.requests)}</td><td>${fmt(row.input_tokens)}</td><td>${fmt(row.output_tokens)}</td>`;
+      tb.appendChild(tr);
+    }
+    if (!(u.usage || []).length) tb.innerHTML = '<tr><td colspan="6" class="hint" style="text-align:center;padding:24px">No usage recorded yet</td></tr>';
+  } catch (e) { console.error('usage', e); }
+}
+
+async function refreshDeep() {
+  try {
+    const d = await fetch('/v1/admin/stats').then(r => r.json());
+    document.getElementById('ver').textContent = d.version || '';
+    document.getElementById('c-active').textContent = fmt(d.active_tokens);
+    document.getElementById('c-tokens').textContent = fmt(d.total_tokens);
+    document.getElementById('c-sess').textContent = fmt(d.sessions);
+    const today = d.today || {};
+    document.getElementById('c-req').textContent = fmt(today.requests);
+    document.getElementById('c-tok').textContent = fmt((today.input_tokens || 0) + (today.output_tokens || 0));
+    const up = d.deep || {};
+    const card = document.getElementById('d-up');
+    if (up.upstream_reachable && up.pow_ok) {
+      card.className = 'card c-green';
+      card.querySelector('.num').innerHTML = '<span class="dot" style="background:var(--green)"></span>Healthy';
+    } else {
+      card.className = 'card c-red';
+      card.querySelector('.num').innerHTML = '<span class="dot" style="background:var(--red)"></span>Unreachable';
+      card.querySelector('.lbl').textContent = up.reason ? ('Upstream / PoW · ' + up.reason) : 'Upstream reachable / PoW';
+    }
+    document.getElementById('d-lat').textContent = up.latency_ms != null ? fmt(up.latency_ms) : '—';
+    document.getElementById('d-cookie').textContent = d.cookies_valid ? 'Valid' : 'None / expired';
+    document.getElementById('ts').textContent = 'Updated ' + new Date().toLocaleTimeString();
+  } catch (e) { console.error('deep', e); }
+}
+
+async function restore(id) { await fetch('/v1/pool/restore', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({token_id:id})}); refreshPool(); }
+async function del(id) { if (!confirm('Remove this token from the pool?')) return; await fetch(`/tokens/${id}/delete`, {method:'POST'}); refreshPool(); }
+
+// Endpoint URLs follow the origin the dashboard is visited from (no hardcoding)
+(() => {
+  const base = location.origin;
+  document.getElementById('ep-openai').textContent = base + '/v1';
+  document.getElementById('ep-anthropic').textContent = base;
+})();
+
+refreshPool(); refreshUsage(); refreshDeep();
+setInterval(refreshPool, 10000);
+setInterval(refreshUsage, 10000);
+setInterval(refreshDeep, 30000);
+</script>
 {% endblock %}

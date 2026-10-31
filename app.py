@@ -8,6 +8,7 @@ import re
 import secrets
 import sqlite3
 import time
+import calendar
 import unicodedata
 import uuid
 from collections import OrderedDict
@@ -21,7 +22,7 @@ from dotenv import load_dotenv
 from uvicorn.logging import AccessFormatter
 from fastapi import FastAPI, Request, Depends, HTTPException, status
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
-from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
+from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
@@ -2858,64 +2859,13 @@ async def v1_pool_restore(request: Request):
 
 @app.get("/pool")
 async def pool_dashboard(request: Request):
-    """[v77 P0-3/P0-6 port] Pool status + usage statistics dashboard page (admin)."""
+    """[v86] The old pool page has been merged into the unified dashboard
+    (/dashboard); redirect for old-bookmark compatibility."""
     try:
         get_current_admin(request)
     except HTTPException:
         return HTMLResponse("<meta http-equiv='refresh' content='0;url=/login'>")
-    return HTMLResponse("""<!DOCTYPE html>
-<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Account Pool &amp; Usage</title>
-<style>
-body{font-family:-apple-system,sans-serif;background:#0f172a;color:#e2e8f0;margin:0;padding:24px}
-h1{font-size:20px} h2{font-size:16px;margin:24px 0 8px}
-table{border-collapse:collapse;width:100%;font-size:13px}
-th,td{border:1px solid #334155;padding:6px 10px;text-align:left}
-th{background:#1e293b;color:#94a3b8}
-.ok{color:#4ade80}.warn{color:#fbbf24}.err{color:#f87171}
-button{background:#334155;color:#e2e8f0;border:0;border-radius:4px;padding:3px 10px;cursor:pointer}
-button:hover{background:#475569}
-.meta{color:#64748b;font-size:12px;margin-top:16px}
-</style></head><body>
-<h1>Account Pool Status <span class="meta" id="ts"></span></h1>
-<table id="pool"><thead><tr><th>ID</th><th>Alias</th><th>Status</th><th>Note</th><th>In-flight</th><th>Last Used</th><th>Cooldown</th><th>Actions</th></tr></thead><tbody></tbody></table>
-<h2>Usage Statistics (by day × by key)</h2>
-<table id="usage"><thead><tr><th>Date</th><th>Key</th><th>Surface</th><th>Requests</th><th>Input tokens</th><th>Output tokens</th></tr></thead><tbody></tbody></table>
-<div class="meta">Auto-refreshes every 10 seconds · v77</div>
-<script>
-async function refresh(){
-  const [pool, usage] = await Promise.all([
-    fetch('/v1/pool').then(r=>r.json()).catch(()=>null),
-    fetch('/v1/usage').then(r=>r.json()).catch(()=>null),
-  ]);
-  if (pool && pool.pool){
-    const tb = document.querySelector('#pool tbody'); tb.innerHTML='';
-    for (const t of pool.pool){
-      const tr = document.createElement('tr');
-      tr.innerHTML = `<td>${t.id}</td><td>${t.label}</td>`
-        + `<td class="${t.state_class}">${t.status}</td><td>${t.state_note}</td>`
-        + `<td>${t.in_flight}</td><td>${t.last_used}</td><td>${t.cooldown}</td>`
-        + `<td>${t.can_restore ? `<button onclick="restore(${t.id})">Restore</button>` : ''}</td>`;
-      tb.appendChild(tr);
-    }
-  }
-  if (usage && usage.usage){
-    const tb = document.querySelector('#usage tbody'); tb.innerHTML='';
-    for (const u of usage.usage){
-      const tr = document.createElement('tr');
-      tr.innerHTML = `<td>${u.day}</td><td>${u.key}</td><td>${u.surfaces}</td>`
-        + `<td>${u.requests}</td><td>${u.input_tokens}</td><td>${u.output_tokens}</td>`;
-      tb.appendChild(tr);
-    }
-  }
-  document.getElementById('ts').textContent = new Date().toLocaleTimeString();
-}
-async function restore(id){
-  await fetch('/v1/pool/restore', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({token_id:id})});
-  refresh();
-}
-refresh(); setInterval(refresh, 10000);
-</script></body></html>""")
+    return RedirectResponse("/dashboard", status_code=307)
 
 
 @app.get("/v1/usage")
@@ -2937,6 +2887,52 @@ async def v1_pool(request: Request):
     except HTTPException:
         return HTMLResponse("<meta http-equiv='refresh' content='0;url=/login'>")
     return JSONResponse({"pool": await _db(get_pool_view)})
+
+
+def _count_sessions():
+    conn = get_db()
+    try:
+        return conn.execute("SELECT COUNT(*) FROM sessions").fetchone()[0]
+    finally:
+        conn.close()
+
+
+@app.get("/v1/admin/stats")
+async def v1_admin_stats(request: Request):
+    """[v86] Aggregated dashboard statistics (admin): token overview +
+    session count + today's usage + the deep health probe. The probe takes
+    the same path as /health?deep=1 (state-aware pick_token, empty-session
+    round-trip, never sends a message upstream) with admin auth on top."""
+    try:
+        get_current_admin(request)
+    except HTTPException:
+        return HTMLResponse("<meta http-equiv='refresh' content='0;url=/login'>")
+    tokens = await _db(get_tokens)
+    active = sum(1 for t in tokens if t["status"] == "ACTIVE")
+    sessions = await _db(_count_sessions)
+    # Today (UTC day boundary, same convention as the usage table's day field)
+    today_day = time.strftime("%Y-%m-%d", time.gmtime())
+    midnight = calendar.timegm(time.strptime(today_day, "%Y-%m-%d"))
+    rows = await _db(usage_by_day_key, midnight)
+    today = {k: sum(r[k] or 0 for r in rows) for k in ("requests", "input_tokens", "output_tokens")}
+    cookies_valid = False
+    try:
+        with open(cookie_file_path()) as f:
+            c = json.load(f)
+        exp = c.get("expiry")
+        cookies_valid = bool(exp and exp > time.time())
+    except Exception:
+        cookies_valid = False
+    probe = await _deep_health_probe()
+    return JSONResponse({
+        "version": "v86",
+        "active_tokens": active,
+        "total_tokens": len(tokens),
+        "sessions": sessions,
+        "today": today,
+        "cookies_valid": cookies_valid,
+        "deep": probe,
+    })
 
 
 @app.post("/tokens/add")
