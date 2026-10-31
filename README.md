@@ -30,7 +30,6 @@ with streaming, tool calling, and long-context session management.
 - **Long-context rollover** — automatic summary handoff keeps 100+ turn conversations alive; no more "long chat stops responding"
 - **Token-pool disaster recovery** — multi-account rotation with stale-session self-healing and poisoned-session rebuild
 - **Built-in dashboard** — usage, token pool and request monitoring UI out of the box
-- **100% English build available** — the [`english`](https://github.com/1515asd/rh-deeperseeker/tree/english) branch ships identical code with all logs, in-chat notices and dashboard UI in English
 
 ## Why this fork
 
