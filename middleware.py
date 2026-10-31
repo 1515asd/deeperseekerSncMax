@@ -31,9 +31,11 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 
 logger = logging.getLogger("uvicorn.error")
 
-# [v77 P0-4 移植] 每请求关联 id，同一请求调用链的任何位置可读
-# （终态空 SSE 信封内嵌它，失败响应可对上访问日志行）。纯 ASGI 中间件
-# 在同一 task 里跑路由栈，普通 ContextVar 即安全。
+# [v77 P0-4 port] Per-request correlation id, readable anywhere in the call
+# chain of the same request (embedded in the terminal empty SSE envelope so
+# failed responses can be matched to their access-log lines). A pure ASGI
+# middleware runs the routing stack in the same task, so a plain ContextVar
+# is safe.
 request_id_var = ContextVar("deeperseeker_request_id", default="-")
 
 

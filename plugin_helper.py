@@ -36,41 +36,56 @@ OBSERVED_MAX_OUTPUT_TOKENS = int(os.getenv("DEEPSEEKER_MAX_OUTPUT_TOKENS", "8192
 # Covers tokenizer estimation error against the web backend plus the summary
 # request/reply exchange that happens in the current chat before rollover.
 ROLLOVER_SAFETY_TOKENS = int(os.getenv("DEEPSEEKER_ROLLOVER_SAFETY_TOKENS", "24000"))
-# [v77 DSH 移植] 提示词里内嵌的最新用户消息硬上限。首条消息上游可吃
-# ~100 万 token，但超过此上限的任何 payload 永远不可能成功——而旧实现
-# 没有这个帽时，agent 客户端重放全量上下文的超大单条消息在每次重试中
-# 以同样方式失败（payload 从不缩小）。帽子放在观测到的首条可接受值
-# 略下方，截断后的 prompt 仍可通过。
+# [v77 DSH port] Hard cap on the latest user message embedded in the prompt.
+# The upstream accepts ~1M tokens for a first message, but any payload above
+# this cap can never succeed — and in the old implementation, without this
+# cap, an agent client replaying the full context as one oversized message
+# failed the same way on every retry (the payload never shrank). The cap sits
+# just below the observed first-message acceptance value so the truncated
+# prompt still goes through.
 logger = logging.getLogger("uvicorn.error")
 
 MAX_USER_MESSAGE_TOKENS = int(os.getenv("DEEPSEEKER_MAX_USER_MESSAGE_TOKENS", "900000"))
-# [v77 DSH 移植] rollover 估算的固定开销：客户端可见历史里没有、但上游
-# 会话确实累积的部分——工具 schema、系统扩展、交接摘要、每轮指令和
-# 模型自己的跨轮推理。
+# [v77 DSH port] Fixed overhead added to the rollover estimate: parts the
+# upstream session really accumulates that are absent from the client-visible
+# history — tool schemas, system extensions, handoff summaries, per-turn
+# instructions, and the model's own cross-turn reasoning.
 PROMPT_OVERHEAD_TOKENS = int(os.getenv("DEEPSEEKER_PROMPT_OVERHEAD_TOKENS", "4096"))
-# [v77.2] 会话绝对体重上限（token）：总量（客户端全量历史 + 固有开销）超过
-# 此值就无条件 rollover，与增长制并存。修的洞：增长制只看"比 baseline 厚
-# 了多少"，而首条走快速通道的会话可以一开场就背 60 万 token（生产实证
-# 2026-10-27 会话 a25da312：1.69MB 首条建会话成功后，每轮 prefill 60-75s，
-# growth≈0 永不触发换会话）。默认与记忆门槛一致（60 万），不额外降低记忆容量。
-# 绝对上限默认与记忆门槛一致（线上 env DEEPSEEKER_MEMORY_LIMIT_TOKENS=600000，
-# 2026-10-19 调整值）：门槛本意是"会话背负超过它就该换"，此前只检查增量、
-# 被首条巨包绕过——现在补全为增量/总量双判据，不额外降低记忆容量。
-SESSION_ABS_CEIL = int(os.getenv("DEEPSEEKER_SESSION_ABS_CEIL", "0"))  # 0 = 跟随记忆门槛
+# [v77.2] Absolute session weight ceiling (tokens): when the total (full client
+# history + inherent overhead) exceeds this value, roll over unconditionally,
+# alongside the growth rule. Hole being fixed: the growth rule only looks at
+# "how much thicker than baseline" the session got, while a session whose
+# first message rides the fast path can start out carrying 600K tokens
+# (production evidence, 2026-10-27 session a25da312: a 1.69MB first message
+# opened the session successfully, then every turn prefilled for 60-75s with
+# growth≈0, so a rollover never fired). Default matches the memory threshold
+# (600K) and does not further reduce memory capacity.
+# The absolute ceiling defaults to the memory threshold (production env
+# DEEPSEEKER_MEMORY_LIMIT_TOKENS=600000, adjusted 2026-10-19): the threshold's
+# intent is "once a session carries more than this, switch"; previously only
+# the increment was checked, which a giant first message bypassed — now
+# completed into a dual increment/total criterion, without further reducing
+# memory capacity.
+SESSION_ABS_CEIL = int(os.getenv("DEEPSEEKER_SESSION_ABS_CEIL", "0"))  # 0 = follow the memory threshold
 # Token budget for the model-generated handoff summary.
 MAX_SUMMARY_TOKENS = int(os.getenv("DEEPSEEKER_MAX_SUMMARY_TOKENS", "4096"))
-# [v77.4/A] 摘要输入封顶：独立于换本线。摘要请求是发给一次性草稿会话的
-# "首条"，走首条快速通道——金丝雀实测 53.9 万 token 单条全量保留
-# （2026-10-28）。封顶放宽到 53 万（预留指令开销 ~400），让"即将被官方
-# 遗忘的那段"（边界实测 ~57.4 万）在换本触发时能完整进摘要，而不是被
-# _cap_parts 静默丢弃。
+# [v77.4/A] Summary input cap: independent of the rollover line. The summary
+# request is the "first message" of a one-off scratch session and rides the
+# first-message fast path — canary measurement kept a single 539K-token
+# message fully intact (2026-10-28). The cap is relaxed to 530K (reserving
+# ~400 for instruction overhead) so the "segment about to be officially
+# forgotten" (boundary measured at ~574K) can enter the summary in full when
+# rollover triggers instead of being silently dropped by _cap_parts.
 SUMMARY_INPUT_TOKENS = int(os.getenv("DEEPSEEKER_MAX_SUMMARY_INPUT_TOKENS", "530000"))
-# [v77.5/B] 接力摘要三件套的尺寸参数：
-# - ROLLOVER_TAIL_TOKENS：换本时"最近原文"保留的 token 预算（原样进新会话
-#   首条，压缩损失不碰它）。设 20 万：新会话首条 = 摘要几 K + 尾巴 20 万，
-#   远低于首条通道实测上限（53.9 万），prefill ~20 秒。
-# - DIGEST_CHUNK_TOKENS：单次消化切片的上限；超过则按消息切块顺序接力
-#   （每块 = 旧摘要 + 块文本 → 更新版摘要），永不硬吞。
+# [v77.5/B] Size parameters for the three-piece relay summary:
+# - ROLLOVER_TAIL_TOKENS: token budget for the "recent verbatim text" kept at
+#   rollover (goes verbatim into the new session's first message; compression
+#   losses never touch it). Set to 200K: the new session's first message =
+#   a few K of summary + a 200K tail, well below the measured first-message
+#   channel limit (539K), prefill ~20s.
+# - DIGEST_CHUNK_TOKENS: cap on a single digest slice; anything larger is
+#   relayed chunk by chunk in message order (each chunk = old summary + chunk
+#   text → updated summary), never swallowed wholesale.
 ROLLOVER_TAIL_TOKENS = int(os.getenv("DEEPSEEKER_ROLLOVER_TAIL_TOKENS", "200000"))
 DIGEST_CHUNK_TOKENS = int(os.getenv("DEEPSEEKER_DIGEST_CHUNK_TOKENS", "250000"))
 
@@ -104,17 +119,18 @@ import hashlib as _hashlib
 import json as _json
 from collections import OrderedDict as _OrderedDict
 
-_CHAIN_WINDOW = 9  # estimate 回看 8 条 + 全量 1 条
+_CHAIN_WINDOW = 9  # estimate looks back 8 + full 1
 _EST_CACHE: " _OrderedDict[str, int]" = _OrderedDict()
 _EST_CACHE_MAX = 4096
 
 
 def _msgs_key(messages) -> str:
-    """[v46] 单遍哈希：先拼成一个 byte 串再哈希一次。
+    """[v46] Single-pass hashing: concatenate into one byte string, hash once.
 
-    旧版对每条消息调用两次 h.update，1500 条消息 = 3000 次 Python 级调用，
-    在 iSH/aarch64 上比整块 sha256 慢 40%（实测 174ms vs 121ms）。
-    分隔符用 \x00 保留边界信息，语义与原版一致。
+    The old version called h.update twice per message; 1500 messages = 3000
+    Python-level calls, ~40% slower on iSH/aarch64 than one bulk sha256
+    (measured 174ms vs 121ms). The \x00 separator preserves boundary
+    information; semantics identical to the original.
     """
     parts = []
     for m in messages:
@@ -127,19 +143,22 @@ def _msgs_key(messages) -> str:
 
 
 def _msgs_chain(messages):
-    """[v47] 链式前缀哈希：一次 O(n) 得到全部前缀的 key。
+    """[v47] Chained prefix hashing: one O(n) pass yields the keys of all prefixes.
 
-    H_i = sha256(H_{i-1} || 0x00 || role || content)，返回 [H_1 .. H_n]。
-    旧实现为了找最长命中前缀，对 messages[:n]、messages[:n-1] ... 各算一次
-    全量 _msgs_key；1500 条历史上全 miss 要跑 9 遍、实测 1660ms。链式做法
-    每条消息只做一次小输入 sha256（一次预处理即可得所有前缀键），实测 ~5ms。
+    H_i = sha256(H_{i-1} || 0x00 || role || content); returns [H_1 .. H_n].
+    To find the longest cached prefix, the old implementation computed a full
+    _msgs_key for messages[:n], messages[:n-1], ...; with 1500 messages an
+    all-miss lookup ran 9 passes, measured 1660ms. The chained approach does
+    one small-input sha256 per message (a single preprocessing pass yields
+    every prefix key), measured ~5ms.
     """
     h = _hashlib.sha256()
     out = []
     n = len(messages)
-    # 只有最后 _CHAIN_WINDOW 个前缀键会被 estimate 用到（它最多回看 8 条），
-    # 前面的消息只喂进哈希、不留快照——1500 条历史上省掉 1491 次
-    # copy+hexdigest（iSH 上每次 ~0.1ms，合计 ~180ms）。
+    # Only the last _CHAIN_WINDOW prefix keys are used by estimate (it looks
+    # back at most 8); earlier messages only feed the hash and get no snapshot
+    # — saves 1491 copy+hexdigest calls on a 1500-message history (~0.1ms each
+    # on iSH, ~180ms in total).
     first_snap = max(0, n - _CHAIN_WINDOW)
     for i, m in enumerate(messages):
         h.update(b"\x00")
@@ -155,8 +174,9 @@ def _msgs_chain(messages):
 def estimate_conversation_tokens_cached(messages):
     """estimate_conversation_tokens with a longest-cached-prefix fast path.
 
-    [v47] 前缀键改用链式哈希一次算出（见 _msgs_chain），不再对每个候选
-    前缀重算全量哈希。命中后只 tokenize 新增的尾部消息。
+    [v47] Prefix keys are now computed in one pass with chained hashing (see
+    _msgs_chain) instead of re-hashing the whole history per candidate prefix.
+    On a hit, only the newly appended tail messages are tokenized.
     """
     n = len(messages)
     if n == 0:
@@ -210,29 +230,37 @@ def needs_rollover(messages, baseline=0, tools=None, creation_total=0):
     ):
         return False
     total = estimate_conversation_tokens_cached(messages)
-    # [v77 DSH 移植] 估算补上客户端可见文本之外、上游会话实际背负的
-    # 部分——工具 schema 块（十几个工具会在上游多占 1-2 万 token，旧
-    # 估算完全看不见）加上系统扩展/交接摘要/每轮指令的固定开销。
-    # 不补的话，估算越过阈值时上游会话早已死亡。
+    # [v77 DSH port] The estimate adds the parts the upstream session really
+    # carries beyond the client-visible text — tool schema blocks (a dozen
+    # tools cost an extra 10-20K tokens upstream, invisible to the old
+    # estimate) plus the fixed overhead of system extensions/handoff
+    # summaries/per-turn instructions. Without this, by the time the estimate
+    # crosses the threshold the upstream session is long dead.
     if tools:
         with contextlib.suppress(TypeError, ValueError):
             total += count_tokens(json.dumps(tools))
     total += PROMPT_OVERHEAD_TOKENS
     if baseline and baseline > 0:
-        # [v77.3 风暴修复] 增长参照点 = creation_total（建会话时客户端历史
-        # 总量）。v77.2 的错误：参照点用 baseline（首条实际 token）——
-        # rollover 摘要会话的 baseline 很小、却"代表"全部旧历史，用小
-        # baseline 减出来的"增长"其实是没进会话的旧历史 → 巨历史任务
-        # 每轮都触发 rollover（生产实证：13:32-14:08 连环 17 次，每
-        # 1.5-2 分钟换一次会话，模型每轮从摘要失忆重读——"读了又读
-        # 不给结果"）。
+        # [v77.3 storm fix] Growth reference point = creation_total (the
+        # client's total history when the session was created). The v77.2
+        # mistake: the reference was baseline (actual first-message tokens) —
+        # a rollover summary session has a tiny baseline yet "represents" all
+        # the old history, so the "growth" computed against that small
+        # baseline was really old history never admitted into the session →
+        # huge-history tasks triggered rollover every turn (production
+        # evidence: 17 rollovers in a row from 13:32-14:08, a new session
+        # every 1.5-2 minutes, the model re-reading from the summary with
+        # amnesia each turn — "reads and reads, never delivers results").
         growth_ref = creation_total if creation_total and creation_total > 0 else baseline
-        # 滑窗遗忘判据：建会话以来的真实新增超过窗口
+        # Sliding-window forgetting criterion: real growth since session
+        # creation exceeds the window
         if (total - growth_ref) > context_window_tokens():
             return True
-        # [v77.2→v77.3 修正] 背负判据：首条实际进上游的量 + 建会话以来
-        # 真实新增 = 上游会话的真实 prefill 负担。rollover 摘要会话的
-        # 负担 ≈ 摘要 + 少量新增，远小于全量 → 不再每轮触发。
+        # [v77.2→v77.3 fix] Burden criterion: what actually entered upstream
+        # in the first message + real growth since creation = the upstream
+        # session's true prefill burden. A rollover summary session's burden
+        # ≈ summary + a little new content, far below the full history → no
+        # longer fires every turn.
         burden = baseline + max(0, total - growth_ref)
         _abs_ceil = SESSION_ABS_CEIL or context_window_tokens()
         if burden > _abs_ceil:
@@ -252,8 +280,10 @@ def needs_rollover(messages, baseline=0, tools=None, creation_total=0):
 
 
 RESUME_NOTICE = (
-    "[上下文说明] 上一条回复因故中断，未完整送达。历史记录中此前的一切指令与任务"
-    "均视为已中止：不要继续、不要询问差异。请直接执行下面这条最新指令——它是唯一的当前任务。\n\n"
+    "[CONTEXT NOTICE] The previous reply was interrupted and not fully delivered. All prior "
+    "instructions and tasks in the history are considered aborted: do not continue them, do not "
+    "ask about the differences. Execute the latest instruction below directly — it is the only "
+    "current task.\n\n"
 )
 
 
@@ -326,10 +356,11 @@ SUMMARY_INSTRUCTION = (
 )
 
 
-# [v77 PR#72 移植] DeepSeek 网页端只有一个思考开关（DeepThink 开/关），
-# medium 以上的 effort 只能用"要求更多推理"来近似；实测思考时长
-# ~1.1-2.4 倍。"high" 不给指令：agent 会话里它让推理长度暴涨
-# （中位 452 -> 7401 字符），长推理会撞上 DeepSeek 的截断（INCOMPLETE）。
+# [v77 PR#72 port] The DeepSeek web UI has only one thinking switch (DeepThink
+# on/off); effort above medium can only be approximated by "asking for more
+# reasoning"; measured thinking time ~1.1-2.4x. "high" gets no instruction:
+# in agent sessions it makes reasoning length explode (median 452 -> 7401
+# chars), and long reasoning hits DeepSeek's truncation (INCOMPLETE).
 EFFORT_INSTRUCTIONS = {
     "max": (
         "[REASONING EFFORT: max] Before answering, reason exhaustively in your thinking: try at least two "
@@ -351,8 +382,9 @@ def _with_effort(prompt):
 def build_summary_request_prompt(messages):
     """Prompt that asks the model for the handoff summary of the conversation."""
     convo = _messages_plain_text(messages)
-    # [v77.4/A] 封顶从换本线（49.6万）放宽到首条实测安全值 53 万：
-    # 超出换本线的最老部分不再被静默丢弃，而是进入摘要。
+    # [v77.4/A] The cap is relaxed from the rollover line (496K) to the
+    # measured first-message safe value of 530K: the oldest portion beyond the
+    # rollover line now enters the summary instead of being silently dropped.
     convo, _ = _cap_parts(convo.split("\n\n"), SUMMARY_INPUT_TOKENS)
     return (
         "[SYSTEM]\n" + SUMMARY_INSTRUCTION + "\n\n"
@@ -403,16 +435,20 @@ def build_summary_seed_prompt(summary, current_user_message=""):
 
 
 def build_rolling_digest_prompt(old_summary, new_content, has_old=True):
-    """[v77.5/B] 接力摘要提示词：旧累计摘要 + 新切片 → 更新版续接笔记。
+    """[v77.5/B] Relay summary prompt: old accumulated summary + new slice →
+    updated continuation note.
 
-    摘要的是"新增内容"（old_summary 已代代保住旧内容），合并时要求保留
-    旧摘要中仍然相关的硬信息（目标/决定/数字/路径）。
+    What gets summarized is the "new content" (old_summary already preserves
+    older content across generations); the merge is required to keep the hard
+    information from the old summary that is still relevant (goals/decisions/
+    numbers/paths).
     """
     old_block = ""
     if has_old and old_summary:
         old_block = (
             "[ACCUMULATED SUMMARY SO FAR]\n" + old_summary.strip() + "\n\n"
-            "（以上是此前对话的累计摘要，其中的关键信息必须继续保留。）\n\n"
+            "(The above is the accumulated summary of the conversation so far; its key "
+            "information must continue to be preserved.)\n\n"
         )
     return (
         "[SYSTEM]\n" + SUMMARY_INSTRUCTION + "\n\n"
@@ -423,32 +459,34 @@ def build_rolling_digest_prompt(old_summary, new_content, has_old=True):
 
 
 def messages_plain_text(messages):
-    """公开包装：对话的纯文本表示（摘要/切片的统一输入形态）。"""
+    """Public wrapper: plain-text form of the conversation (unified input shape for summaries/slices)."""
     return _messages_plain_text(messages)
 
 
 def compute_rollover_split(messages, marker=0.0, tail_budget=None):
-    """[v77.5/B] 把客户端历史切成（待消化切片, 原文尾巴）。
+    """[v77.5/B] Split the client history into (slice to digest, verbatim tail).
 
-    - tail：从最新消息向前累计不超过 tail_budget 的最近消息（0.9 安全系数
-      由调用方折算，防止渲染时被 _cap_parts 再裁造成缝隙）；
-    - slice：[已消化 marker, 尾巴起点) 之间的消息——接力摘要本次要消化的
-      增量；marker 定位用同一估算口径，跨过 marker 的第一条消息并入切片
-      （宁可多摘要，不可漏）；
-    - 返回 (slice_msgs, tail_msgs, per_msg_sizes, total_tokens)。
+    - tail: the most recent messages accumulated backward from the newest,
+      not exceeding tail_budget (the 0.9 safety factor is applied by the
+      caller, preventing gaps if _cap_parts trims again at render time);
+    - slice: messages between [digested marker, tail start) — the increment
+      the relay summary digests this round; marker placement uses the same
+      estimation basis, and the first message crossing the marker is included
+      in the slice (prefer over-summarizing to missing anything);
+    - returns (slice_msgs, tail_msgs, per_msg_sizes, total_tokens).
     """
     if tail_budget is None:
         tail_budget = ROLLOVER_TAIL_TOKENS
     plains = [_messages_plain_text([m]) for m in messages]
     sizes = [count_tokens(p) for p in plains]
     total = sum(sizes)
-    # 尾部：从尾部向前累计
+    # Tail: accumulate backward from the end
     tail_start = len(messages)
     acc = 0
     while tail_start > 0 and acc + sizes[tail_start - 1] <= tail_budget:
         acc += sizes[tail_start - 1]
         tail_start -= 1
-    # 切片起点：跨过 marker 的第一条消息
+    # Slice start: the first message crossing the marker
     slice_start = len(messages)
     acc2 = 0
     for i, sz in enumerate(sizes):
@@ -464,9 +502,11 @@ def compute_rollover_split(messages, marker=0.0, tail_budget=None):
 
 
 def chunk_messages(msgs, chunk_tokens):
-    """[v77.5/B] 按消息边界把列表切成每块 ≤ chunk_tokens 的连续块。
+    """[v77.5/B] Split the list at message boundaries into consecutive chunks of
+    at most chunk_tokens each.
 
-    单条消息超限（罕见）时自成一块——消化提示词走首条通道，可承受。
+    An oversized single message (rare) forms its own chunk — the digest prompt
+    rides the first-message channel and can absorb it.
     """
     chunks, cur, cur_sz = [], [], 0
     for m in msgs:
@@ -482,18 +522,21 @@ def chunk_messages(msgs, chunk_tokens):
 
 
 def render_history_tail(tail_msgs, cap_tokens):
-    """[v77.5/B] 渲染最近原文尾巴（新会话首条用），保尾裁头。
+    """[v77.5/B] Render the recent verbatim tail (for the new session's first
+    message), keeping the tail and trimming the head.
 
-    末条（最新用户消息）不在此渲染——build_prompt 的 [USER] 段单独呈现，
-    避免重复。assistant 的 tool_calls 渲染进正文（v65 串线根治语义），
-    tool/system 消息跳过（结果由 [TOOL RESULTS] 段呈现）。
+    The last message (latest user message) is not rendered here — it is shown
+    separately by build_prompt's [USER] section to avoid duplication. An
+    assistant's tool_calls are rendered into the body (v65 cross-talk fix
+    semantics); tool/system messages are skipped (their results appear in the
+    [TOOL RESULTS] section).
     """
     parts = []
     for msg in tail_msgs[:-1]:
         role = msg.get("role", "unknown")
         if role in ("system", "tool"):
             continue
-        # [v77.8] 伪 user 工具结果不进历史尾巴（由 [TOOL RESULTS] 统一呈现）
+        # [v77.8] Pseudo user tool results are excluded from the history tail (presented uniformly via [TOOL RESULTS])
         if role == "user" and _pseudo_tool_result_info(msg):
             continue
         content = _render_msg_content(msg, is_assistant=(role == "assistant"))
@@ -527,17 +570,17 @@ async def extract_system(messages):
     return None
 
 
-_TOOL_RULES = """【工具调用铁律】
-1. 调用任何工具前，逐项核对：所有标注 [必填] 的参数都已填入具体的、非空的值。
-2. 绝对禁止输出参数为空、缺失或只填空字符串的调用——这类调用会被直接拒绝，任务失败。
-3. 若无法确定某个必填参数的值，先用文字向用户询问，不要输出空参数的调用。
-4. 正确示例：<tool_call>{"name": "web_search", "arguments": {"query": "2026年油价"}}</tool_call>（query 填了具体值）
-   禁止示例：<tool_call>{"name": "web_search", "arguments": {}}</tool_call> 或 {"query": ""}（参数空，会被拒绝）
+_TOOL_RULES = """【TOOL CALL RULES】
+1. Before calling any tool, verify item by item: every parameter marked [required] has been filled with a concrete, non-empty value.
+2. It is strictly forbidden to emit calls whose parameters are empty, missing, or filled only with empty strings — such calls are rejected outright and the task fails.
+3. If you cannot determine the value of a required parameter, ask the user in words first; do not emit a call with empty parameters.
+4. Correct example: <tool_call>{"name": "web_search", "arguments": {"query": "2026 fuel prices"}}</tool_call> (query filled with a concrete value)
+   Forbidden example: <tool_call>{"name": "web_search", "arguments": {}}</tool_call> or {"query": ""} (empty parameters, will be rejected)
 """
 
 
 def _render_tool_block(name, desc, params):
-    """把单个工具 schema 渲染成带必填标注的说明（比裸 JSON 对模型友好）。"""
+    """Render a single tool schema into an annotated description with required-parameter marks (more model-friendly than raw JSON)."""
     params = params or {}
     props = params.get("properties", {}) or {}
     required = params.get("required", []) or []
@@ -550,7 +593,7 @@ def _render_tool_block(name, desc, params):
                 pdesc = str(pinfo.get("description", ""))[:120]
             else:
                 ptype, pdesc = "any", str(pinfo)[:120]
-            mark = " [必填]" if pname in required else " [可选]"
+            mark = " [required]" if pname in required else " [optional]"
             lines.append(f"  - {pname} ({ptype}){mark}: {pdesc}")
     lines.append(f"Parameters JSON Schema: {json.dumps(params)}")
     return "\n".join(lines)
@@ -583,10 +626,13 @@ async def extract_tools(tools):
 
 
 def _render_tool_calls_block(tool_calls):
-    """把 assistant 的 tool_calls 渲染成模型熟悉的 <tool_call>{...}</tool_call> 格式。
+    """Render an assistant's tool_calls into the model-familiar
+    <tool_call>{...}</tool_call> format.
 
-    [v65] 串线根治专用。格式与 canonicalize_messages 内部渲染一致（sort_keys），
-    但这里是独立函数：canonicalize 的输出参与会话签名计算，一个字节都不能动。
+    [v65] Dedicated to the cross-talk fix. The format matches the internal
+    rendering in canonicalize_messages (sort_keys), but this is a separate
+    function: canonicalize's output participates in the conversation signature
+    computation and must not change by a single byte.
     """
     parts = []
     for tc in tool_calls or []:
@@ -605,12 +651,14 @@ def _render_tool_calls_block(tool_calls):
 
 
 def _index_tool_calls(messages):
-    """建 call_id -> (name, arguments) 索引。
+    """Build a call_id -> (name, arguments) index.
 
-    [v65] 串线根治：tool 消息只带结果、不带命令；命令在 assistant 消息的
-    tool_calls 字段（OpenAI 格式）或 content 的 tool_use 块（Anthropic 格式）里。
-    没有这个索引，模型看到的结果就是"来源不明"的——它只能猜哪个结果对应哪条
-    命令，猜错就是用户看到的"串线"。
+    [v65] Cross-talk fix: tool messages carry only results, not commands;
+    commands live in the assistant message's tool_calls field (OpenAI format)
+    or in content's tool_use blocks (Anthropic format). Without this index,
+    every result the model sees is "of unknown origin" — it can only guess
+    which result matches which command, and a wrong guess is the "cross-talk"
+    the user sees.
     """
     index = {}
     for m in messages:
@@ -639,11 +687,13 @@ def _index_tool_calls(messages):
 
 
 def _render_msg_content(msg, is_assistant=False):
-    """渲染一条消息的可见内容。
+    """Render the visible content of one message.
 
-    [v65] 串线根治：assistant 的命令在 tool_calls 字段里，不在 content 里。
-    旧代码只渲染 content 文本 → 纯工具调用的 assistant 消息整条从历史里消失，
-    模型随后在 [TOOL RESULTS] 里看到一堆没有命令的结果，只能猜对应关系。
+    [v65] Cross-talk fix: an assistant's commands live in the tool_calls field,
+    not in content. The old code rendered only content text → an assistant
+    message that was a pure tool call vanished from the history entirely, and
+    the model then saw results without commands in [TOOL RESULTS] and could
+    only guess the mapping.
     """
     content = msg.get("content", "")
     parts = []
@@ -664,11 +714,14 @@ def _render_msg_content(msg, is_assistant=False):
     return "\n".join(parts)
 
 
-# [v77.8] 伪 user 工具结果识别：部分客户端不按 OpenAI 规范用 role=tool 回传
-# 结果，而是把结果文本塞进 role=user 消息。生产实证（2026-10-28 会话
-# bcda0272，flash 模型 20+ 轮重试风暴）：模型 think 自述 "The user's latest
-# turn is actually a tool result"——结果进了 [USER] 段、[TOOL RESULTS] 缺条目，
-# 模型判定"调用了 N 条、结果少一条 → 结果没送达"，无限重试同一操作。
+# [v77.8] Pseudo user tool-result detection: some clients do not return results
+# with role=tool per the OpenAI spec; instead they stuff the result text into a
+# role=user message. Production evidence (2026-10-28 session bcda0272, flash
+# model, 20+ rounds of retry storm): the model's think said "The user's latest
+# turn is actually a tool result" — the result landed in the [USER] section,
+# [TOOL RESULTS] was missing an entry, and the model concluded "N calls made,
+# one result short → result not delivered", retrying the same operation
+# forever.
 _PSEUDO_TOOL_RESULT_RE = re.compile(
     r"^\s*(?:<tool_result\b[^>]*>|\[tool[_ ]result\]|tool[_ ]result\s*[:：])",
     re.IGNORECASE,
@@ -676,11 +729,13 @@ _PSEUDO_TOOL_RESULT_RE = re.compile(
 
 
 def _pseudo_tool_result_info(msg):
-    """若 msg 是伪 user 工具结果，返回 (tool_call_id 或 '', 文本)；否则 None。
+    """If msg is a pseudo user tool result, return (tool_call_id or '', text);
+    otherwise None.
 
-    判定特征（保守，防误伤真实用户消息）：
-    1. 文本以 <tool_result…> / [Tool Result] / [tool_result] / Tool result: 开头
-    2. 文本内含 "tool_call_id" 字段（JSON 形态回传）
+    Detection traits (conservative, to avoid hitting real user messages):
+    1. Text starts with <tool_result…> / [Tool Result] / [tool_result] /
+       Tool result:
+    2. Text contains a "tool_call_id" field (JSON-shaped return)
     """
     if msg.get("role") != "user":
         return None
@@ -712,8 +767,9 @@ async def extract_tool_results(messages, latest_only=False):
                 break
         if last_ast_idx != -1:
             target_messages = messages[last_ast_idx + 1:]
-    # [v65] 索引建在全量 messages 上：latest_only 窗口之外的 assistant 也可能
-    # 携带窗口内结果的命令。建全量零成本，且防漏。
+    # [v65] The index is built over the full messages: assistants outside the
+    # latest_only window may still carry the commands for results inside it.
+    # Building over everything costs nothing and prevents misses.
     call_index = _index_tool_calls(messages)
     tools_final = []
     for i in target_messages:
@@ -724,9 +780,12 @@ async def extract_tool_results(messages, latest_only=False):
             if isinstance(content, list):
                 content = " ".join(c.get("text", "") for c in content if isinstance(c, dict) and c.get("type") == "text")
         else:
-            # [v77.8] 伪 user 工具结果收编：客户端把结果塞进 user 消息时旧逻辑
-            # 完全收不到 → [TOOL RESULTS] 缺条目、结果凭空消失，模型判定"结果
-            # 没送达"并无限重试同一操作。收编后调用数与结果数重新对齐。
+            # [v77.8] Pseudo user tool-result absorption: when a client stuffs
+            # a result into a user message, the old logic caught nothing →
+            # [TOOL RESULTS] missing an entry, the result vanishing into thin
+            # air, the model concluding "result not delivered" and retrying
+            # the same operation forever. After absorption, the call count and
+            # result count realign.
             pseudo = _pseudo_tool_result_info(i)
             if not pseudo:
                 continue
@@ -738,8 +797,9 @@ async def extract_tool_results(messages, latest_only=False):
         title = ""
         if hit:
             cmd_name, cmd_args = hit
-            # [v70] 回显模型自己起的调用标题（tool_title）：自己起的名字
-            # 是最强的认领锚点——比 JSON 更不容易认错自己的调用。
+            # [v70] Echo the model's own call title (tool_title): a self-chosen
+            # name is the strongest ownership anchor — harder to misattribute
+            # one's own call than the JSON.
             if isinstance(cmd_args, dict):
                 t = str(cmd_args.get("tool_title") or "").strip()
                 if t:
@@ -747,18 +807,21 @@ async def extract_tool_results(messages, latest_only=False):
             cmd_json = json.dumps({"arguments": cmd_args, "name": cmd_name}, sort_keys=True)
             block += f"\nCommand: <tool_call>{cmd_json}</tool_call>"
         if title:
-            block += f"\nTitle: 你将这次调用命名为「{title}」"
+            block += f"\nTitle: You named this call '{title}'"
         block += f"\nResult: {content}"
         tools_final.append(block)
     if not tools_final:
         return None
-    # [v69] 对账单：官方 API 里结果↔调用靠 tool_call_id 结构化绑定（查表）；
-    # 我们的文本通道里只能靠模型阅读配对。给每条结果编号并声明总数，把
-    # "阅读理解"降级为"数数"——生产取证（2026-10-25 会话 a83aad65）中模型
-    # 连发两个调用后把自己的调用记混、误报"串线"，此为最小成本的压制手段。
+    # [v69] Reconciliation statement: in the official API, results↔calls are
+    # structurally bound via tool_call_id (a table lookup); in our text channel
+    # pairing can only come from the model reading. Number each result and
+    # declare the total, downgrading "reading comprehension" to "counting" —
+    # production forensics (2026-10-25 session a83aad65) showed the model
+    # issuing two calls in a row, mixing up its own calls, and falsely
+    # reporting "cross-talk"; this is the lowest-cost suppression.
     n = len(tools_final)
-    count_line = f"[共 {n} 条结果，按发出顺序对应最近的 {n} 次调用，一一对应]"
-    numbered = [f"[结果 {i + 1}/{n}]\n{b}" for i, b in enumerate(tools_final)]
+    count_line = f"[{n} results in total, matching the most recent {n} calls one-to-one in the order sent]"
+    numbered = [f"[Result {i + 1}/{n}]\n{b}" for i, b in enumerate(tools_final)]
     return count_line + "\n" + "\n\n".join(numbered)
 
 
@@ -884,14 +947,18 @@ async def extract_and_upload_files(messages, auth_token, last_user_only=False):
 async def extract_user_msg(messages):
     for i in messages[::-1]:
         if i.get("role") == "user":
-            # [v77.8] 伪 user 工具结果跳过。
-            # [v77.9] 修正 v77.8 的回归：v77.8 在遇到伪结果时直接返回空——
-            # 但 v71 的 [CURRENT TASK] 任务锚点恰恰取自本函数，而锚点唯一
-            # 需要生效的场景（工具结果轮）里最新 user 就是伪结果 → 锚点被
-            # 清空 → 模型失去任务延续感，每轮把输入当"用户新请求"重新解读
-            # （生产取证 10-28 会话 4b7dd282/cf7fc0e0：think 全部以"用户
-            # 截图显示/用户反馈/The user wants"开头）。正确语义是跳过伪
-            # 结果继续前翻，返回最近的真实用户指令。
+            # [v77.8] Skip pseudo user tool results.
+            # [v77.9] Fixes the v77.8 regression: v77.8 returned empty on
+            # hitting a pseudo result — but v71's [CURRENT TASK] anchor is
+            # taken from exactly this function, and in the only scenario where
+            # the anchor must work (tool-result turns) the latest user message
+            # IS the pseudo result → the anchor was wiped → the model lost its
+            # sense of task continuity and reinterpreted the input as a "new
+            # user request" every turn (production forensics, 10-28 sessions
+            # 4b7dd282/cf7fc0e0: every think opened with "the user's screenshot
+            # shows / user feedback / The user wants"). The correct semantics
+            # are to skip the pseudo result, keep scanning backward, and
+            # return the most recent genuine user instruction.
             if _pseudo_tool_result_info(i):
                 continue
             content = i.get("content")
@@ -910,10 +977,12 @@ async def extract_user_msg(messages):
 def _trim_to_budget(text, max_tokens):
     """Hard-trim text to fit a token budget, keeping the tail (newest content).
 
-    [v77.4] 旧实现按 "~4 chars/token" 的英文启发式起砍再对半折——对中文
-    密集文本（~1 字/token）一次就砍到目标的 ~50-60%（实测 53 万预算只
-    装下 31.8 万）。改为：用尾部 2 万字符的实测比值估初始切口，一般
-    1-2 次编码即收敛；不足时按比例回填一次。
+    [v77.4] The old implementation started from an English "~4 chars/token"
+    heuristic and bisected — on CJK-dense text (~1 char/token) one pass cut to
+    only ~50-60% of target (measured: a 530K budget held just 318K). Now: the
+    initial cut is estimated from the measured ratio of the trailing 20K
+    characters, usually converging in 1-2 encodes; if short, one proportional
+    refill pass is applied.
     """
     if count_tokens(text) <= max_tokens:
         return text
@@ -925,7 +994,7 @@ def _trim_to_budget(text, max_tokens):
         candidate = text[-max_chars:].lstrip()
         n = count_tokens(candidate)
         if n <= max_tokens:
-            # 回填：余量超过 5% 时按实测比值放大一档
+            # Refill: if headroom exceeds 5%, grow one step by the measured ratio
             if n < max_tokens * 0.95 and max_chars < len(text):
                 grow = int(max_chars * max_tokens / max(n, 1))
                 cand2 = text[-min(grow, len(text)):].lstrip()
@@ -1044,8 +1113,9 @@ _SIG_CACHE_MAX = 4096
 
 
 def _sig_cache_put(messages, model, scope, sig, key=None):
-    # [v46] key 可由调用方传入：旧版在这里对同一份历史算两次 _msgs_key，
-    # 一次缓存未命中就要付 3 遍全量哈希（本函数 2 遍 + 调用方 1 遍）。
+    # [v46] The key may be passed in by the caller: the old version computed
+    # _msgs_key twice over the same history here, so a single cache miss paid
+    # for 3 full hashes (2 here + 1 in the caller).
     if key is None:
         key = _msgs_key(messages) + f"|{model}|{scope}"
     _SIG_CACHE[key] = sig
@@ -1067,7 +1137,7 @@ def generate_signature_cached(messages, model, scope=""):
         _SIG_CACHE.move_to_end(key)
         return cached
     sig = generate_signature_sync(messages, model, scope)
-    # trunc 与 key 的对应关系上面已经算过，直接复用，不再重算哈希
+    # The trunc/key correspondence was already computed above; reuse it instead of re-hashing
     _sig_cache_put(trunc, model, scope, sig, key=key)
     return sig
 
@@ -1088,19 +1158,19 @@ async def build_prompt(messages, tools, model, is_first_message=False, rollover_
         final_prompt = await append_fresh_session_runtime(final_prompt, messages, tools_extract)
         if rollover_summary:
             final_prompt += build_summary_seed_prompt(rollover_summary)
-        # [v77.5/B] 最近原文尾巴：压缩损失不碰最新上下文
+        # [v77.5/B] Recent verbatim tail: compression losses never touch the newest context
         if rollover_tail_text:
             final_prompt += "[PREVIOUS CONVERSATION HISTORY]\n" + rollover_tail_text + "\n\n"
         relevant_tool_results = await extract_tool_results(messages, latest_only=True)
         if relevant_tool_results:
             relevant_tool_results = _capped_text(relevant_tool_results, MAX_TOOL_RESULTS_TOKENS, "[... earlier tool results truncated ...]")
-            final_prompt += f"[TOOL RESULTS]（以下是你最近一次工具调用的返回结果，每条 Result 上方的 Command 就是引发它的调用原文，结果与命令一一对应）\n{relevant_tool_results}\n\n"
+            final_prompt += f"[TOOL RESULTS] (Below are the return values of your most recent tool calls; the Command above each Result is the exact call that produced it — results and commands correspond one-to-one)\n{relevant_tool_results}\n\n"
         user_msg = await extract_user_msg(messages)
         if user_msg:
-            # [v77 DSH 移植] 最新用户消息硬上限（rollover 分支）
+            # [v77 DSH port] Hard cap on the latest user message (rollover branch)
             user_msg = _trim_to_budget(user_msg, MAX_USER_MESSAGE_TOKENS)
             final_prompt += f"[USER]\n{user_msg}\n\n"
-        # [v77 PR#72 移植] effort 档位映射（rollover 分支返回前）
+        # [v77 PR#72 port] Effort-level mapping (before returning in the rollover branch)
         return _with_effort(final_prompt.strip() + "\n\n")
     if is_first_message:
         final_prompt = await append_fresh_session_runtime(final_prompt, messages, tools_extract)
@@ -1111,12 +1181,15 @@ async def build_prompt(messages, tools, model, is_first_message=False, rollover_
                 role = msg.get("role", "unknown")
                 if role in ("system", "tool"):
                     continue
-                # [v77.8] 伪 user 工具结果不进 HISTORY（由 [TOOL RESULTS] 统一呈现）
+                # [v77.8] Pseudo user tool results are excluded from HISTORY (presented uniformly via [TOOL RESULTS])
                 if role == "user" and _pseudo_tool_result_info(msg):
                     continue
-                # [v65] 串线根治：assistant 的命令在 tool_calls 字段里，必须渲染进
-                # 历史；否则纯工具调用的 assistant 消息整条消失，[TOOL RESULTS] 里
-                # 的结果全部变成"来源不明"，模型只能猜对应关系——猜错即串线。
+                # [v65] Cross-talk fix: an assistant's commands live in the
+                # tool_calls field and must be rendered into the history;
+                # otherwise an assistant message that was a pure tool call
+                # vanishes entirely and every result in [TOOL RESULTS] becomes
+                # "of unknown origin" — the model can only guess the mapping,
+                # and a wrong guess is cross-talk.
                 content = _render_msg_content(msg, is_assistant=(role == "assistant"))
                 if content:
                     history_parts.append(f"{role.upper()}: {content}")
@@ -1129,12 +1202,12 @@ async def build_prompt(messages, tools, model, is_first_message=False, rollover_
         tools_result_extract = await extract_tool_results(messages, latest_only=False)
         if tools_result_extract:
             tools_result_extract = _capped_text(tools_result_extract, MAX_TOOL_RESULTS_TOKENS, "[... earlier tool results truncated ...]")
-            # [v68] 首条路径打包的是全部历史结果，用"历史"措辞
-            final_prompt += f"[TOOL RESULTS]（以下是本轮对话中的历史工具调用结果，每条 Result 上方的 Command 就是引发它的调用原文，结果与命令一一对应）\n{tools_result_extract}\n\n"
+            # [v68] The first-message path packs all historical results; use "historical" wording
+            final_prompt += f"[TOOL RESULTS] (Below are the historical tool call results from this conversation; the Command above each Result is the exact call that produced it — results and commands correspond one-to-one)\n{tools_result_extract}\n\n"
 
         user_msg = await extract_user_msg(messages)
         if user_msg:
-            # [v77 DSH 移植] 最新用户消息硬上限（首条路径）
+            # [v77 DSH port] Hard cap on the latest user message (first-message path)
             user_msg = _trim_to_budget(user_msg, MAX_USER_MESSAGE_TOKENS)
             final_prompt += f"[USER]\n{user_msg}\n\n"
     else:
@@ -1145,31 +1218,41 @@ async def build_prompt(messages, tools, model, is_first_message=False, rollover_
                 break
 
         trailing_messages = messages[last_ast_idx + 1:] if last_ast_idx != -1 else [messages[-1]]
-        # [v71] 纯工具结果轮的任务锚点。生产取证（2026-10-25 会话 ae65e2aa）：
-        # 用户要求加金手指、模型干到一半，随后的纯工具结果轮里没有任何用户
-        # 文本，模型只能去上游会话历史里"考古"判断当前任务——数小时的旧叙事
-        # （基准结论）淹没了 30 秒前的指令，它挖出旧消息当作"用户最后的话"，
-        # 判定"金手指是我自作主张"并删掉，反复回到旧结论。官方 API 无此病：
-        # 用户指令永远结构化地留在每轮重放的消息列表里。对策：纯工具轮把
-        # 用户最新的真实指令作为 [CURRENT TASK] 锚点放进 prompt 最前面。
+        # [v71] Task anchor for pure tool-result turns. Production forensics
+        # (2026-10-25 session ae65e2aa): the user asked for a cheat feature and
+        # the model was halfway through; the following pure tool-result turn
+        # contained no user text, so the model could only "excavate" the
+        # upstream session history to judge the current task — hours of old
+        # narrative (baseline conclusions) drowned out an instruction from 30
+        # seconds earlier; it dug up an old message as "the user's last words",
+        # decided "the cheat was my own initiative" and deleted it, repeatedly
+        # falling back to the old conclusion. The official API has no such
+        # disease: user instructions always remain structurally in the
+        # replayed message list each turn. Countermeasure: in pure tool turns,
+        # put the user's latest genuine instruction at the very front of the
+        # prompt as the [CURRENT TASK] anchor.
         task_anchor = ""
-        # [v77.8] 伪 user 工具结果不算"有用户消息"——否则 v71 任务锚点被伪结果
-        # 误关，且下面的 [USER] 段会把结果原文当用户输入呈现。
+        # [v77.8] A pseudo user tool result does not count as "having a user
+        # message" — otherwise the v71 task anchor is wrongly disabled by a
+        # pseudo result, and the [USER] section below would present the raw
+        # result as user input.
         if not any(m.get("role") == "user" and not _pseudo_tool_result_info(m) for m in trailing_messages):
             user_msg = await extract_user_msg(messages)
             if user_msg:
-                task_anchor = "[CURRENT TASK]（你正在执行的用户最新指令；下方工具结果都是为它服务的，与历史结论无关）\n" + _trim_to_budget(user_msg.strip(), 600) + "\n\n"
+                task_anchor = "[CURRENT TASK] (This is the user's latest instruction you are executing; the tool results below all serve it and are unrelated to conclusions from history)\n" + _trim_to_budget(user_msg.strip(), 600) + "\n\n"
         tools_result_extract = await extract_tool_results(messages, latest_only=True)
         if tools_result_extract:
             tools_result_extract = _capped_text(tools_result_extract, MAX_TOOL_RESULTS_TOKENS, "[... earlier tool results truncated ...]")
-            # [v68] 自描述头：生产取证（2026-10-25 会话 a83aad65）证明结果与命令
-            # 一一对应，但模型把自己的两次调用记混后归因"通道串线"。加一句锚点
-            # 说明，降低误报率。
-            final_prompt += task_anchor + f"[TOOL RESULTS]（以下是你最近一次工具调用的返回结果，每条 Result 上方的 Command 与 Title 就是引发它的调用原文，结果与命令一一对应，不存在串线。若某条结果与预期不符，先核对该条的 Title 与 Command——那确认是你自己发起的调用——再调整调用参数本身）\n{tools_result_extract}\n\n"
+            # [v68] Self-describing header: production forensics (2026-10-25
+            # session a83aad65) proved results and commands correspond
+            # one-to-one, but the model mixed up its own two calls and blamed
+            # "channel cross-talk". Adding one anchoring sentence reduces the
+            # false-positive rate.
+            final_prompt += task_anchor + f"[TOOL RESULTS] (Below are the return values of your most recent tool calls; the Command and Title above each Result are the exact calls that produced them — results and commands correspond one-to-one, with no cross-talk. If a result does not match expectations, first check that entry's Title and Command — confirming it is a call you yourself initiated — then adjust the call parameters themselves)\n{tools_result_extract}\n\n"
 
         trailing_user_parts = []
         for m in trailing_messages:
-            # [v77.8] 伪 user 工具结果不进 [USER] 段（已在 [TOOL RESULTS] 呈现）
+            # [v77.8] Pseudo user tool results are excluded from the [USER] section (already presented in [TOOL RESULTS])
             if m.get("role") == "user" and not _pseudo_tool_result_info(m):
                 c = m.get("content", "")
                 if isinstance(c, str) and c:
@@ -1180,7 +1263,7 @@ async def build_prompt(messages, tools, model, is_first_message=False, rollover_
                         trailing_user_parts.append(txt)
 
         if trailing_user_parts:
-            # [v77 DSH 移植] 最新用户消息硬上限（续话路径）
+            # [v77 DSH port] Hard cap on the latest user message (continuation path)
             _user_blob = _trim_to_budget(chr(10).join(trailing_user_parts), MAX_USER_MESSAGE_TOKENS)
             final_prompt += f"[USER]\n{_user_blob}\n\n"
         elif not tools_result_extract:
@@ -1191,5 +1274,5 @@ async def build_prompt(messages, tools, model, is_first_message=False, rollover_
         if tools_extract:
             final_prompt += TOOL_USE_INSTRUCTIONS + "\n"
 
-    # [v77 PR#72 移植] effort 档位映射
+    # [v77 PR#72 port] Effort-level mapping
     return _with_effort(final_prompt)

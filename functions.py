@@ -74,11 +74,13 @@ _DB_TLS = threading.local()
 
 
 class _PooledConn:
-    """SQLite 连接句柄（线程内复用）。
+    """SQLite connection handle (reused within a thread).
 
-    get_db() 原先每次调用都 sqlite3.connect() 再跑一次 PRAGMA journal_mode，
-    慢 CPU 上单次约 15ms，而一个请求会调 6~10 次。现在连接按线程复用，
-    close() 只归还句柄不真正关闭，对调用方语义不变。
+    get_db() used to call sqlite3.connect() and run PRAGMA journal_mode on
+    every call — roughly 15ms each on slow CPUs, and a single request calls
+    it 6-10 times. Connections are now reused per thread; close() just
+    returns the handle to the pool without actually closing it, so the
+    caller-visible semantics are unchanged.
     """
     __slots__ = ("_conn",)
 
@@ -98,11 +100,14 @@ class _PooledConn:
 
 def get_db():
     conn = getattr(_DB_TLS, "conn", None)
-    # [v57 新修] 连接按 (_db 路径, 线程) 双键缓存。v46 原版只按线程缓存，
-    # _db 一旦被换过（测试夹具 functions._db = tmp/xxx.db、未来的多库/
-    # 迁移场景），池子会把旧库的句柄当新库的返回——init_db 也在旧库上
-    # 建表，新路径永远空，后续读写全部落错库，且没有任何报错。
-    # 生产环境 _db 启动后不变，多一次字符串比较没有可测开销。
+    # [v57 fix] Connections are cached with a composite key (db path, thread).
+    # The v46 original cached by thread only: if _db were ever swapped (test
+    # fixtures like functions._db = tmp/xxx.db, or future multi-DB/migration
+    # scenarios), the pool would hand back handles belonging to the old DB —
+    # init_db would create tables in the old DB too, the new path would stay
+    # empty forever, and every subsequent read/write would silently land in
+    # the wrong database. In production _db never changes after startup, so
+    # the extra string comparison has no measurable cost.
     if conn is None or getattr(_DB_TLS, "db_key", None) != _db:
         if conn is not None:
             try:
@@ -160,13 +165,15 @@ def init_db():
         conn.execute("ALTER TABLE tokens ADD COLUMN rate_limited_until REAL")
     if "last_used" not in existing_cols:
         conn.execute("ALTER TABLE tokens ADD COLUMN last_used REAL")
-    # [v77 P0-3 移植] 连续 403 计数：中间无成功轮的 403 次数。
-    # mark_active() 与 restore_token() 归零。
-    # [v77.3] rollover 风暴修复：记录"建会话时的客户端历史总量"，
-    # 增长参照点从 baseline（首条实际 token）改为它——rollover 摘要会话的
-    # baseline 很小但代表全部旧历史，用 baseline 当参照会把没进会话的
-    # 旧历史全算成"增长"，导致每轮都触发 rollover（生产实证 2026-10-27
-    # 13:32-14:08：17 次连环 rollover，每 1.5-2 分钟一次）。
+    # [v77 P0-3 port] Consecutive-403 counter: number of 403s with no
+    # successful turn in between. Reset by mark_active() and restore_token().
+    # [v77.3] rollover storm fix: record "the client-side total history at
+    # session creation" and use it as the growth reference instead of
+    # baseline (the first real token). A rollover-summary session has a tiny
+    # baseline that represents all the old history; using baseline as the
+    # reference counts history that never entered the session as "growth",
+    # triggering a rollover every turn (confirmed in production 2026-10-27
+    # 13:32-14:08: 17 consecutive rollovers, one every 1.5-2 minutes).
     existing_cm_cols = {
         row[1] for row in conn.execute("PRAGMA table_info(chat_memory)").fetchall()
     }
@@ -174,8 +181,9 @@ def init_db():
         conn.execute(
             "ALTER TABLE chat_memory ADD COLUMN creation_total REAL NOT NULL DEFAULT 0"
         )
-    # [v77.5/B] 接力摘要：rolling_summary=累计续接笔记；rolling_marker=
-    # 已消化到的客户端历史 token 位置（与 digest 切片同一估算口径）。
+    # [v77.5/B] Rolling handoff summary: rolling_summary = accumulated
+    # continuation notes; rolling_marker = the client-history token position
+    # digested so far (same estimation basis as the digest slice).
     if "rolling_summary" not in existing_cm_cols:
         conn.execute(
             "ALTER TABLE chat_memory ADD COLUMN rolling_summary TEXT NOT NULL DEFAULT ''"
@@ -188,9 +196,11 @@ def init_db():
         conn.execute(
             "ALTER TABLE tokens ADD COLUMN consecutive_403 INTEGER NOT NULL DEFAULT 0"
         )
-    # [v77 P0-6 移植] usage 统计：每个"客户端可见成功"的完成轮一行，
-    # 读取时按 天×掩码key 聚合。保留原始行而非预聚合计数器——
-    # 失败的尝试没有行可记，"重试只计一次"成为结构性规则。
+    # [v77 P0-6 port] Usage stats: one row per completed turn that is
+    # "client-visible success", aggregated by day x masked key at read time.
+    # Raw rows are kept instead of pre-aggregated counters — failed attempts
+    # have no row to record, which makes "a retry counts only once" a
+    # structural rule.
     conn.executescript("""
         CREATE TABLE IF NOT EXISTS usage (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -226,9 +236,12 @@ async def get_session():
         async with _session_lock:
             if _session is None or _session.closed:
                 logger.info("Opening shared aiohttp ClientSession")
-                # 长保活连接池：默认 keepalive 15s 太短——用户打字/思考的间隔
-                # 普遍超过它，导致每轮都重新 TLS 握手（1-2s）。10 分钟保活 +
-                # DNS 缓存，把连续对话稳定在已热连接上（内存代价 ~几 MB socket）。
+                # Long-lived keepalive pool: the default 15s keepalive is too
+                # short — gaps between user turns (typing/thinking) commonly
+                # exceed it, forcing a fresh TLS handshake (1-2s) every turn.
+                # 10-minute keepalive plus DNS caching keeps consecutive
+                # conversation turns on warm connections (memory cost: a few
+                # MB of sockets).
                 connector = aiohttp.TCPConnector(
                     limit=64,
                     keepalive_timeout=600,
@@ -292,12 +305,17 @@ async def post_with_failover(path, *, headers, session=None, header_timeout=None
     keep their existing error paths). `session` is injectable for tests;
     defaults to the shared ClientSession.
 
-    [v63] `header_timeout`（秒，默认 None=不启用）给「等响应头」阶段加独立
-    预算：长流式请求的 body 读取有调用方自己的 stall 防护，但 POST 发出后
-    上游若"接了请求却不回响应头"，旧行为只能干等 session 级 sock_read
-    （线上 600s——2026-10-24 实测造成 12 分钟无响应事故）。传入该参数时
-    每个端点的 POST 用 asyncio.wait_for 包裹，到点取消并经既有 except 分支
-    走 failover；不传则行为与旧版逐字节一致。"""
+    [v63] `header_timeout` (seconds, default None = disabled) adds an
+    independent budget for the "waiting for response headers" phase: long
+    streaming requests already have the caller's own stall protection for
+    body reads, but if the upstream "accepts the POST yet never returns
+    response headers", the old behavior could only sit on the session-level
+    sock_read timeout (600s in production — a 2026-10-24 incident caused a
+    12-minute unresponsive window). When this parameter is given, each
+    endpoint's POST is wrapped in asyncio.wait_for; on expiry it is
+    cancelled and falls through the existing except branch into failover.
+    Without it, behavior is byte-for-byte identical to the previous
+    version."""
     if session is None:
         session = await get_session()
     last_exc = None
@@ -305,10 +323,13 @@ async def post_with_failover(path, *, headers, session=None, header_timeout=None
         is_last = attempt == len(UPSTREAM_BASES) - 1
         try:
             if header_timeout is not None:
-                # [v63] 响应头阶段独立预算（S8）：wait_for 到点即取消 POST，
-                # asyncio.TimeoutError 落入既有 except 分支触发 failover。
-                # 实测：取消后连接被正确关闭移除，连接池无累积；正常路径
-                # POST 毫秒返回，wait_for 零开销（0.000s）。
+                # [v63] Independent header-phase budget (S8): wait_for
+                # cancels the POST as soon as it fires; asyncio.TimeoutError
+                # lands in the existing except branch and triggers failover.
+                # Verified: after cancellation the connection is closed and
+                # removed correctly, no pool accumulation; on the normal path
+                # the POST returns in milliseconds and wait_for costs nothing
+                # (0.000s).
                 resp = await asyncio.wait_for(
                     session.post(base + path, headers=headers, **kwargs),
                     timeout=header_timeout)
@@ -584,9 +605,10 @@ def delete_token(token_id):
 #   * a soonest-to-recover fallback when every token is still cooling down.
 # ==============================================================================
 
-# [v77 P0-3 移植] 连续 403 达到该次数（中间无成功轮）即视为封号阶梯，
-# 账号退出轮换，直到管理员手动恢复。0 = 关闭升级（维持只冷却的旧行为）；
-# 401 无条件隔离。
+# [v77 P0-3 port] When consecutive 403s (with no successful turn in between)
+# reach this count, treat it as the ban ladder: the account leaves rotation
+# until an admin manually restores it. 0 = escalation disabled (keeps the old
+# cooldown-only behavior); 401 quarantines unconditionally.
 QUARANTINE_AFTER_403 = max(0, int(os.getenv("DEEPSEEKER_QUARANTINE_AFTER_403", "3")))
 
 TOKEN_COOLDOWN_SECONDS = max(1, int(os.getenv("DEEPSEEKER_RATE_LIMIT_COOLDOWN", "60")))
@@ -657,7 +679,7 @@ def pick_token(exclude=None):
     recovered = []
     for tid, status, until, last_used in rows:
         if status == "QUARANTINED":
-            continue  # [v77 P0-3] 终态：仅 restore_token() 可恢复
+            continue  # [v77 P0-3] terminal state: only restore_token() can recover
         if status == "RATE_LIMITED" and until is not None and until > now:
             continue  # still cooling down
         if status == "RATE_LIMITED":
@@ -698,10 +720,12 @@ def pick_token(exclude=None):
 
 
 def mark_quarantined(token_id, reason):
-    """[v77 P0-3 移植] 账号退出轮换，直到管理员恢复。
+    """[v77 P0-3 port] Take the account out of rotation until an admin
+    restores it.
 
-    与 RATE_LIMITED 不同：此状态没有计时器——rate_limited_until 清空，
-    pick_token() 的自动恢复永远不会把隔离行误认成冷却完毕的行。
+    Unlike RATE_LIMITED, this state has no timer — rate_limited_until is
+    cleared, so pick_token()'s auto-recovery can never mistake a quarantined
+    row for one that finished cooling down.
     """
     logger.warning("Token #%d QUARANTINED (manual return required): %s", token_id, reason)
     conn = get_db()
@@ -714,10 +738,12 @@ def mark_quarantined(token_id, reason):
 
 
 def restore_token(token_id):
-    """[v77 P0-3 移植] 隔离的唯一出口：管理员显式操作。
+    """[v77 P0-3 port] The only way out of quarantine: an explicit admin
+    action.
 
-    last_used 刻意不动——恢复的账号带着最旧的用量戳，
-    idle-oldest 决胜会让它温和回到轮换，而不是被灌一波突发流量。
+    last_used is deliberately left untouched — the restored account carries
+    the oldest usage stamp, so the idle-oldest tie-break eases it back into
+    rotation instead of flooding it with a burst of traffic.
     """
     conn = get_db()
     conn.execute(
@@ -731,7 +757,7 @@ def restore_token(token_id):
 
 
 def _bump_403_streak(token_id):
-    """[v77 P0-3 移植] 递增并返回该账号的连续 403 计数。"""
+    """[v77 P0-3 port] Increment and return the account's consecutive-403 count."""
     conn = get_db()
     conn.execute(
         "UPDATE tokens SET consecutive_403 = consecutive_403 + 1 WHERE id = ?",
@@ -746,15 +772,18 @@ def _bump_403_streak(token_id):
 
 
 def mark_limited(token_id, code=None):
-    """[v77 P0-3 移植] 向账号记一次上游失败——池的唯一门户。
+    """[v77 P0-3 port] Record one upstream failure against an account — the
+    single gateway into the pool.
 
-    不带 code：与既有行为完全一致（RATE_LIMITED 冷却自动恢复）。
-    带上游状态码：
-      * 401 -> 立即 QUARANTINED。被拒的凭据不是暂态，冷却 60 秒只会
-        把同一个死账号重新武装。
-      * 403 -> 照旧冷却；连续 403 达到 QUARANTINE_AFTER_403（中间无
-        成功轮）则 QUARANTINED。
-      * 其他（429）-> 冷却，照旧。
+    Without a code: exactly the existing behavior (RATE_LIMITED cooldown with
+    automatic recovery).
+    With an upstream status code:
+      * 401 -> QUARANTINED immediately. Rejected credentials are not
+        transient; a 60-second cooldown would just re-arm the same dead
+        account.
+      * 403 -> cooldown as before; if consecutive 403s (with no successful
+        turn in between) reach QUARANTINE_AFTER_403, QUARANTINED.
+      * Anything else (429) -> cooldown, as before.
     """
     if code == 401:
         mark_quarantined(token_id, "upstream 401 (auth rejected)")
@@ -784,11 +813,13 @@ def mark_limited(token_id, code=None):
 
 
 def mark_active(token_id):
-    """[v77 P0-3 移植] 记一次成功轮：回到轮换、连续计数清零。
+    """[v77 P0-3 port] Record a successful turn: back into rotation, the
+    consecutive counter reset to zero.
 
-    QUARANTINED 行刻意不动：请求会重叠，隔离前的发送可能在拉黑之后
-    才落地成功；放行会污染管理员控制的状态，只有 restore_token()
-    能结束隔离。
+    QUARANTINED rows are deliberately untouched: requests overlap, and a send
+    issued before quarantine may land successfully after the ban. Letting it
+    through would pollute an admin-controlled state; only restore_token() can
+    end a quarantine.
     """
     conn = get_db()
     conn.execute(
@@ -801,7 +832,7 @@ def mark_active(token_id):
 
 
 def _format_span(seconds):
-    """[v77 P0-3 移植] 池视图的紧凑时长：42s / 7m / 3h / 2d。"""
+    """[v77 P0-3 port] Compact duration for pool views: 42s / 7m / 3h / 2d."""
     seconds = max(0, int(seconds))
     if seconds < 60:
         return f"{seconds}s"
@@ -813,10 +844,12 @@ def _format_span(seconds):
 
 
 def get_pool_view():
-    """[v77 P0-3 移植] 每账号的运维视图。
+    """[v77 P0-3 port] Per-account operational view.
 
-    状态、负载、计时器以可直接渲染的字符串给出，且不含任何凭据字段：
-    token 列刻意缺席——此输出直接进 HTML，浏览器会缓存、截图会带走。
+    Status, load and timers are given as render-ready strings, with no
+    credential fields at all: the token column is deliberately absent — this
+    output goes straight into HTML, which browsers cache and screenshots
+    capture.
     """
     now = time.time()
     conn = get_db()
@@ -860,14 +893,15 @@ def get_pool_view():
     return view
 
 
-# ============ [v77 P0-6 移植] usage 统计 ============
+# ============ [v77 P0-6 port] usage statistics ============
 
 
 def mask_api_key(key):
-    """掩码 key 别名（展示用）：只留末 4 字符。
+    """Masked key alias (for display): keep only the last 4 characters.
 
-    dashboard 与所有聚合都渲染它——页面截图不得携带可用 key 材料。
-    超短 key（<= 8 字符）整体掩码。"""
+    The dashboard and all aggregations render this — page screenshots must
+    never carry usable key material. Very short keys (<= 8 chars) are masked
+    entirely."""
     key = str(key or "").strip()
     if not key:
         return "unknown"
@@ -877,8 +911,9 @@ def mask_api_key(key):
 
 
 def record_usage(key_alias, surface, model, in_tokens, out_tokens, ts=None):
-    """[v77 P0-6 移植] 记一个完成轮。key_alias 应为已掩码值——
-    调用点传 mask_api_key(raw_key)；本函数绝不把裸 key 落库。"""
+    """[v77 P0-6 port] Record one completed turn. key_alias should already be
+    masked — call sites pass mask_api_key(raw_key); this function never
+    persists a raw key."""
     alias = (
         mask_api_key(key_alias)
         if key_alias and not str(key_alias).startswith("…")
@@ -905,10 +940,11 @@ def record_usage(key_alias, surface, model, in_tokens, out_tokens, ts=None):
 
 
 def usage_by_day_key(since_ts=0.0):
-    """[v77 P0-6 移植] 按 天×掩码key 聚合用量。
+    """[v77 P0-6 port] Aggregate usage by day x masked key.
 
-    返回可直接渲染的行。(day, key_alias) 索引覆盖 GROUP BY——
-    一个月的数据也只是几毫秒 SQLite，无需预聚合表。"""
+    Returns render-ready rows. The (day, key_alias) index covers the GROUP BY
+    — even a month of data is a few milliseconds of SQLite; no
+    pre-aggregation table needed."""
     conn = get_db()
     rows = conn.execute(
         "SELECT day, key_alias, "
@@ -937,7 +973,7 @@ def usage_by_day_key(since_ts=0.0):
     return out
 
 
-# ============ [v77 PR#67 移植] 上下文超限错误分类器 ============
+# ============ [v77 PR#67 port] context-overflow error classifier ============
 
 _CONTEXT_LIMIT_HINT_RE = re.compile(
     r"maximum.?context"
@@ -950,18 +986,22 @@ _CONTEXT_LIMIT_HINT_RE = re.compile(
 
 
 def is_context_limit_error(exc):
-    """[v77 PR#67 移植] 公开分类器：这次失败是不是上游会话上下文耗尽？
+    """[v77 PR#67 port] Public classifier: is this failure an upstream
+    session-context exhaustion?
 
-    agent 客户端死在这里：上下文类失败曾被原样换号重试（上下文属于
-    CHAT 不属于 TOKEN，每次尝试都同样失败），最后才作为上下文错误
-    暴露给客户端。调用方用它触发摘要 rollover。匹配：
-      * UpstreamError 响应体带上下文措辞（HTTP 400 'maximum context
-        length' / 'context limit' / 'too long' 等）；
-    刻意不匹配：泛化 5xx/超时——'deadline exceeded'、'502 upstream
-    timeout' 是重试型，不是上下文型。松散词只在锚定上下文材料时
-    才算数：裸 'exceed' 或前面没有 prompt/message 的 'too long'
-    不再分类为上下文（上游 'header limit exceeded' 曾误触发一次
-    浪费的摘要 rollover）。"""
+    This is where agent clients used to die: context-type failures were
+    retried as-is with a token swap (context belongs to CHAT, not TOKEN, so
+    every attempt failed identically) and only surfaced to the client as a
+    context error at the very end. Callers use this to trigger a summary
+    rollover. Matches:
+      * UpstreamError whose body carries context wording (HTTP 400 'maximum
+        context length' / 'context limit' / 'too long', etc.).
+    Deliberately NOT matched: generic 5xx/timeouts — 'deadline exceeded',
+    '502 upstream timeout' are retry-type, not context-type. Loose words only
+    count when anchored to context material: a bare 'exceed' or a 'too long'
+    without a preceding prompt/message no longer classifies as context
+    (an upstream 'header limit exceeded' once falsely triggered a wasted
+    summary rollover)."""
     if isinstance(exc, UpstreamError):
         body = getattr(exc, "body", None) or ""
         return bool(_CONTEXT_LIMIT_HINT_RE.search(str(body)))
@@ -1044,14 +1084,18 @@ def save_session(sig, token_id, session_id, parent_message_id=0):
 
 
 def get_chat_baseline(session_id):
-    """(baseline, creation_total) — 建会话时的两个记账值。
+    """(baseline, creation_total) — the two bookkeeping values captured at
+    session creation.
 
-    baseline：本会话首条实际进入上游的 token 数（首条快速通道的负重）。
-    creation_total：建会话那一刻客户端全量历史的 token 数——增长参照点。
-    Rollover 比较 GROWTH（= 当前全量 - creation_total）而不是重测整个
-    只增不减的客户端历史（否则每一轮都触发一次全新 rollover）。
-    旧行（无 creation_total 列）返回 creation_total=0，调用方回退用
-    baseline 当参照（与 v72-v76 行为一致）。"""
+    baseline: token count of the first message that actually reached the
+    upstream (the first-message fast path's payload).
+    creation_total: token count of the client's full history at the moment
+    the session was created — the growth reference point.
+    Rollover compares GROWTH (= current total - creation_total) instead of
+    re-measuring the entire client history (which only ever grows —
+    otherwise every turn would trigger a brand-new rollover).
+    Old rows (no creation_total column) return creation_total=0; callers
+    fall back to baseline as the reference (matching v72-v76 behavior)."""
     if not session_id:
         return 0, 0
     conn = get_db()
@@ -1070,8 +1114,9 @@ def get_chat_baseline(session_id):
 def set_chat_baseline(session_id, baseline, creation_total=0):
     """Record the conversation size at which this upstream chat was opened.
 
-    baseline：首条实际进入上游的 token 数；creation_total：那一刻客户端
-    全量历史的 token 数（增长参照点）。"""
+    baseline: tokens of the first message that actually reached the upstream;
+    creation_total: tokens of the client's full history at that moment (the
+    growth reference point)."""
     if not session_id:
         return
     conn = get_db()
@@ -1089,11 +1134,15 @@ def set_chat_baseline(session_id, baseline, creation_total=0):
 
 
 def get_rolling_state(session_id):
-    """(rolling_summary, rolling_marker) — 本会话创建时交接下来的接力摘要。
+    """(rolling_summary, rolling_marker) — the rolling handoff summary
+    passed forward when this session was created.
 
-    rolling_summary：截至上一代换本的累计续接笔记（'' = 无，首次换本）。
-    rolling_marker：客户端历史已被摘要消化的 token 位置（摘要切片的左边界）。
-    旧行/缺行返回 ("", 0) —— 退化为"全量消化（原文尾巴除外）"，与 v77.4 等价。
+    rolling_summary: accumulated continuation notes as of the previous
+    generation switch ('' = none, first switch).
+    rolling_marker: the token position in the client history already digested
+    by summaries (the left boundary of the summary slice).
+    Old/missing rows return ("", 0) — degrading to "digest everything
+    (except the raw tail)", equivalent to v77.4.
     """
     if not session_id:
         return "", 0
@@ -1111,7 +1160,8 @@ def get_rolling_state(session_id):
 
 
 def set_rolling_state(session_id, summary, marker):
-    """记录接力摘要与消化位置（保留行内 baseline/creation_total 记账）。"""
+    """Record the rolling summary and digestion position (preserving the
+    row's baseline/creation_total bookkeeping)."""
     if not session_id:
         return
     conn = get_db()
@@ -1136,27 +1186,37 @@ def delete_session(sig):
 
 
 def next_parent(parent_message_id):
-    """[v86 已废除] 旧协议的 +2 猜测。新协议下上游在流开头广播真实编号
-    （ready 事件），parent 链只认真实编号——本函数保留空壳仅为兼容旧
-    导入名，任何路径都不得再用猜测值推进链路。"""
+    """[v86 deprecated] The old protocol's +2 guess. Under the new protocol
+    the upstream broadcasts the real number at the start of the stream (ready
+    event), and the parent chain only trusts real numbers — this stub is kept
+    solely for backward compatibility of the import name; no code path may
+    ever advance the chain with a guessed value again."""
     raise NotImplementedError("next_parent (+2 guess) removed in v85: use _LAST_REAL_PARENT / saved_parent")
 
 
-# [v84] 新协议直接对接：上游 2026-10-31 起在流开头广播真实消息编号
-# （event ready -> {"request_message_id": N, "response_message_id": M}）。
-# 我们在 _send_message_once 里捕获它，_send_message_locked 收尾时存入本表。
-# [v85] 全量原生适配完成：saved_parent 只返回真实编号，绝无猜测回退——
-# 广播没到 = 上游零入库，链路状态未知，调用方跳过保存（保留原映射），
-# 下轮原生重发同一 parent。旧协议的 +2 语义已从所有路径移除。
+# [v84] Direct integration with the new protocol: since 2026-10-31 the
+# upstream broadcasts the real message numbers at the start of the stream
+# (event ready -> {"request_message_id": N, "response_message_id": M}).
+# We capture it in _send_message_once and store it in this table when
+# _send_message_locked wraps up.
+# [v85] Full native adaptation complete: saved_parent only ever returns real
+# numbers, with no guessed fallback — no broadcast means the upstream stored
+# nothing and the chain state is unknown, so the caller skips saving
+# (keeping the original mapping) and the next turn re-sends natively with the
+# same parent. The old protocol's +2 semantics have been removed from all
+# paths.
 _LAST_REAL_PARENT = {}
 
 
 def saved_parent(chat_id, prev_parent):
-    """save_session 专用：只认上游广播的真实编号。
+    """For save_session only: trusts exclusively the real numbers broadcast
+    by the upstream.
 
-    返回 None 表示本回合没有任何广播（上游零入库，链路未推进），调用方
-    必须跳过 save_session——保留原映射，绝不写入猜测值。prev_parent 参数
-    仅为兼容调用点签名，已不参与计算。"""
+    Returning None means no broadcast happened this turn (upstream stored
+    nothing, chain not advanced) and the caller MUST skip save_session —
+    keep the original mapping, never write a guessed value. The prev_parent
+    parameter exists only for call-site signature compatibility and no longer
+    participates in the computation."""
     return _LAST_REAL_PARENT.get(chat_id)
 
 
@@ -1224,10 +1284,13 @@ _BAD_ARG_KEY_RE = re.compile(r"""[\s"'<>=]|^(?:string|type|bool|int|float|number
 
 
 class _TruncatedArgs(Exception):
-    """[v57 移植 v50] 参数在字符串内部被切断：内容不可信，整条调用必须作废。
+    """[v57 ported from v50] The args string was cut off mid-string: the
+    content is untrusted and the entire call must be discarded.
 
-    旧行为是补个引号和右括号就放行，于是 3KB 脚本被截断后写出半个文件——
-    下游完全不知道数据是坏的。这里改为显式失败，宁可丢一次调用。
+    The old behavior patched in a closing quote and bracket and let it
+    through, so a truncated 3KB script could write out half a file — and
+    downstream had no idea the data was corrupt. This now fails explicitly;
+    better to drop one call than to accept bad data.
     """
 
 
@@ -1268,9 +1331,12 @@ def _repair_truncated_json(s, strict=False):
 
     in_str, stack = _scan(t)
     if in_str:
-        # [v57 移植 v50] 字符串在中间被切断：边界不可知，补引号会让半个脚本
-        # 通过校验，写出一个「语法合法、内容残缺」的文件——这是最难查的
-        # 一类损坏。strict 模式下拒绝修复，返回 None，让调用方明确报错。
+        # [v57 ported from v50] The string was cut off mid-way: the boundary
+        # is unknowable, and patching in a quote would let half a script pass
+        # validation and write out a file that is "syntactically valid but
+        # content-incomplete" — the hardest kind of corruption to trace.
+        # In strict mode refuse to repair and return None so the caller
+        # reports a clear error.
         if strict:
             return None
         t += '"'
@@ -1284,18 +1350,20 @@ def _repair_truncated_json(s, strict=False):
 
 
 def _sanitize_args(obj):
-    """[v57 移植 v50] 严格模式。
+    """[v57 ported from v50] Strict mode.
 
-    字符串入参先走 _repair_truncated_json(strict=True)：中途切断的 JSON
-    直接抛 _TruncatedArgs，由 normalize_tool_call 丢弃整条调用——绝不
-    降级成 {} 放行（那会变成一条「合法但参数为空」的调用，客户端拒绝时
-    报错信息完全指不到真正原因）。键清洗沿用 v41：去掉空白键和模型
-    臆造的非参数键（tool_title/type 之类）。
+    String arguments first go through _repair_truncated_json(strict=True):
+    JSON cut off mid-way raises _TruncatedArgs and normalize_tool_call drops
+    the whole call — never downgraded to {} and let through (that would
+    become a "valid call with empty arguments", and when the client rejects
+    it the error message points at nothing real). Key sanitization follows
+    v41: drop whitespace keys and non-argument keys hallucinated by the
+    model (tool_title/type and the like).
     """
     if isinstance(obj, str):
         obj = _repair_truncated_json(obj, strict=True)
         if obj is None:
-            raise _TruncatedArgs("参数在字符串内部被切断")
+            raise _TruncatedArgs("args string cut off inside a string literal")
         try:
             obj = json.loads(obj)
         except Exception:
@@ -1317,7 +1385,7 @@ def _coerce_args_json(args):
     try:
         return json.dumps(_sanitize_args(args), ensure_ascii=False)
     except _TruncatedArgs as e:
-        logger.warning("[tool-args] 参数不可信，丢弃整条调用: %s", e)
+        logger.warning("[tool-args] untrusted arguments, dropping the whole call: %s", e)
         raise
     except Exception:
         return json.dumps({})
@@ -1327,24 +1395,32 @@ _TOOL_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 def _valid_tool_call(t):
-    """[v57 新修] Drop calls the client would refuse anyway.
+    """[v57 fix] Drop calls the client would refuse anyway.
 
-    v36 原版按扁平 {"name","arguments"} 写，但 normalize_tool_call 返回
-    OpenAI 嵌套格式 {"id","type","function":{...}} 且 arguments 是 JSON
-    字符串——两个格式对不上，闸门恒判 False，流式工具调用 100% 静默丢弃，
-    这个 bug 横跨 15+ 个版本没人发现。本函数是全部归档版本中唯一的
-    双格式修复：嵌套/扁平都认，字符串 arguments 先 json.loads。
+    The v36 original checked the flat {"name","arguments"} shape, but
+    normalize_tool_call returns the OpenAI nested format
+    {"id","type","function":{...}} with arguments as a JSON string — the two
+    shapes never matched, the gate always returned False, and streaming tool
+    calls were silently dropped 100% of the time. That bug spanned 15+
+    releases before anyone noticed. This function is the only dual-format fix
+    across all archived versions: both nested and flat shapes are accepted,
+    and string arguments are json.loads'ed first.
 
-    [v57 新修 A6] 空参数放行：v36 把 len(args)==0 一律判死，误杀
-    list_tabs 这类无参工具的合法调用。代理层没有工具 schema 知识，
-    无权判"必填"——空 arguments 放行，由客户端拒绝并给出准确错误，
-    好过在代理层静默丢调用让工具根本不执行。
+    [v57 fix A6] Empty arguments pass: v36 condemned len(args)==0 outright,
+    wrongly killing legitimate calls to no-argument tools like list_tabs.
+    The proxy has no tool-schema knowledge and is not entitled to judge
+    "required" — empty arguments are let through so the client rejects them
+    with an accurate error, which beats silently dropping the call at the
+    proxy so the tool never runs at all.
 
-    [v57 新修] 名字正则去掉 {1,63} 上限：v36 加这个上限想防"传输截断
-    出的短名"，但真实 MCP 工具名可以远超 64 字符（上游自己的测试用
-    5000+ 字符的名字断言必须解析通过），上限只误杀不防骗——截断出的
-    长名客户端会以"未知工具"明确拒绝，好过在代理层静默丢弃。截断
-    防护由 len(name) < 2 承担（实测残名都是单字符）。
+    [v57 fix] The name regex drops the {1,63} cap: v36 added it to guard
+    against "short names produced by transport truncation", but real MCP tool
+    names can far exceed 64 chars (the upstream's own tests assert that a
+    5000+ char name must parse), so the cap only misfired without stopping
+    any fraud — a truncated long name gets an explicit "unknown tool"
+    rejection from the client, better than a silent drop at the proxy.
+    Truncation protection is handled by len(name) < 2 (observed stub names
+    are all single characters).
     """
     if not isinstance(t, dict):
         return False
@@ -1387,14 +1463,18 @@ def normalize_tool_call(tool_data_or_name, args_if_name=None):
 
     if not name or not isinstance(name, str):
         return None
-    # [v66] 下划线开头的"工具名"是打坏标记的残片（生产实证 "_call"：模型
-    # 或历史垃圾让解析器抠出残名，客户端执行必失败显示 "$ _call 无效命令"）。
-    # 在源头拒收——无论哪个投递路径都不会再产出此类调用。
+    # [v66] "Tool names" starting with an underscore are fragments of a
+    # mangled marker (production evidence "_call": model/history garbage made
+    # the parser extract a stub name; client execution always fails with
+    # "$ _call invalid command"). Reject at the source — no delivery path can
+    # produce such a call again.
     if name.lstrip().startswith("_"):
         return None
-    # [v57 移植 v50] 统一走 _coerce_args_json：字符串 arguments 中途切断时
-    # 抛 _TruncatedArgs，整条调用丢弃，不再把截断的 JSON 双引号包成字符串
-    # 放行（v41 及之前的 A4 bug）。
+    # [v57 ported from v50] Route through _coerce_args_json: when a string
+    # arguments value is cut off mid-way it raises _TruncatedArgs and the
+    # whole call is dropped, instead of re-wrapping the truncated JSON in
+    # double quotes as a string and letting it through (the A4 bug in v41
+    # and earlier).
     try:
         args_str = _coerce_args_json(args)
     except _TruncatedArgs:
@@ -1451,11 +1531,13 @@ _BARE_OPEN_HEAD_RE = re.compile(
     re.IGNORECASE,
 )
 
-# [v57 新修] 第 1 组捕获可选的 ｜｜DSML｜｜ 装饰前缀：带装饰的裸开口不是
-# A2 现场问题（那个连装饰都没有），交给 _BARE_OPEN_LINE_RE 补 '<'。v38 原版
-# 没有这个组，会把装饰直接剥掉——开标签变成 <｜｜DSML｜｜<tool_call>、闭标签
-# 变成 </｜｜DSML｜｜<tool_call>，工具虽然还能解析，但块前残留的
-# <｜｜DSML｜｜ 会泄进正文（上游测试 json_body chunk=5 抓到该回归）。
+# [v57 fix] Group 1 captures an optional ｜｜DSML｜｜ decorated prefix: a
+# decorated bare opener is not the A2 field issue (which had no decoration at
+# all) and is left to _BARE_OPEN_LINE_RE to restore its '<'. The v38 original
+# had no such group and stripped the decoration outright — the open tag became
+# <｜｜DSML｜｜<tool_call> and the close tag </｜｜DSML｜｜<tool_call>; the
+# tool still parsed, but the leftover <｜｜DSML｜｜ in front of the block
+# leaked into prose (caught by the upstream test json_body chunk=5).
 _BARE_PLAIN_OPEN_RE = re.compile(
     r"(?m)(?<!<)([｜\| \t]{0,8}DSML[｜\| \t]{0,8})?(tool_calls?|function_calls?|function_call|invoke|calls) *> *(?=[{])",
     re.IGNORECASE,
@@ -1465,15 +1547,18 @@ _BARE_PLAIN_OPEN_RE = re.compile(
 def _repair_bare_dsml_lines(text):
     def _fix_bare_plain(m):
         if m.group(1):
-            # 带装饰：原样返回，交给下面的 _BARE_OPEN_LINE_RE 补 '<'
+            # Decorated: return as-is; _BARE_OPEN_LINE_RE below restores the '<'
             return m.group(0)
         return chr(60) + m.group(2) + ">"
 
-    # [v57 新修] 廉价前置过滤：_BARE_PLAIN_OPEN_RE 能命中的必要条件是文本
-    # 里出现 tool_call / function_call / invoke / calls 之一（IGNORECASE）。
-    # 纯正文块一次子串扫描即可放行，不必付全缓冲正则扫描——50KB buffer 上
-    # 3.9ms -> 0.03ms，长回答流式场景由 O(n^2) 累积扫描降为 O(n)。
-    # 四个字面量一个都不在时正则必然不匹配，与原 DSML 守卫早退等价，无损。
+    # [v57 fix] Cheap pre-filter: a necessary condition for _BARE_PLAIN_OPEN_RE
+    # to match is the presence of one of tool_call / function_call / invoke /
+    # calls (IGNORECASE). Pure prose blocks pass with a single substring scan
+    # instead of paying a full-buffer regex sweep — on a 50KB buffer that is
+    # 3.9ms -> 0.03ms, and for long streaming answers the accumulated scan
+    # drops from O(n^2) to O(n).
+    # If none of the four literals is present the regex cannot match anyway,
+    # which is losslessly equivalent to the original DSML guard early-exit.
     _low = text.lower()
     if ("tool_call" in _low or "function_call" in _low
             or "invoke" in _low or "calls" in _low):
@@ -1495,17 +1580,18 @@ def _repair_bare_dsml_lines(text):
 
 # Residue that ends up INSIDE a parameter value when the model emits a
 # stray decorated closer before the structural close (e.g.
-# ">检查...内容</| | DSML | |></｜DSML｜>parameter>"). Structural cleanup
+# ">check...content</| | DSML | |></｜DSML｜>parameter>"). Structural cleanup
 # never touches it because it is not at a tag boundary — strip it from
 # values directly. Bare decorated markers only; real prose is untouched.
 _VALUE_RESIDUE_RE = re.compile(
-    r"(?:</)?[｜\| \t]{0,8}DSML[｜\| \t]{0,8}\s*>[^<\n]{0,12}>"  # marker + trailing fragment (e.g. ">参数>")
+    r"(?:</)?[｜\| \t]{0,8}DSML[｜\| \t]{0,8}\s*>[^<\n]{0,12}>"  # marker + trailing fragment (e.g. ">param>")
     r"|(?:</)?[｜\| \t]{0,8}DSML[｜\| \t]{0,8}\s*>"              # marker with '>' but no fragment
-    r"|(?:</)?[｜\| \t]{0,8}DSML[｜\| \t]{0,8}[^>\n]{0,40}>"     # [v66] 残缺收尾：标记后粘着 tag 尾巴（生产实证 2026-10-25
-                                                                # 会话 d440af4c：模型写 "标题｜｜DSML｜｜ parameter>"（少 '</'），
-                                                                # 旧正则所有分支都以 </? 开头——那是"必须有 <"，不是"可选 </"——
-                                                                # 无 < 的残片只能命中裸标记分支，尾巴 " parameter>" 漏进
-                                                                # tool_title，客户端工具卡片显示 "检查批量脚本状态 parameter>"）
+    r"|(?:</)?[｜\| \t]{0,8}DSML[｜\| \t]{0,8}[^>\n]{0,40}>"     # [v66] mangled closer: a tag tail stuck to the marker (production evidence 2026-10-25
+                                                                # session d440af4c: model wrote "<title>｜｜DSML｜｜ parameter>" (missing '</');
+                                                                # every branch of the old regex started with </? — that is "an < is required",
+                                                                # not "an optional </" — so a fragment without < could only match the bare
+                                                                # marker branch and the tail " parameter>" leaked into
+                                                                # tool_title; the client's tool card showed "<the model's title> parameter>")
     r"|[｜\|]{2}\s*DSML\s*[｜\|]{2}",                            # [v33] bare marker, no '>' at all
     re.IGNORECASE,
 )
@@ -1524,39 +1610,47 @@ def _clean_param_value(val):
     # unlike the streaming path we need no keyword lookahead here because the
     # value is already finalized.
     # [v32] bare closer missing '</' stuck to the value tail (model writes
-    # "标题｜｜DSML｜｜>" instead of "</｜｜DSML｜｜ parameter>") — drop any
+    # "<title>｜｜DSML｜｜>" instead of "</｜｜DSML｜｜ parameter>") — drop any
     # trailing decoration tail that no legitimate value ends with.
     val = re.sub(r"[｜\| \t]{0,8}DSML[｜\| \t]{0,8}(?:\s*(?:parameter|invoke|calls?|tool_calls?)\b[^>\n]{0,40}>)?\s*$", "", val, flags=re.IGNORECASE).strip()
     return val.strip()
 
 
-# [v66] 精确开标签：正文里存在 <tool_call>/<function_call> 时，DSML 搜刮器
-# 必须让位（见 parse_tools 内注释）。think 区间内的引用不算数。
+# [v66] Exact open tag: when <tool_call>/<function_call> exists in the prose,
+# the DSML sweeper must yield (see the comment inside parse_tools). References
+# inside a think span do not count.
 _EXACT_CALL_OPEN_RE = re.compile(r"<(?:tool_call|function_call)\s*>", re.IGNORECASE)
-# [v66] think 块区间：模型的私有推理区，里面引用的任何标记原文都不参与解析。
+# [v66] Think-block span: the model's private reasoning area; any marker text
+# quoted in there does not participate in parsing.
 _THINK_SPAN_RE = re.compile(r"<think>.*?</think>", re.DOTALL | re.IGNORECASE)
 
 
-# [v75-a] DSML 参数外层包装名：模型模仿 OpenAI <tool_call> 结构时会把整个
-# arguments 包成一个 parameter。见到这些名字且值为对象时合并解包，消除
-# {"arguments": {...}} 双层嵌套（生产实证 2026-10-25 会话 e1751fe3）。
+# [v75-a] DSML argument wrapper names: when the model imitates the OpenAI
+# <tool_call> structure it wraps the entire arguments into a single parameter.
+# When these names appear with an object value, merge-unwrap to eliminate the
+# {"arguments": {...}} double nesting (production evidence 2026-10-25 session
+# e1751fe3).
 _DSML_ARGS_WRAPPERS = {"arguments", "args", "parameters", "params"}
 
 
-# [v77.10-b] 宽容 arguments 抢救：模型转义不一致时（生产实证 2026-10-29
-# 19:32 会话：开引号写 \" 闭引号裸 "，导致 json.loads 失败），解包分支
-# 会退回 {"arguments": "<坏JSON字符串>"} 双层结构 → 客户端找不到必填参数
-# 整条拒收（"missing required parameter(s): command"）。此扫描器逐键提取
-# 顶层 "key": value 对，值内裸引号按字面还原（正是模型本意），仅作
-# 严格解析与 raw_decode 均失败后的最后手段。
+# [v77.10-b] Lenient arguments rescue: when the model escapes inconsistently
+# (production evidence 2026-10-29 19:32 session: opening quotes written as \"
+# and closing quotes as bare ", breaking json.loads), the unwrap branch falls
+# back to a {"arguments": "<bad JSON string>"} double structure -> the client
+# cannot find the required parameter(s) and rejects the whole call ("missing
+# required parameter(s): command"). This scanner extracts top-level
+# "key": value pairs key by key, restoring bare quotes inside values literally
+# (exactly the model's intent). It is a last resort, used only after both
+# strict parsing and raw_decode have failed.
 _LENIENT_KV_HEAD_RE = re.compile(r"[\x27\x22]([A-Za-z0-9_\-]+)[\x27\x22]\s*:\s*")
 _LENIENT_VALUE_TAIL_WS = " \t\r\n"
 _LENIENT_ESCAPES = {"n": "\n", "t": "\t", "r": "\r", '"': '"', "\\": "\\", "/": "/", "b": "\b", "f": "\f"}
 
 
 def _lenient_json_object(s: str) -> dict:
-    """从残破 JSON 文本中宽容提取顶层字符串/数字键值对。提取不到任何
-    完整键值对时返回 {}（调用方继续走原兜底，不改变既有行为）。"""
+    """Leniently extract top-level string/number key-value pairs from broken
+    JSON text. Returns {} when no complete pair can be extracted (the caller
+    then proceeds with its existing fallback, unchanged)."""
     out = {}
     n = len(s)
     for m in _LENIENT_KV_HEAD_RE.finditer(s):
@@ -1565,8 +1659,9 @@ def _lenient_json_object(s: str) -> dict:
         if i >= n:
             continue
         if s[i] in "\x27\x22":
-            # 字符串值：读到后面跟（可选空白后）, 或 } 的引号为止；
-            # 中途的裸引号（后随其他字符）视为值内的字面引号
+            # String value: read until a quote followed (after optional
+            # whitespace) by , or }; a bare quote in the middle (followed by
+            # another character) is treated as a literal quote inside the value
             j = i + 1
             buf = []
             closed = False
@@ -1609,8 +1704,9 @@ def _lenient_json_object(s: str) -> dict:
     return out
 
 
-# [v77 PR#70 移植] 当前请求的工具列表，由 handle_chat 设置，供 parse_tools
-# 在模型丢掉工具名时按 schema 反推调用归属。
+# [v77 PR#70 port] Tool list of the current request, set by handle_chat so
+# parse_tools can infer which call a schema belongs to when the model drops
+# the tool name.
 request_tools = contextvars.ContextVar("request_tools", default=None)
 
 
@@ -1628,10 +1724,13 @@ def _tool_schemas():
 
 
 def _infer_tool_name(args, schemas):
-    """[v77 PR#70 移植] 按 schema 反推：唯一一个恰好接受这些参数名的工具。
+    """[v77 PR#70 port] Schema-based inference: the unique tool that accepts
+    exactly these parameter names.
 
-    先要求必填字段全齐；如果模型连必填也丢了，仍命名唯一能接受这些
-    参数的工具，让客户端报"缺字段"而不是"未知工具"。"""
+    First require all required fields to be present; if the model even dropped
+    a required field, still name the only tool that can accept these
+    parameters, so the client reports "missing field" instead of "unknown
+    tool"."""
     for need_required in (True, False):
         fits = []
         for name, params in schemas.items():
@@ -1666,13 +1765,14 @@ def _repair_tool_names(tools):
     return tools
 
 
-# [v77 PR#72 移植] 当前请求的推理档位（thinking 开启时），build_prompt 转成
-# 多思考指令。
+# [v77 PR#72 port] The current request's reasoning effort (when thinking is
+# on); build_prompt turns it into the thinking directives.
 request_effort = contextvars.ContextVar("request_effort", default=None)
 
 
 def effort_level(body):
-    """[v77 PR#72 移植] 客户端的 effort 字符串，无论方言放在哪个字段。"""
+    """[v77 PR#72 port] The client's effort string, whichever dialect field it
+    lives in."""
     cands = [body.get("reasoning_effort"), body.get("effort")]
     for key in ("reasoning", "output_config", "thinking"):
         v = body.get(key)
@@ -1690,11 +1790,13 @@ def parse_tools(text):
     tools = []
     clean_text = text
     fence_spans = _code_fence_spans(text)
-    # [v66] think 块是私有推理，不是工具调用区。模型会在 think 里讨论/引用
-    # 标记原文（实证：2026-10-25 会话 dee8cb2a，模型在 think 里写"收尾标签
-    # 被打坏成 </｜｜DSML｜｜_call>"，DSML 搜刮器随即从这句引用里抠出残名
-    # "_call"，产出 {"name": "_call"} 无效调用，真调用整个丢失）。所有扫描
-    # 一律跳过 think 区间。
+    # [v66] Think blocks are private reasoning, not a tool-call area. The
+    # model discusses/quotes marker text inside think (evidence: 2026-10-25
+    # session dee8cb2a — the model wrote "closing tag got mangled into
+    # </｜｜DSML｜｜_call>" in think, and the DSML sweeper promptly extracted
+    # the stub name "_call" from that quoted sentence, producing an invalid
+    # {"name": "_call"} call while the real call was lost entirely). All
+    # scans unconditionally skip think spans.
     think_spans = [m.span() for m in _THINK_SPAN_RE.finditer(text)]
 
     def fenced(pos):
@@ -1705,15 +1807,18 @@ def parse_tools(text):
             return True
         if any(s <= pos < e for s, e in think_spans):
             return True
-        # [v78-b] 行内代码（单反引号）里的标记是教学/示例引用，不是调用。
-        # 修复：行内 <tool_call> 提及被当开口与真调用配对，产出重复工具
-        # （2026-10-30 线上样本实测，v77.11 基线同病：1 次提及 + 1 个真
-        # 调用 → 2 个相同工具）。真实的工具调用从不写在单反引号里。
+        # [v78-b] Markers inside inline code (single backticks) are
+        # teaching/example references, not calls. Fix: an inline <tool_call>
+        # mention was paired as an opener with a real call, producing
+        # duplicate tools (2026-10-30 production sample, same disease in the
+        # v77.11 baseline: 1 mention + 1 real call -> 2 identical tools).
+        # Real tool calls are never written inside single backticks.
         return any(s <= pos < e for s, e in inline_spans)
 
-    # [v78-b] 行内代码遮罩：等长 \x00 占位保证"在遮罩上找匹配、在原文上
-    # 删除"位置一致，用于块清除时防止正文从行内提及处被截断。不含行内
-    # 代码的文本行为逐字节不变。
+    # [v78-b] Inline-code masking: equal-length \x00 placeholders keep
+    # "match on the mask, delete on the original" positions aligned, used to
+    # prevent block cleanup from truncating prose at an inline mention. Text
+    # without inline code is byte-for-byte unchanged.
     inline_spans = [m.span() for m in re.finditer(r"`[^`\n]*`", text)]
 
     def _sub_keep_inline(pattern, s, flags=0):
@@ -1755,10 +1860,13 @@ def parse_tools(text):
                     val = json.loads(_repair_truncated_json(p_val, strict=True))
                 except Exception:
                     val = p_val
-                # [v75-a] 外层包装名解包：模型模仿 <tool_call> 结构时会写
-                # parameter name="arguments" 把整个参数包起来，直接嵌套会产出
-                # {"arguments": {...}} 双层结构，执行器找不到必填参数整条拒收
-                # （生产实证 2026-10-25 18:24 会话 e1751fe3）。此处合并解包。
+                # [v75-a] Outer wrapper-name unwrap: when imitating the
+                # <tool_call> structure the model writes parameter
+                # name="arguments" wrapping the whole parameter set; nesting
+                # it directly produces a {"arguments": {...}} double structure
+                # and the executor rejects the whole call for missing required
+                # parameters (production evidence 2026-10-25 18:24 session
+                # e1751fe3). Merge-unwrap here.
                 if p_name in _DSML_ARGS_WRAPPERS:
                     if isinstance(val, dict):
                         args.update(val)
@@ -1768,8 +1876,10 @@ def parse_tools(text):
                         try:
                             inner = json.loads(val)
                         except Exception:
-                            # 尾部垃圾（模型多写的闭合括号等）：raw_decode 只取
-                            # 开头完整的 JSON 值，其余忽略；非 JSON 文本直接失败
+                            # Trailing garbage (extra closing brackets the
+                            # model wrote): raw_decode takes only the leading
+                            # complete JSON value and ignores the rest;
+                            # non-JSON text fails outright
                             try:
                                 inner, _end = json.JSONDecoder().raw_decode(val.lstrip())
                             except Exception:
@@ -1777,25 +1887,32 @@ def parse_tools(text):
                         if isinstance(inner, dict):
                             args.update(inner)
                             continue
-                        # [v77.10-b] 严格解析与 raw_decode 均失败（转义不一致等
-                        # 残破 JSON）：宽容提取顶层键值对，杜绝双层嵌套拒收
-                        # （生产实证 2026-10-29 19:32 shell_execute "missing
-                        # required parameter(s): command" 事故）。
+                        # [v77.10-b] Both strict parsing and raw_decode failed
+                        # (inconsistent escaping etc., broken JSON): leniently
+                        # extract top-level key-value pairs to prevent the
+                        # double-nesting rejection (production evidence:
+                        # 2026-10-29 19:32 shell_execute "missing required
+                        # parameter(s): command" incident).
                         inner = _lenient_json_object(val)
                         if inner:
                             args.update(inner)
                             continue
                     args[p_name] = val
                     continue
-                # [v75-b] 容器类型还原为字符串：工具参数均为字符串类型（模型
-                # 输出标注 string="true"）。JSON 文本（如 file_write 的
-                # content payload）必须保持文本，禁止 json.loads 把字符串变成
-                # 对象——客户端 file_write 只收字符串，会以"缺少 content"拒收
-                # （生产实证 2026-10-25 当天连拒 3 次）。标量仍正常转换。
-                # [v77 PR#70 移植] string="true" 标注 = 字面字符串："42"/"true"
-                # 不得变成 JSON。放在包装名解包之后——历史实证（v75 Fix 1）：
-                # 模型误用标注把 JSON 对象标成 string="true" 包在 arguments
-                # 包装里，守卫若在解包前生效会把双层嵌套放回去。
+                # [v75-b] Container types reverted to strings: tool parameters
+                # are all string-typed (the model annotates string="true").
+                # JSON text (e.g. file_write's content payload) must stay
+                # textual; json.loads must never turn the string into an
+                # object — the client's file_write only accepts strings and
+                # would reject with "missing content" (production evidence:
+                # 2026-10-25, three rejections the same day). Scalars still
+                # convert normally.
+                # [v77 PR#70 port] The string="true" annotation means a literal
+                # string: "42"/"true" must not become JSON. Checked after the
+                # wrapper-name unwrap — historical evidence (v75 Fix 1): the
+                # model misused the annotation, marking a JSON object as
+                # string="true" inside an arguments wrapper; if the guard ran
+                # before the unwrap it would re-create the double nesting.
                 if re.search(r"string\s*=\s*[\x27\x22]true", pm.group(0), re.IGNORECASE):
                     args[p_name] = p_val
                     continue
@@ -1826,11 +1943,13 @@ def parse_tools(text):
         clean_text = _sub_keep_inline(r"<[｜\| \t]{0,8}(?:DSML[｜\| \t]{0,8}>?)?\s*(?:tool_calls?|calls)[^>]*>.*?(?:</[｜\| \t]{0,8}(?:DSML[｜\| \t]{0,8}>?)?\s*(?:tool_calls?|calls)>|$)", clean_text, flags=re.DOTALL | re.IGNORECASE).strip()
         clean_text = _sub_keep_inline(r"<[｜\| \t]{0,8}(?:DSML[｜\| \t]{0,8}>?)?\s*(?:invoke|function_call)[^>]*>.*?(?:</[｜\| \t]{0,8}(?:DSML[｜\| \t]{0,8}>?)?\s*(?:invoke|function_call)>|$)", clean_text, flags=re.DOTALL | re.IGNORECASE).strip()
 
-    # [v66] 精确格式优先：正文（think 区间外）存在 <tool_call>/<function_call>
-    # 精确开标签时，绝不进 DSML 搜刮器。搜刮器最后的无 '<' 前缀搜索会把
-    # 打坏的收尾标签当成工具名，产出 {"name": "_call"} 无效调用，同时把
-    # 旁边完好无损的真调用整个挤掉（生产实证：会话 dee8cb2a 连续 3 轮
-    # file_write/shell_execute 全部变成 "_call 无效命令"）。
+    # [v66] Exact format takes precedence: when exact <tool_call>/<function_call>
+    # open tags exist in the prose (outside think spans), never enter the DSML
+    # sweeper. The sweeper's final no-'<'-prefix search treats a mangled
+    # closing tag as a tool name, producing an invalid {"name": "_call"} call
+    # while crowding out the intact real call next to it (production evidence:
+    # session dee8cb2a, three consecutive rounds of file_write/shell_execute
+    # all became "_call invalid command").
     _exact_openers = [m for m in _EXACT_CALL_OPEN_RE.finditer(text)
                       if not any(s <= m.start() < e for s, e in think_spans)]
     if not tools and "DSML" in text and not _exact_openers:
@@ -1840,7 +1959,8 @@ def parse_tools(text):
             if hidden(m.start()):
                 continue
             tool_name = m.group(1).strip()
-            # [v66] 下划线开头的"名字"是打坏收尾标签的残片（如 _call），不是工具
+            # [v66] "Names" starting with an underscore are fragments of a
+            # mangled closing tag (e.g. _call), not tools
             if tool_name.startswith("_"):
                 continue
             body = m.group(2)
@@ -1855,11 +1975,14 @@ def parse_tools(text):
                     val = json.loads(_repair_truncated_json(p_val, strict=True))
                 except Exception:
                     val = p_val
-                # [v75-b] 同主分支：容器类型还原为字符串
-                # [v77 PR#70 移植] string="true" 标注 = 字面字符串："42"/"true"
-                # 不得变成 JSON。放在包装名解包之后——历史实证（v75 Fix 1）：
-                # 模型误用标注把 JSON 对象标成 string="true" 包在 arguments
-                # 包装里，守卫若在解包前生效会把双层嵌套放回去。
+                # [v75-b] Same as the main branch: container types reverted to
+                # strings
+                # [v77 PR#70 port] The string="true" annotation means a literal
+                # string: "42"/"true" must not become JSON. Checked after the
+                # wrapper-name unwrap — historical evidence (v75 Fix 1): the
+                # model misused the annotation, marking a JSON object as
+                # string="true" inside an arguments wrapper; if the guard ran
+                # before the unwrap it would re-create the double nesting.
                 if re.search(r"string\s*=\s*[\x27\x22]true", pm.group(0), re.IGNORECASE):
                     args[p_name] = p_val
                     continue
@@ -1886,8 +2009,9 @@ def parse_tools(text):
                 norm = normalize_tool_call(tool_name, args)
                 if norm:
                     tools.append(norm)
-        # [v66] 无论是否搜刮出工具，DSML 残渣都不许进正文——打坏的收尾标签
-        # 残留在 flush 尾巴里会原样漏给客户端显示。
+        # [v66] Whether or not any tool was swept out, DSML residue must never
+        # reach the prose — a mangled closing tag left in the flush tail leaks
+        # to the client verbatim.
         clean_text = re.sub(r"<[｜\|]{2}DSML[｜\|]{2}[^>]*>.*?(?:</[｜\|]{2}DSML[｜\|]{2}[^>]*>|$)", "", clean_text, flags=re.DOTALL | re.IGNORECASE).strip()
         clean_text = re.sub(r"</?[｜\|]{2}DSML[｜\|]{2}[^>]*>", "", clean_text, flags=re.IGNORECASE).strip()
 
@@ -1909,9 +2033,12 @@ def parse_tools(text):
             clean_text = _sub_keep_inline(r"<function_call>.*?</function_call>", clean_text, flags=re.DOTALL | re.IGNORECASE).strip()
 
     if not tools:
-        # [v76-a] 标签名补 call：模型会混用第三种写法 <call tool="名字">{...}</call>
-        # （生产实证 2026-10-26 会话 3e4457c5，shell_execute 调用整段泄露进正文）。
-        # 该路径本就支持 tool= 属性，只缺标签名。属性分支自动把 JSON 顶层键当参数。
+        # [v76-a] Tag-name completion for <call>: the model mixes in a third
+        # spelling, <call tool="name">{...}</call> (production evidence
+        # 2026-10-26 session 3e4457c5, an entire shell_execute call leaked
+        # into prose). This path already supports the tool= attribute; only
+        # the tag name was missing. The attribute branch automatically treats
+        # top-level JSON keys as parameters.
         tag_regex = re.compile(r"<(?:tool_call|function_call|call)(?:\s+(?:name|tool|function)=[\x27\x22]([^\x27\x22]+)[\x27\x22])?\s*>", re.IGNORECASE)
         decoder = json.JSONDecoder()
         matches = [m for m in tag_regex.finditer(text) if not hidden(m.start())]
@@ -1957,9 +2084,10 @@ def parse_tools(text):
                             norm = normalize_tool_call(name, args)
                             if norm:
                                 tools.append(norm)
-            # [v76-a] call 后必须紧跟空白或 >（call(?=[\s>])）：防止 <call_call>
-            # 这类畸形标签被当作 <call> 开标签、DOTALL 吞掉后续正文
-            # （回放实证 1792866321_stream_ce93ffb8）。
+            # [v76-a] <call> must be followed immediately by whitespace or >
+            # (call(?=[\s>])): prevents malformed tags like <call_call> from
+            # being taken as a <call> opener with DOTALL swallowing the rest
+            # of the prose (replay evidence 1792866321_stream_ce93ffb8).
             clean_text = _sub_keep_inline(r"<(?:tool_call|function_call|call(?=[\s>]))[^>]*>.*?(?:</(?:tool_call|function_call|call)>|$)(?:\s*(?:参数|parameter|param)\s*>)?", text, flags=re.DOTALL).strip()
 
     if not tools:
@@ -1999,10 +2127,12 @@ def parse_tools(text):
             clean_text = re.sub(json_pattern, "", clean_text, flags=re.DOTALL).strip()
     # Keep companion text: the tool-call blocks themselves were already removed
     # from clean_text above; only leftover bare tags are stripped here.
-    # [v78-b] 行内代码先换成唯一哨兵再剥标签、剥完还原：防止
-    # _strip_wrapper_tags 把行内示例里的 `<tool_call>` 等标记从正文
-    # 里剥掉（2026-10-30 实测：教学正文提及变成空反引号）。哨兵含
-    # \x00，标签族正则永不匹配；被整块删除的提及还原时自然消失。
+    # [v78-b] Inline code is swapped for unique sentinels before stripping
+    # tags and restored afterwards: prevents _strip_wrapper_tags from
+    # stripping markers like `<tool_call>` inside inline examples out of the
+    # prose (2026-10-30 verified: a teaching mention became empty backticks).
+    # The sentinel contains \x00, which the tag-family regexes can never
+    # match; mentions removed as whole blocks naturally vanish on restore.
     _sent = {}
 
     def _protect_inline(m):
@@ -2017,7 +2147,8 @@ def parse_tools(text):
             clean_text = clean_text.replace(_k, _v)
     else:
         clean_text = _strip_wrapper_tags(clean_text).strip()
-    # [v77 PR#70 移植] 模型丢掉工具名时按请求的 tool schema 反推
+    # [v77 PR#70 port] When the model drops the tool name, infer it from the
+    # request's tool schemas
     tools = _repair_tool_names(tools)
     return tools, clean_text
 
@@ -2098,10 +2229,12 @@ _BARE_CLOSE_RE = re.compile(r"</(?![A-Za-z])")
 
 
 _DECOR_BLOCK_RE = re.compile(
-    # [v77.6] 开头容忍可选 "/"：模型会发出 </｜｜DSML｜｜ parameter name=...>
-    # 这类"闭合斜杠+开标签"混血（生产实证 2026-10-27 会话 60e216a4，
-    # echo 参数整段泄漏进正文）。旧的 <[|｜...]DSML 锚定被 "/" 破坏后，
-    # 各清理规则只会越拆越碎，残渣变成无锚文本漏出。
+    # [v77.6] The head tolerates an optional "/": the model emits hybrid
+    # "closing-slash + open tag" forms like </｜｜DSML｜｜ parameter name=...>
+    # (production evidence 2026-10-27 session 60e216a4, the echo parameter
+    # leaking wholesale into prose). Once the old <[|｜...]DSML anchor was
+    # broken by the "/", the cleanup rules only shredded it further and the
+    # residue leaked out as anchorless text.
     r"</?[|｜ \t]{0,8}DSML[|｜ \t]{0,8}[^>\n]{0,200}>"
     r"[^\n]*?"
     r"(?:</?)?[|｜ \t]{0,8}DSML[|｜ \t]{0,8}[^>\n]{0,200}>",
@@ -2122,9 +2255,9 @@ def _strip_stray_markers(text: str) -> str:
     """
     if not text:
         return text
-    # [v57 移植 v39] whole marked block on one line (open + content + close)
+    # [v57 ported from v39] whole marked block on one line (open + content + close)
     text = _DECOR_BLOCK_RE.sub("", text)
-    # [v57 移植 v39] lone marked open tag with any name
+    # [v57 ported from v39] lone marked open tag with any name
     text = _DECOR_OPEN_RE.sub("", text)
     text = _sub_bare_markers(text)
     text = _ORPHAN_CLOSER_RE.sub("", text)
@@ -2152,7 +2285,7 @@ def _sub_bare_markers(text: str) -> str:
             if low.startswith(k) or k.startswith(low):
                 return m.group(0)
         # [v24] the marker itself is garbage; a short trailing fragment the
-        # model emitted on the same construct (e.g. "<｜｜DSML｜｜>参数>")
+        # model emitted on the same construct (e.g. "<｜｜DSML｜｜>param>")
         # is garbage too — drop it together with the marker.
         return ""
     # [v24] marker+fragment PAIRS first (while the marker is still there to
@@ -2272,35 +2405,49 @@ class StreamToolParser:
         self.has_tool = False
         self.json_done = False
         self._end_re = None
-        # [v59] 工具发射后吞掉后续纯空白正文。工具标记内部的换行
-        # （模型在 </…invoke> 与 </…calls> 之间写的 "\n"）会被家族
-        # 宽泛闭合 [FIX 3] 在 invoke 闭合处提前收块，尾部那个 "\n"
-        # 于是当 prose 漏进 content——每个工具轮正文因此多一个孤
-        # 换行（2026-10-24 用户报告"调用工具正文就多出换行"的另
-        # 一半；前一半是桥自加的前导 "\n"，已在 app.py splitter
-        # 剥掉）。真 prose（非纯空白）不受影响，照常放行并清标志。
-        # [v77.10] 初始值改为 True：流开头的纯空白同样吞掉。生产实证
-        # 2026-10-29 会话 f33a197e：模型习惯在 </think> 与工具块之间
-        # 写 "\n\n"，工具块剥掉后这串空白就成了整轮正文——客户端把
-        # 一轮里十几个工具轮的正文拼起来，用户看到"思考后面一堆空格"
-        # （v59 只管了工具块之后，管不到开头与块间）。纯空白片段才吞，
-        # 带实际文字的片段（含段间换行）照常放行。
+        # [v59] Swallow whitespace-only prose after a tool has been emitted.
+        # Newlines inside tool markup (the "\n" the model writes between
+        # </…invoke> and </…calls>) make the family-wide closer [FIX 3] close
+        # the block early at the invoke closer, and the trailing "\n" then
+        # leaks into content as prose — every tool turn gained an extra
+        # orphan newline (2026-10-24 user report "an extra newline appears
+        # whenever a tool is called"; the other half of that bug was the
+        # bridge's own leading "\n", already stripped in app.py's splitter).
+        # Real prose (non-whitespace-only) is unaffected and passes through
+        # with the flag cleared.
+        # [v77.10] Initial value changed to True: leading whitespace-only
+        # chunks at stream start are swallowed too. Production evidence
+        # 2026-10-29 session f33a197e: the model habitually writes "\n\n"
+        # between </think> and the tool block; once the block is stripped
+        # that whitespace run becomes the entire turn's prose — the client
+        # concatenates the prose of a dozen tool turns and the user sees
+        # "a pile of spaces after the thinking" (v59 only covered after the
+        # tool block, not the start or between blocks). Only whitespace-only
+        # chunks are swallowed; chunks with actual text (including
+        # between-paragraph newlines) pass through normally.
         self._post_tool_ws = True
-        # [v77.11] 纯空白暂扣缓冲：空白片段先扣住不发，等看到下一个产出
-        # （真文本 / 工具块 / 流结束）再裁决。取代 v77.10 的"边界后 lstrip"，
-        # 消除其唯一代价（工具块后首段若带行首缩进会被误剥）——暂扣方案
-        # 下任何含实际字符的文本永不修改，空白只在边界处按
-        # "剥到最后一个换行为止"规整（其后空格/制表=有意缩进，保留）。
+        # [v77.11] Whitespace hold-back buffer: whitespace chunks are held
+        # instead of emitted, until the next output (real text / tool block /
+        # end of stream) settles their fate. Replaces v77.10's "lstrip after
+        # a boundary", eliminating its only cost (the first paragraph after a
+        # tool block would lose its leading indentation) — under the hold-back
+        # scheme any text containing actual characters is never modified;
+        # whitespace is only normalized at boundaries with a
+        # "strip up to the last newline" rule (spaces/tabs after it are
+        # deliberate indentation and are preserved).
         self._pending_ws = ""
 
     def _emit_text(self, results, text: str) -> None:
-        """追加正文。[v77.11] 暂扣-裁决语义：
-        - 纯空白片段 → 暂扣（_pending_ws），不立即决定；
-        - 边界后（流开头/工具块刚发完）首个真文本 → 暂扣空白与其前导
-          空白合并，剥掉到最后一个换行为止的排版噪音，其后的空格/制表
-          原样保留（模型的有意缩进零损失）；
-        - 非边界的真文本 → 先原样放行暂扣空白（正常行文的段间换行），
-          再原样放行本文本——任何含实际字符的文本永不修改。"""
+        """Append prose. [v77.11] Hold-back-and-settle semantics:
+        - whitespace-only chunk -> held (_pending_ws), decision deferred;
+        - first real text after a boundary (stream start / just emitted a tool
+          block) -> merged with the held whitespace, stripped of layout noise
+          up to the last newline; spaces/tabs after it are preserved verbatim
+          (the model's deliberate indentation, zero loss);
+        - real text not at a boundary -> emit the held whitespace first (the
+          normal between-paragraph newlines of flowing prose), then emit this
+          text verbatim — any text containing actual characters is never
+          modified."""
         cleaned = _strip_stray_markers(text)
         if not cleaned:
             return
@@ -2379,8 +2526,11 @@ class StreamToolParser:
                 if m:
                     start = m.start()
                     if start > 0:
-                        # [v77.10] 工具块前的正文片段去尾部空白（模型在正文与
-                        # 工具块之间写的 "\n\n" 粘在片段尾部，剥块后成残留）
+                        # [v77.10] Strip trailing whitespace from the prose
+                        # chunk before a tool block (the "\n\n" the model
+                        # writes between prose and the tool block sticks to
+                        # the chunk tail and remains after the block is
+                        # stripped)
                         self._emit_text(results, self.buffer[:start].rstrip())
                     self.buffer = self.buffer[start:]
                     tag_name = m.group(1).lower()
@@ -2442,7 +2592,8 @@ class StreamToolParser:
                     start = m.start()
                     pre = repaired[:start]
                     if pre.strip():
-                        # [v77.10] 同 feed 路径：工具块前去尾部空白
+                        # [v77.10] Same as the feed path: strip trailing
+                        # whitespace before a tool block
                         self._emit_text(out, pre.rstrip())
                     parsed, clean_tail = parse_tools(repaired[start:])
                     for item in parsed:
@@ -2479,17 +2630,22 @@ class StreamToolParser:
         return out
 
 
-# ── [v81] 工具标记泄露闸门 ─────────────────────────────────────────────
-# 实锤 2026-10-31 20:38（chat 86983f4f，连续两轮）：模型吐出解析器认不出
-# 的畸形工具标记（<tool_call>{"arguments": ...}，无 invoke 结构），
-# StreamToolParser 只能当普通正文放行，用户在正文里直接看到标记生肉；
-# functions 层要到流结束（FINISHED）才发现"正文只剩未解析标记"并触发
-# 自动续写——为时已晚，标记已经实时流出去了。
-# 本闸门挂在 StreamToolParser 之后：正文文本凡出现工具标记家族成员
-# （含跨分片的"半个标记"）一律暂扣；flush() 统一裁决——代码围栏内的
-# 照常放行（教学样例豁免，与 parse_tools 的 hidden 规则一致），围栏外
-# 的标记残渣丢弃（修复/续写由既有 salvage + auto-continue 链路负责，
-# 其输入是上游原始分片，不经本闸门，行为不变）。正常正文零改动。
+# ── [v81] Tool-marker leak gate ─────────────────────────────────────────
+# Hard evidence 2026-10-31 20:38 (chat 86983f4f, two consecutive turns): the
+# model emitted malformed tool markup the parser could not recognize
+# (<tool_call>{"arguments": ...}, no invoke structure), StreamToolParser
+# could only pass it through as ordinary prose, and the user saw raw markup
+# in the response body; the functions layer only noticed "the prose is
+# nothing but unparsed markers" at end of stream (FINISHED) and triggered
+# auto-continuation — too late, the markup had already streamed out live.
+# This gate hangs after StreamToolParser: any prose text containing a member
+# of the tool-marker family (including a "half marker" split across chunks)
+# is held; flush() rules uniformly — fenced content passes normally
+# (teaching examples are exempt, matching parse_tools' hidden rules), marker
+# residue outside fences is dropped (repair/continuation is handled by the
+# existing salvage + auto-continue chain, whose input is the raw upstream
+# chunks and which does not pass through this gate — behavior unchanged).
+# Normal prose is untouched.
 _LEAK_MARKERS = (
     "<tool_call>", "</tool_call>", "<tool_calls>", "</tool_calls>",
     "<invoke>", "</invoke>", "<function_call>", "</function_call>",
@@ -2499,13 +2655,14 @@ _LEAK_MARKERS = (
 
 
 class _LeakGate:
-    """正文流出前的最后一道闸：工具标记家族成员只许走 tool_calls 通道，
-    不许以 content 形式漏到用户眼前。"""
+    """The last gate before prose streams out: tool-marker family members may
+    only travel through the tool_calls channel, never leak to the user as
+    content."""
 
     def __init__(self):
-        self._seen = ""    # 闸门见过的全部正文（算代码围栏区间用）
-        self._hold = ""    # 暂扣区（从第一个疑似标记起）
-        self.dropped = 0   # 丢弃的字符数（供调用方记日志）
+        self._seen = ""    # all prose the gate has seen (for fence-span math)
+        self._hold = ""    # hold-back area (from the first suspected marker)
+        self.dropped = 0   # characters dropped (for caller-side logging)
 
     def feed(self, text):
         self._seen += text
@@ -2522,9 +2679,10 @@ class _LeakGate:
         if pos != -1:
             if pos:
                 out.append(self._hold[:pos])
-            self._hold = self._hold[pos:]  # 从标记起整段隔离到 flush
+            self._hold = self._hold[pos:]  # isolate from the marker to flush
             return out
-        # 没有完整标记：扣住可能是"半个标记"的尾巴（跨分片拼接）
+        # No complete marker: hold the tail if it could be a "half marker"
+        # (joined across chunks)
         keep = 0
         for m in _LEAK_MARKERS:
             for k in range(min(len(m) - 1, len(self._hold)), keep, -1):
@@ -2538,13 +2696,13 @@ class _LeakGate:
         return out
 
     def flush(self):
-        """流结束裁决：围栏内放行，围栏外丢弃。"""
+        """End-of-stream ruling: inside fences pass, outside fences drop."""
         if not self._hold:
             return []
         hold, self._hold = self._hold, ""
         start = len(self._seen) - len(hold)
         spans = _code_fence_spans(self._seen)
-        # 按围栏内外切段
+        # split into fenced / unfenced segments
         segs = []
         seg, seg_f = "", None
         for i, ch in enumerate(hold):
@@ -2560,10 +2718,12 @@ class _LeakGate:
         emit = []
         for text, fenced in segs:
             if fenced or not any(m in text for m in _LEAK_MARKERS):
-                # 围栏内教学样例照常放行；围栏外不含标记的残余正文也放行
+                # Fenced teaching examples pass as usual; unfenced leftover
+                # prose without markers passes too
                 emit.append(text)
             else:
-                # 围栏外的工具标记残渣：丢弃（修复走 salvage，重试走续写）
+                # Tool-marker residue outside fences: dropped (repair goes to
+                # salvage, retry goes to auto-continuation)
                 self.dropped += len(text)
         return ["".join(emit)] if emit else []
 
@@ -2697,23 +2857,25 @@ def _take_prefetched_pow(auth_token, target_path="/api/v0/chat/completion"):
 
 
 async def warmup_pool(max_tokens=3):
-    """[v57 移植 v35] 启动预热：把冷启动 ~30s 的开销前移到启动阶段。
+    """[v57 ported from v35] Startup warmup: moves ~30s of cold-start cost to
+    the startup phase.
 
-    三件事依次做完，第一个用户请求就不用再付：
-      1. wasm PoW 模块编译（CPU 密集，走线程池）
-      2. 与上游 chat.deepseek.com 建立 TLS 连接（跨洋握手最贵）
-      3. 用 ACTIVE token 预解 PoW，填满 _POW_PREFETCH
-    任何一步失败只记日志，绝不影响服务启动。
+    Three things done in order so the first user request no longer pays:
+      1. wasm PoW module compilation (CPU-bound, on a thread pool)
+      2. TLS connection to the upstream chat.deepseek.com (transoceanic
+         handshake is the most expensive)
+      3. Pre-solve PoW with ACTIVE tokens to fill _POW_PREFETCH
+    Any step failing only logs; startup of the service is never affected.
     """
     t0 = time.time()
     try:
         await asyncio.to_thread(_get_pow_setup)
     except Exception as exc:
-        logger.warning("[warmup] wasm 预编译失败: %s", exc)
+        logger.warning("[warmup] wasm pre-compilation failed: %s", exc)
     try:
         await get_session()
     except Exception as exc:
-        logger.warning("[warmup] 上游会话建立失败: %s", exc)
+        logger.warning("[warmup] failed to establish upstream session: %s", exc)
     try:
         toks = await asyncio.to_thread(get_tokens)
         actives = [t for t in toks if t.get("status") == "ACTIVE"][:max_tokens]
@@ -2722,10 +2884,10 @@ async def warmup_pool(max_tokens=3):
                 await _prefetch_pow(t["token"], "/api/v0/chat/completion")
             except Exception:
                 pass
-        logger.info("[warmup] token=%d 预热完成", len(actives))
+        logger.info("[warmup] token=%d warmup complete", len(actives))
     except Exception as exc:
-        logger.warning("[warmup] PoW 预热失败: %s", exc)
-    logger.info("[warmup] 全部完成，用时 %.1fs，PoW 池 %d 条", time.time() - t0, len(_POW_PREFETCH))
+        logger.warning("[warmup] PoW warmup failed: %s", exc)
+    logger.info("[warmup] all done in %.1fs, PoW pool %d entries", time.time() - t0, len(_POW_PREFETCH))
 
 
 async def create_new_chat(auth_token):
@@ -2762,12 +2924,16 @@ class _SseStreamFinished(Exception):
 
 
 class _SseStreamInterrupted(Exception):
-    """上游流在收到 FINISHED 之前异常结束（断流/断连/上游提前关闭）。
+    """The upstream stream ended abnormally before FINISHED (stall/disconnect/
+    upstream early close).
 
-    [v62] reason/detail 载体：让 send_message 的续写循环按中断原因选择
-    重投提示词——畸形工具调用场景改用带诊断的提示词（告诉模型错在哪、
-    附原始调用、给正确格式），其余场景仍用通用的 _CONTINUE_PROMPT。
-    默认参数保证既有裸抛（stall/断流/no_body）零改动、行为不变。"""
+    [v62] reason/detail carriers: lets send_message's continuation loop pick
+    the resend prompt by interruption cause — the malformed-tool-call case
+    switches to a diagnostic prompt (telling the model what went wrong,
+    attaching the original call, giving the correct format), other cases keep
+    using the generic _CONTINUE_PROMPT.
+    Default parameters keep the existing bare raises (stall/interruption/
+    no_body) zero-changed and behavior-identical."""
 
     def __init__(self, reason="interrupted", detail=""):
         super().__init__(reason)
@@ -2776,24 +2942,30 @@ class _SseStreamInterrupted(Exception):
 
 
 class _RetryBoundary(str):
-    """[v61] 续写轮边界哨兵：空串 str 子类，只在 send_message 的续写
-    循环向客户端流里插入，告知 app.stream_response「新 attempt 从此开始，
-    请重置 splitter」。
+    """[v61] Continuation-turn boundary sentinel: an empty-string str subclass,
+    inserted into the client stream only by send_message's continuation loop
+    to tell app.stream_response "a new attempt starts here, please reset the
+    splitter".
 
-    为什么需要它：app._StreamTagSplitter 在第一次见到 </think> 后把
-    think_done 闭锁（v46 起，为容忍模型正文里的字面 <think>），此后同一流内
-    再出现 <think> 不再被识别——而自动续写轮恰以 _send_message_once 的
-    "\\n<think>" 开头（functions.py 两处 yield），续写轮的整段思考会被
-    splitter 当 content 放行，泄漏进正文（2026-10-24 21:25 线上实例
-    1792849156：attempt-0 正常答完被上游断流打断，attempt-1 的
-    “The user says 接着上文继续写...” 整段漏成正文）。
-    v39/v40 曾把这个现象误判为「续写轮关闭 thinking 所致」（B3 思考泄漏），
-    回退 thinking 参数并不能修它——根因是 splitter 的跨轮状态，与 thinking
-    开关无关。
+    Why it is needed: app._StreamTagSplitter latches think_done after the
+    first </think> (since v46, to tolerate literal <think> in model prose);
+    afterwards a <think> in the same stream is no longer recognized — while
+    auto-continuation turns start with _send_message_once's "\\n<think>"
+    (two yield sites in functions.py), so the continuation turn's whole
+    thinking section would be passed through by the splitter as content,
+    leaking into prose (2026-10-24 21:25 production instance 1792849156:
+    attempt-0 answered normally and was interrupted by an upstream stall;
+    attempt-1's "The user says continue from where we left off..." leaked
+    wholesale into prose).
+    v39/v40 misdiagnosed this as "caused by continuation turns disabling
+    thinking" (the B3 thinking leak); rolling back the thinking parameter
+    cannot fix it — the root cause is the splitter's cross-turn state, which
+    has nothing to do with the thinking switch.
 
-    空串子类对其他消费者透明：full_text += chunk 加空串无害、非流式 join
-    无害、任何 len/真值判断视作空串；只有 stream_response 按 isinstance
-    拦截重置 splitter。"""
+    The empty-string subclass is transparent to other consumers:
+    full_text += chunk with an empty string is harmless, non-streaming joins
+    are harmless, any len/truthiness check sees an empty string; only
+    stream_response intercepts it via isinstance to reset the splitter."""
     __slots__ = ()
 
 
@@ -2839,8 +3011,9 @@ def _scan_recent_sse_errors(parsed_events):
 
 
 def _raise_empty_sse_response(recent_lines, parsed_events, resp_ct="", non_sse_tail=None):
-    # [v77 P0-4 移植] 信封内嵌请求关联 id（若中间件已注入），失败响应可与
-    # 访问日志行对上。延迟 import 避免依赖方向问题。
+    # [v77 P0-4 port] Embed the request correlation id inside the envelope (if
+    # the middleware injected one) so failed responses can be matched to
+    # access-log lines. Deferred import avoids a dependency-direction problem.
     try:
         from middleware import request_id_var
         _rid = request_id_var.get() or "-"
@@ -2858,8 +3031,9 @@ def _raise_empty_sse_response(recent_lines, parsed_events, resp_ct="", non_sse_t
         msg = _EMPTY_SSE_CONTEXT
     else:
         msg = _EMPTY_SSE_DEFAULT
-    # [v82 诊断] 空流时记录响应类型与非流式原文（区分 WAF HTML / 业务
-    # JSON / 真·空 SSE——2026-10-31 晚协议变更排查）
+    # [v82 diagnostics] On an empty stream, log the response content type and
+    # non-streamed raw text (distinguish WAF HTML / business JSON / a genuinely
+    # empty SSE — 2026-10-31 evening protocol-change investigation)
     _tail_txt = " | ".join((non_sse_tail or [])[-3:])[:400]
     logger.warning(
         "DeepSeek SSE ended without assistant output; ct=%s non_sse=%s; last events: %s",
@@ -2883,26 +3057,36 @@ def _raise_sse_error_event(data, recent_lines):
     raise UpstreamError(502, content)
 
 
-# ============================== [v78] 工具标记抢救 ==============================
-# 生产实证（2026-10-29 23:15 会话 cd859ddc，29.8 万 token 长会话）：模型在
-# 双格式摇摆中把 <｜｜DSML｜｜ invoke name="..."> 开口行整个丢掉——<calls>
-# 后直接跟 <parameter>，只剩孤儿 </invoke> 闭合。parse_tools 必须从开口行
-# 拿 name 才能解析 → 整块解析不出 → v58 按"纯标记无正文"中断 → 续写轮
-# 重犯同样形态（v62 诊断提示词附带的畸形原文反而成了坏样例）→ 重试用尽，
-# 客户端只收到兜底文案，回合零正文交付。
+# ============================== [v78] tool-marker salvage ==============================
+# Production evidence (2026-10-29 23:15 session cd859ddc, a 298k-token long
+# session): while wobbling between the two formats the model dropped the whole
+# <｜｜DSML｜｜ invoke name="..."> opener line — <calls> was followed directly by
+# <parameter> with only an orphan </invoke> closer left. parse_tools needs the
+# name from the opener line to parse -> the whole block fails to parse -> v58
+# interrupted on "pure markers, no prose" -> the continuation turn reproduced
+# the same shape (the malformed original text attached by v62's diagnostic
+# prompt itself became a bad example) -> retries exhausted, the client got
+# only the fallback message, and the turn delivered zero prose.
 #
-# 抢救两步（确定性字符串操作，仅 DSML 双竖线家族；think 区间与代码围栏内
-# 一律不碰，与 parse_tools 的 hidden 规则一致）：
-#   1. 掉斜杠闭合修复：`文本｜｜DSML｜｜ parameter>`（模型丢了 </）
-#      → `</｜｜DSML｜｜ parameter>`（2026-10-29 23:10/23:14 两轮
-#      tool_title 值尾携带残片的同族病灶；合法开口/闭合前必有 < 或 /，
-#      负向环视排除，不会误伤）。
-#   2. 缺 invoke 开口合成：calls 块内无任何 invoke 开口时，从实参推断
-#      工具名并补写开口行。名字来源按序：
-#      a) arguments JSON 里的 "name" 键（值须为本轮已声明工具名才认）；
-#      b) 本轮工具表中 required ⊆ 实参键集 的唯一工具（多候选不猜）。
-#      推断不出 → 原样返回，走既有 malformed 续写路径，绝不瞎猜。
-# 未发生任何修复时逐字节原样返回——对正常输出零改动、零代价。
+# Salvage in two steps (deterministic string operations, DSML double-bar family
+# only; think spans and code fences are never touched, matching parse_tools'
+# hidden rules):
+#   1. Dropped-slash closer repair: `text｜｜DSML｜｜ parameter>` (the model
+#      lost </) -> `</｜｜DSML｜｜ parameter>` (2026-10-29 23:10/23:14, the
+#      same family of lesion where tool_title values carried trailing
+#      fragments; legitimate openers/closers are always preceded by < or /,
+#      excluded by negative lookahead, so no false hits).
+#   2. Missing-invoke-opener synthesis: when a calls block contains no invoke
+#      opener, infer the tool name from the arguments and synthesize the
+#      opener line. Name sources, in order:
+#      a) the "name" key in the arguments JSON (accepted only if the value is
+#         a tool name declared this turn);
+#      b) the unique tool in this turn's tool list with required ⊆ argument
+#         keys (no guessing among multiple candidates).
+#      If inference fails, return unchanged and take the existing malformed
+#      continuation path — never guess blindly.
+# When no repair happened, returns byte-for-byte identical — zero change, zero
+# cost for normal output.
 
 _SALVAGE_CLOSER_FIX_RE = re.compile(
     r"(?<![</])"
@@ -2926,12 +3110,16 @@ _SALVAGE_PARAM_RE = re.compile(
 )
 _SALVAGE_INVOKE_SYNTH = '\n<｜｜DSML｜｜ invoke name="%s">'
 
-# [v80] 缺参数闭合补写三件套。线上实锤（2026-10-31 11:37 UTC，chat d13d3e76）：
-# 上游把参数开口写出来后闭合标签丢失（<...parameter name="command"...>cd /tmp ...
-# 后直接跟下一个参数开口），_SALVAGE_PARAM_RE 要求成对闭合 → 整个参数匹配
-# 失败 → 推断不出工具 → 抢救链整体失效，被迫走续写轮（用户看到同一动作
-# 重复执行）。v80 在主抢救前增加一遍确定性补写：真闭合在边界前存在 →
-# 逐字节不动；确实缺失 → 在下一个结构边界前插入规范闭合。
+# [v80] Missing-parameter-closer repair kit. Field evidence (2026-10-31
+# 11:37 UTC, chat d13d3e76): the upstream wrote the parameter opener but the
+# closing tag was lost (<...parameter name="command"...>cd /tmp ... followed
+# directly by the next parameter opener); _SALVAGE_PARAM_RE requires a paired
+# closer -> the whole parameter match fails -> the tool cannot be inferred ->
+# the entire salvage chain is defeated and the flow falls to a continuation
+# turn (the user sees the same action execute repeatedly). v80 adds a
+# deterministic repair pass before the main salvage: if a real closer exists
+# before the boundary -> byte-for-byte untouched; genuinely missing -> insert
+# a canonical closer before the next structural boundary.
 _SALVAGE_PARAM_OPEN_RE = re.compile(
     r"<[｜\| \t]{0,8}(?:DSML[｜\| \t]{0,8}>?)?\s*parameter\s+name=[\x27\x22][^\x27\x22]+[\x27\x22][^>]*>",
     re.IGNORECASE,
@@ -2940,27 +3128,33 @@ _SALVAGE_PARAM_CLOSER_ONLY_RE = re.compile(
     r"</[｜\| \t]{0,8}(?:DSML[｜\| \t]{0,8}>?)?\s*parameter\s*>",
     re.IGNORECASE,
 )
-# 闭合必须出现在下一个 DSML 结构边界之前：任何 invoke/calls/tool_call 标签
-# （开或闭）或下一个参数开口。注意参数闭合自身不构成边界——否则带闭合的
-# 健康参数会被误判缺失。
+# The closer must appear before the next DSML structural boundary: any
+# invoke/calls/tool_call tag (open or close) or the next parameter opener.
+# Note a parameter closer itself is NOT a boundary — otherwise a healthy
+# parameter carrying one would be misjudged as missing.
 _SALVAGE_BOUNDARY_RE = re.compile(
     r"</?[｜\| \t]{0,8}(?:DSML[｜\| \t]{0,8}>?)?\s*(?:invoke|function_call|calls|tool_call)[\s>/]"
     r"|<[｜\| \t]{0,8}(?:DSML[｜\| \t]{0,8}>?)?\s*parameter\s+name=",
     re.IGNORECASE,
 )
 _SALVAGE_PARAM_CLOSER_SYNTH = "</｜｜DSML｜｜ parameter>"
-# [v80] "掉斜杠"的残缺参数闭合（主循环 _SALVAGE_CLOSER_FIX_RE 可修）。
-# 窗口内存在它时视为闭合已存在，不补写——否则会产生双重闭合。
+# [v80] The "dropped slash" mangled parameter closer (fixable by the main
+# loop's _SALVAGE_CLOSER_FIX_RE). If it exists within the window, a closer is
+# considered present and none is inserted — otherwise we would produce a
+# double closer.
 _SALVAGE_PARAM_CLOSER_BROKEN_RE = re.compile(
     r"[｜|]{2}\s*DSML\s*[｜|]{2}\s*parameter\s*>"
 )
 
 
 def _insert_missing_param_closers(text, hidden_fn):
-    """[v80] 第一遍修复：参数开口缺闭合时在下一个结构边界前补写规范闭合。
+    """[v80] First repair pass: when a parameter opener lacks its closer,
+    insert a canonical closer before the next structural boundary.
 
-    只做确定性补写，绝不瞎猜：闭合在边界前存在 → 不动；围栏/行内码/思考
-    区内的开口 → 不碰。健康文本逐字节原样返回。返回 (new_text, 补写数)。"""
+    Deterministic repairs only, never guesses: a closer exists before the
+    boundary -> untouched; openers inside fences/inline code/think spans ->
+    not touched. Healthy text is returned byte-for-byte. Returns
+    (new_text, number inserted)."""
     out_parts = []
     last = 0
     inserted = 0
@@ -2971,8 +3165,9 @@ def _insert_missing_param_closers(text, hidden_fn):
         window_end = bm.start() if bm else len(text)
         if _SALVAGE_PARAM_CLOSER_ONLY_RE.search(text, om.end(), window_end):
             continue
-        # [v80] 窗口内存在掉斜杠的残缺闭合 → 闭合已存在（主循环会修），
-        # 不补写，避免双重闭合。
+        # [v80] A dropped-slash mangled closer exists within the window -> a
+        # closer is present (the main loop will fix it); do not insert one,
+        # avoiding a double closer.
         if _SALVAGE_PARAM_CLOSER_BROKEN_RE.search(text[om.end():window_end]):
             continue
         out_parts.append(text[last:window_end])
@@ -2986,7 +3181,8 @@ def _insert_missing_param_closers(text, hidden_fn):
 
 
 def _salvage_tool_name_from_hint(args_keys, tools_hint):
-    """required ⊆ 实参键集 的唯一工具名；唯一才认，多候选/零候选都不猜。"""
+    """The unique tool name with required ⊆ argument keys; accepted only when
+    unique — multiple candidates or none means no guess."""
     if not tools_hint:
         return None
     cands = []
@@ -3004,13 +3200,15 @@ def _salvage_tool_name_from_hint(args_keys, tools_hint):
 
 
 def _salvage_tool_markup(text, tools_hint=None):
-    """[v78] 修复模型写坏的 DSML 工具块（掉斜杠闭合 + 缺 invoke 开口）。
+    """[v78] Repair DSML tool blocks the model wrote incorrectly (dropped-slash
+    closers + missing invoke openers).
 
-    [v80] 第一遍先补写缺失的参数闭合（线上 2026-10-31 实锤病灶：参数
-    闭包丢失导致 _SALVAGE_PARAM_RE 全体失配、抢救链整体失效）。无法
-    修复的块原样保留（交由既有 malformed 判定）。未发生任何修复时返回值
-    与入参逐字节相同。tools_hint 为本轮 OpenAI 工具表（缺省读
-    request_tools ContextVar）。"""
+    [v80] The first pass inserts missing parameter closers (field evidence
+    2026-10-31: lost parameter closers made _SALVAGE_PARAM_RE miss everything
+    and defeated the whole salvage chain). Blocks that cannot be repaired are
+    left as-is (left to the existing malformed handling). With no repair made,
+    the return value is byte-identical to the input. tools_hint is this turn's
+    OpenAI tool list (defaults to the request_tools ContextVar)."""
     if not text or "DSML" not in text:
         return text
 
@@ -3019,7 +3217,8 @@ def _salvage_tool_markup(text, tools_hint=None):
             s <= pos < e for s, e in t_spans
         )
 
-    # [v80] 第一遍：缺参数闭合补写（用原文偏移量计算豁免区间）
+    # [v80] First pass: missing parameter closers (exempt spans computed on the
+    # original-text offsets)
     _f0 = _code_fence_spans(text)
     _f0 += [m.span() for m in re.finditer(r"`[^`\n]*`", text)]
     _t0 = [m.span() for m in _THINK_SPAN_RE.finditer(text)]
@@ -3029,8 +3228,9 @@ def _salvage_tool_markup(text, tools_hint=None):
         return text
 
     fence_spans = _code_fence_spans(text)
-    # [v78] 行内代码（单反引号）里的 DSML 是教学示例，不是坏块——
-    # 与 _has_unswallowed_tool_markup 的行内豁免同一实证（edac56c5）。
+    # [v78] DSML inside inline code (single backticks) is a teaching example,
+    # not a broken block — same evidence as _has_unswallowed_tool_markup's
+    # inline exemption (edac56c5).
     fence_spans += [m.span() for m in re.finditer(r"`[^`\n]*`", text)]
     think_spans = [m.span() for m in _THINK_SPAN_RE.finditer(text)]
 
@@ -3042,7 +3242,7 @@ def _salvage_tool_markup(text, tools_hint=None):
 
     out_parts = []
     last = 0
-    repaired = closer_fixes  # [v80] 预检补写数计入总修复数
+    repaired = closer_fixes  # [v80] pre-check insertions count toward the total
     for cm in _SALVAGE_CALLS_BLOCK_RE.finditer(text):
         if hidden(cm.start()):
             continue
@@ -3085,10 +3285,13 @@ def _salvage_tool_markup(text, tools_hint=None):
                                 cand = maybe_name.strip()
                 if not cand:
                     cand = _salvage_tool_name_from_hint(args.keys(), tools_hint)
-                # [v80] schema 闸门：名字能对上但必填参数不齐 → 修复结果
-                # 必然在派发层失败，与其产出注定失败的调用不如退回续写轮
-                # 让模型重写。仅收紧确定性：缺 required 或名字不在工具表
-                # 时不合成开口，行为下限=既有续写路径。
+                # [v80] Schema gate: the name matches but required parameters
+                # are missing -> the repaired result would fail at dispatch
+                # anyway; better to return to the continuation turn and let the
+                # model rewrite than to produce a call destined to fail. Only
+                # tightens determinism: when required fields are missing or the
+                # name is not in the tool list, no opener is synthesized; the
+                # behavioral floor is the existing continuation path.
                 if cand and tools_hint:
                     _fn = None
                     for _t in tools_hint:
@@ -3112,17 +3315,19 @@ def _salvage_tool_markup(text, tools_hint=None):
     if not repaired:
         return text
     logger.warning(
-        "[v78 salvage] 修复 %d 处畸形工具标记（掉斜杠闭合/缺 invoke 开口/缺参数闭合）",
+        "[v78 salvage] repaired %d malformed tool marker(s) (dropped-slash closer / missing invoke opener / missing parameter closer)",
         repaired,
     )
     out_parts.append(text[last:])
     return "".join(out_parts)
 
 
-# [v60] 工具调用标记的结构化特征（原生 tool_call/function_call 家族 +
-# DSML 装饰家族）。只匹配标签/装饰结构，不匹配散文里提到的 "DSML"
-# 字样，避免把正常讨论误判成调用。用于识别「parser 把畸形调用整块吞掉」
-# 的回合：标记在、parse_tools 却解析不出任何工具。
+# [v60] Structural signature of tool-call markup (native
+# tool_call/function_call family + DSML decorated family). Matches only
+# tag/decoration structure, not the word "DSML" mentioned in prose, so
+# ordinary discussion is never misjudged as a call. Used to identify turns
+# where "the parser swallowed a malformed call whole": the markup is there
+# but parse_tools parses out no tool.
 _TOOL_MARKUP_HINT_RE = re.compile(
     r"<\s*/?\s*(?:tool_calls?|function_calls?|invoke|parameter)\b"
     r"|[<｜\|][｜\|][｜\| \t]*DSML",
@@ -3131,27 +3336,35 @@ _TOOL_MARKUP_HINT_RE = re.compile(
 
 
 def _has_unswallowed_tool_markup(text: str) -> bool:
-    """[v60] 正文中是否存在「未被解析成工具」的工具调用标记。
+    """[v60] Whether the prose contains tool-call markup that was NOT parsed
+    into a tool.
 
-    覆盖 v58 _body_has_real_content 的两个盲区：
-    1. 只认 DSML 标记——原生 <tool_call> 家族整个漏掉；
-    2. 只抓「剥掉标记后正文全空」——「真人话 + 被吞的调用」漏掉。
-       2026-10-24 12:27:42 线上实例（session bb59b5d3）：模型输出一句
-       英文正文 + 丢了 name 字段的原生调用，parser 把调用静默吞掉，
-       finish_reason=stop 收尾，下游以为正常答完，会话死掉，用户被迫
-       手动发「继续」。
+    Covers two blind spots of v58's _body_has_real_content:
+    1. It only recognized DSML markers — the native <tool_call> family was
+       missed entirely;
+    2. It only caught "prose entirely empty after stripping markers" —
+       "real text + a swallowed call" was missed.
+       2026-10-24 12:27:42 production instance (session bb59b5d3): the model
+       emitted one line of English prose plus a native call missing its name
+       field; the parser silently swallowed the call, finish_reason=stop
+       ended the turn, downstream assumed a normal completion, the session
+       died, and the user had to send "continue" manually.
 
-    代码围栏内的标记是示例/文档，不算。think 块里引用的标记原文也不算
-    （[v66] 模型会在推理里讨论标记长什么样，实证 dee8cb2a）。能解析出
-    工具的正常回合不算（工具走正常投递路径，由下游执行或按 schema 拒绝
-    ——拒绝会带错误信息回给模型，模型能自纠，那是 v58 之前就设计好的
-    容错路径）。
+    Markup inside code fences is examples/docs and does not count. Markup
+    quoted inside a think block does not count either ([v66] the model
+    discusses what markers look like during reasoning, evidence dee8cb2a).
+    Normal turns that parse out tools do not count (tools travel the normal
+    delivery path and are executed or schema-rejected downstream — a
+    rejection carries the error back to the model, which can self-correct;
+    that fault-tolerance path predates v58).
 
-    [v78] 行内代码（单反引号）里的标记也不算。2026-10-30 16:51 线上
-    实例（session edac56c5）：模型应拟请求在教学正文里用行内代码写了
-    一处 ` <tool_call> ` 字样，围栏豁免覆盖不到行内代码，整轮被判
-    畸形、连续打断续写 2 次，最终答案被降级重写。真实的工具调用从不
-    会写在单反引号里，豁免零风险。
+    [v78] Markup inside inline code (single backticks) does not count either.
+    2026-10-30 16:51 production instance (session edac56c5): while drafting a
+    request, the model wrote a ` <tool_call> ` mention in inline code inside
+    teaching prose; the fence exemption did not cover inline code, the whole
+    turn was judged malformed, continuation was interrupted twice in a row,
+    and the final answer was downgraded and rewritten. Real tool calls are
+    never written inside single backticks, so the exemption is risk-free.
     """
     if not text:
         return False
@@ -3173,23 +3386,30 @@ def _has_unswallowed_tool_markup(text: str) -> bool:
 
 
 def _body_has_real_content(text: str) -> bool:
-    """FINISHED 时，正文剥掉工具调用标记后是否还有可读内容。
+    """At FINISHED, whether the prose still has readable content after tool-call
+    markup is stripped.
 
-    [v58] 畸形 DSML 检测：上游偶发输出只有闭合 invoke 的工具块（开口
-    <｜｜DSML｜｜ invoke name=...> 丢失），StreamToolParser 会按
-    calls>..</calls> 整块吞掉且 parse_tools 解析不出任何工具。若此时
-    FINISHED 正常到达，这一轮会被判"正常完成"，客户端只见思考、正文
-    全空（finish_reason=stop）。此处把「纯标记且解析不出工具」按无正文
-    处理，触发既有自动续写机制让上游重新产出。
+    [v58] Malformed-DSML detection: the upstream occasionally emits a tool
+    block with only the invoke closer (the opener
+    <｜｜DSML｜｜ invoke name=...> is lost); StreamToolParser swallows the
+    whole calls>..</calls> block and parse_tools parses out no tool. If
+    FINISHED then arrives normally, the turn is judged "completed
+    successfully": the client sees only thinking, prose entirely empty
+    (finish_reason=stop). "Pure markers that parse into no tool" is therefore
+    treated as no prose, triggering the existing auto-continuation mechanism
+    so the upstream produces real output.
 
-    [v60] 盲区扩展：v58 的条件只覆盖 DSML 家族且「剥完标记正文全空」。
-    模型把原生 <tool_call> 的 name 字段整个写丢时（有真人话 + 被吞的
-    调用），两个条件都不满足，回合仍会被判正常完成——改用
-    _has_unswallowed_tool_markup 统一识别「标记在但解析不出工具」，
-    不限家族、不限周围有无正文。
+    [v60] Blind-spot extension: v58's condition covered only the DSML family
+    and only "prose entirely empty after stripping". When the model drops the
+    native <tool_call>'s name field entirely (real text + a swallowed call),
+    neither condition matched and the turn was still judged complete —
+    switched to _has_unswallowed_tool_markup to uniformly detect "markup
+    present but parses into no tool", regardless of family or surrounding
+    prose.
 
-    有可读正文、或标记块能解析出有效工具（下游要投递 tool_calls）时
-    返回 True，行为与原先完全一致。
+    With readable prose, or a marker block that parses into valid tools (to be
+    delivered downstream as tool_calls), returns True — behavior identical to
+    before.
     """
     if not text or not text.strip():
         return False
@@ -3228,9 +3448,11 @@ async def _send_message_once(chat_id, auth_token, message, parent_message_id, th
         # consumed one — refill in the background for the next turn
         asyncio.create_task(_prefetch_pow(auth_token, "/api/v0/chat/completion"))
     headers = get_headers(auth_token, _pow)
-    # [v82] DeepSeek 2026-10-31 晚协议变更：parent_message_id 不再接受
-    # 0（biz_code 26 "invalid message id"）。实测不同接入点对 null 的
-    # 宽容度不一致——彻底不发该键（首条消息）是唯一全节点安全的写法。
+    # [v82] DeepSeek protocol change on the evening of 2026-10-31:
+    # parent_message_id no longer accepts 0 (biz_code 26 "invalid message
+    # id"). Different access points showed inconsistent tolerance for null —
+    # omitting the key entirely (first message) is the only way that is safe
+    # on every node.
     json_data = {
         "chat_session_id": chat_id,
         "model_type": DEFAULT_MODEL_TYPE,
@@ -3245,31 +3467,38 @@ async def _send_message_once(chat_id, auth_token, message, parent_message_id, th
         json_data["parent_message_id"] = parent_message_id
 
     _resp_ct = ""
-    non_sse_tail = []  # [v82 诊断] 非 data: 行的原文尾巴
+    non_sse_tail = []  # [v82 diagnostics] raw tail of non-"data:" lines
     think_open = False
     got_output = False
     got_body = False
     finished = False
-    # [v77 PR#70 移植] DeepSeek 会以 status INCOMPLETE 结束被它截断的回复
-    # （长上下文思考中可见）。还没有任何回答文本时这是失败轮，不是完成轮：
-    # 空 "stop" 会让 agent 客户端误以为轮次正常结束。
+    # [v77 PR#70 port] DeepSeek ends replies it truncated with status
+    # INCOMPLETE (visible during long-context thinking). With no answer text
+    # yet, this is a failed turn, not a completed one: an empty "stop" makes
+    # agent clients believe the turn ended normally.
     incomplete = False
-    # [v58] 累积非思考正文，供 FINISHED 时判断是否只剩未解析的工具标记
+    # [v58] Accumulate non-thinking prose so FINISHED can judge whether only
+    # unparsed tool markup remains
     body_acc = []
-    # [v63] 首字节预算提前到 POST 之前定义（S8）：该预算的设计意图本就是
-    # "从发请求到见到第一个字节"（原注释：预填期上游"一个字都不吐"，连响应
-    # 头都不发），但旧实现只把它用在 body 首字节上，响应头阶段裸奔、只能等
-    # session sock_read=600s。提前后 POST 与后续读取共用同一预算：POST 的
-    # 响应头等待受 header_timeout 约束，body 首字节受同一 deadline 约束，
-    # 语义统一。env 键与默认值不变（DEEPSEEKER_FIRST_BYTE_TIMEOUT=120）。
+    # [v63] The first-byte budget is now defined before the POST (S8): the
+    # budget's design intent was always "from sending the request to seeing
+    # the first byte" (original comment: during prefill the upstream "does not
+    # emit a single character", not even response headers), but the old
+    # implementation only applied it to the first body byte, leaving the
+    # header phase unprotected and stuck on the session's sock_read=600s.
+    # With the budget moved earlier, the POST and subsequent reads share it:
+    # the POST's header wait is bounded by header_timeout and the first body
+    # byte by the same deadline — unified semantics. The env key and default
+    # are unchanged (DEEPSEEKER_FIRST_BYTE_TIMEOUT=120).
     _first_byte_budget = float(os.getenv("DEEPSEEKER_FIRST_BYTE_TIMEOUT", "120"))
     _first_byte_deadline = time.time() + _first_byte_budget
     resp = await post_with_failover(
         "/api/v0/chat/completion",
         headers=headers, json=json_data,
-        # [v63] S8：响应头阶段独立预算。上游"接了请求不回响应头"时最多
-        # 挂起 120s 即取消并 failover（旧行为干等 600s）；正常流 POST
-        # 毫秒返回，零开销。
+        # [v63] S8: independent header-phase budget. If the upstream "accepts
+        # the request but never returns headers", cancel and failover after at
+        # most 120s (old behavior waited 600s doing nothing); on the normal
+        # path the POST returns in milliseconds, zero overhead.
         header_timeout=_first_byte_budget,
         # cookies=cookie,  # Backup WAF fallback
     )
@@ -3294,15 +3523,17 @@ async def _send_message_once(chat_id, auth_token, message, parent_message_id, th
                     if not isinstance(op, dict):
                         continue
                     if op.get("p") == "quasi_status":
-                        # [v77 PR#70 移植] 状态词永不属于内容；INCOMPLETE 记账
+                        # [v77 PR#70 port] Status words never belong to content;
+                        # record INCOMPLETE
                         incomplete = incomplete or op.get("v") == "INCOMPLETE"
                         continue
                     async for chunk in _emit_from_event(op):
                         yield chunk
                 return
 
-            # [v77 PR#70 移植] 其他 status 字段（"response/status"、".../status"）
-            # 携带 INCOMPLETE / WIP 等状态词，永不属于内容。
+            # [v77 PR#70 port] Other status fields ("response/status",
+            # ".../status") carry INCOMPLETE / WIP style status words, never
+            # content.
             _p_name, _p_val = str(data.get("p") or ""), data.get("v")
             if (
                 _p_name.endswith("status")
@@ -3316,40 +3547,52 @@ async def _send_message_once(chat_id, auth_token, message, parent_message_id, th
             if data.get("p") == "response/status" and data.get("v") == "FINISHED":
                 if think_open:
                     yield "</think>"
-                # [v77 PR#70 移植适配] INCOMPLETE 且无任何回答 = 上游截断了
-                # 回复。抛中断走既有 auto-continue 续写恢复（比上游的 502 更
-                # 优：续写轮要求"继续"，模型从中断处接着产出）。
+                # [v77 PR#70 port adaptation] INCOMPLETE with no answer at all =
+                # the upstream truncated the reply. Raise an interruption to
+                # recover via the existing auto-continue (better than the
+                # upstream's 502: the continuation turn asks to "continue" and
+                # the model resumes from where it left off).
                 if incomplete and not got_body:
                     logger.warning("[v77] FINISHED with status INCOMPLETE and no body -> continue")
                     raise _SseStreamInterrupted()
                 if not got_output:
                     _raise_empty_sse_response(recent_lines, parsed_events, _resp_ct, non_sse_tail)
-                # [v57 移植 v39] FINISHED with thinking only, no body: upstream
+                # [v57 ported from v39] FINISHED with thinking only, no body: upstream
                 # closed the turn without ever producing an answer. Treat as
                 # interrupted so the auto-continue path asks for the real reply.
                 if not got_body:
                     logger.warning("[auto-continue] FINISHED but no body (thinking only) -> continue")
                     raise _SseStreamInterrupted()
-                # [v58] 正文只剩未解析的工具调用标记时同样按中断处理：
-                # 上游偶发输出畸形 DSML（有 </｜｜DSML｜｜ invoke> 闭合却没有
-                # <｜｜DSML｜｜ invoke name=...> 开口）——2026-10-24 16:53:51
-                # 线上实例（session 8e13b53e，WAL rowid 1541，5 个帧版本一致，
-                # 1208 字符）：思考完整、FINISHED 正常，但 StreamToolParser 把
-                # 整个 calls 块吞掉（parse_tools 解析不出工具），客户端只见
-                # 思考、正文全空，用户被迫手动发「继续」。此处让既有自动续写
-                # 接管，重新请求上游产出真正回复（续写轮仍带 thinking）。
+                # [v58] When the prose is nothing but unparsed tool-call markup,
+                # treat it as an interruption too: the upstream occasionally
+                # emits malformed DSML (a </｜｜DSML｜｜ invoke> closer with no
+                # <｜｜DSML｜｜ invoke name=...> opener) — 2026-10-24 16:53:51
+                # production instance (session 8e13b53e, WAL rowid 1541, 5
+                # frames all the same version, 1208 chars): thinking complete,
+                # FINISHED normal, but StreamToolParser swallowed the whole
+                # calls block (parse_tools parsed out no tool); the client saw
+                # only thinking, prose empty, and the user had to send
+                # "continue" manually. Here the existing auto-continuation
+                # takes over and asks the upstream again for a real reply
+                # (continuation turns still carry thinking).
                 body_text = "".join(body_acc)
-                # [v78] 缺开口/掉斜杠抢救：能确定性修复的畸形块直接修好，
-                # 不再按 malformed 中断续写（续写轮会重犯且多花一整轮上游
-                # 往返）。修不好时保持原样，走既有 malformed 路径。
+                # [v78] Missing-opener/dropped-slash salvage: malformed blocks
+                # that can be repaired deterministically are fixed directly
+                # instead of interrupting into a continuation turn (which
+                # would reproduce the shape and cost a full extra upstream
+                # round-trip). Unrepairable blocks stay as-is and take the
+                # existing malformed path.
                 _salvaged_body = _salvage_tool_markup(body_text)
                 if _salvaged_body != body_text:
                     body_text = _salvaged_body
                 if not _body_has_real_content(body_text):
                     logger.warning("[auto-continue] FINISHED but body is unparsed tool markup only -> continue")
-                    # [v62] 分叉：因畸形工具调用触发时，把原始调用文本带进
-                    # 异常，让续写轮用诊断提示词（模型知道错在哪才能重写），
-                    # 而不是通用的"接着上文继续写"（模型只能掷硬币）。
+                    # [v62] Fork: when triggered by a malformed tool call,
+                    # carry the original call text into the exception so the
+                    # continuation turn uses the diagnostic prompt (the model
+                    # can only rewrite correctly if it knows what went wrong),
+                    # instead of the generic "continue from where we left off"
+                    # (where the model can only coin-flip).
                     if _has_unswallowed_tool_markup(body_text):
                         raise _SseStreamInterrupted(
                             "malformed_tool_call", _extract_malformed_call(body_text))
@@ -3425,7 +3668,8 @@ async def _send_message_once(chat_id, auth_token, message, parent_message_id, th
             except Exception:
                 return
             if isinstance(data, dict):
-                # [v84] 新协议：流开头广播真实消息编号（request/response）
+                # [v84] New protocol: real message numbers broadcast at stream
+                # start (request/response)
                 if "response_message_id" in data:
                     meta["response_message_id"] = data["response_message_id"]
                 parsed_events.append(data)
@@ -3446,12 +3690,16 @@ async def _send_message_once(chat_id, auth_token, message, parent_message_id, th
         _aiter = resp.content.iter_any()
         _idle_timeout = float(os.getenv("DEEPSEEKER_STREAM_IDLE_TIMEOUT", "25"))
         _last_emit = [time.time()]
-        # [v57 移植 v45] 首字节宽限：上游预填长上下文时一个字都不吐（实测
-        # 120k 输入 18.7s、300k 输入 71s），而旧代码从发请求起就按 25s 空闲
-        # 判定，长输入会在预填途中被误判挂起 -> 发续写 -> parent+2 -> 重新
-        # 预填，反而更慢，且能造出"思考完没输出"。首字节到达前用独立预算，
-        # 之后才启用空闲判定。（_first_byte_budget/_first_byte_deadline 已在
-        # [v63] 提前至 POST 之前定义，与响应头阶段共用同一预算。）
+        # [v57 ported from v45] First-byte grace: during prefill of a long
+        # context the upstream emits nothing at all (measured: 120k input
+        # 18.7s, 300k input 71s), while the old code applied the 25s idle
+        # verdict from the moment the request was sent — long inputs were
+        # misjudged as hung mid-prefill -> a continuation was sent ->
+        # parent+2 -> prefill all over again, which was slower and could
+        # produce "thinking done, no output". An independent budget is used
+        # before the first byte; only afterwards does the idle verdict kick
+        # in. (_first_byte_budget/_first_byte_deadline were already moved
+        # before the POST in [v63], sharing one budget with the header phase.)
         _got_first_byte = False
         while True:
             # [v30] Silence is measured on CONTENT EMISSION, not raw bytes:
@@ -3463,31 +3711,38 @@ async def _send_message_once(chat_id, auth_token, message, parent_message_id, th
             else:
                 remaining = _first_byte_deadline - time.time()
             if remaining <= 0:
-                # [v57 移植 v49] 静默一律按中断处理，不按 got_body 分流：
-                # v45 曾在"正文已输出后静默"时改为正常收尾不续写，结果真实
-                # 事故里回复断在半个代码块——收尾后客户端拿到残缺输出且不会
-                # 再续写。FINISHED 才是"正常说完"的唯一凭证（同 v43 结论），
-                # 没拿到就中断触发续写，由续写轮补全。
-                logger.warning("[stream-stall] 上游流 %.0fs 无新内容（got_body=%s），按中断处理触发续写", _idle_timeout, got_body)
+                # [v57 ported from v49] Silence is always treated as an
+                # interruption, not branched on got_body: v45 once changed
+                # "silence after body output" to end normally without
+                # continuing, and in a real incident the reply broke off
+                # mid-code-block — after that ending, the client received
+                # truncated output and nothing would ever continue it.
+                # FINISHED is the only proof of "finished speaking properly"
+                # (same conclusion as v43); without it, interrupt to trigger
+                # continuation and let the continuation turn complete the
+                # reply.
+                logger.warning("[stream-stall] upstream stream idle for %.0fs with no new content (got_body=%s); treating as interruption to trigger continuation", _idle_timeout, got_body)
                 if think_open:
                     yield "</think>"
-                logger.warning("[stream-stall] 上游流 %.0fs 未产出任何正文（疑似挂起），主动中断以触发自动续写", _idle_timeout)
+                logger.warning("[stream-stall] upstream stream produced no prose for %.0fs (suspected hang); interrupting proactively to trigger auto-continuation", _idle_timeout)
                 raise _SseStreamInterrupted()
             try:
                 chunk = await asyncio.wait_for(_aiter.__anext__(), timeout=remaining)
             except StopAsyncIteration:
                 break
             except asyncio.TimeoutError:
-                logger.warning("[stream-stall] 上游流 %.0fs 无新内容（got_body=%s），按中断处理触发续写", _idle_timeout, got_body)
+                logger.warning("[stream-stall] upstream stream idle for %.0fs with no new content (got_body=%s); treating as interruption to trigger continuation", _idle_timeout, got_body)
                 if think_open:
                     yield "</think>"
-                logger.warning("[stream-stall] 上游流 %.0fs 未产出任何正文（疑似挂起），主动中断以触发自动续写", _idle_timeout)
+                logger.warning("[stream-stall] upstream stream produced no prose for %.0fs (suspected hang); interrupting proactively to trigger auto-continuation", _idle_timeout)
                 raise _SseStreamInterrupted()
             if not chunk:
                 continue
             if not _got_first_byte:
-                # 首字节到达才重置空闲计时：否则首字节耗时（长上下文预填
-                # 可达 71s）会直接吃光空闲预算，第二圈就误判挂起。
+                # Only reset the idle timer once the first byte arrives:
+                # otherwise the first-byte latency (long-context prefill can
+                # reach 71s) would burn the idle budget outright and the
+                # second loop would already misjudge a hang.
                 _got_first_byte = True
                 _last_emit[0] = time.time()
             line_buf += chunk
@@ -3515,78 +3770,112 @@ async def _send_message_once(chat_id, auth_token, message, parent_message_id, th
 
         if think_open:
             yield "</think>"
-        # [v77 PR#70 移植适配] 流尾同样检查 INCOMPLETE
+        # [v77 PR#70 port adaptation] Check INCOMPLETE at end of stream as well
         if incomplete and not got_body:
             logger.warning("[v77] stream ended with status INCOMPLETE and no body -> continue")
             raise _SseStreamInterrupted()
         if not got_output:
             _raise_empty_sse_response(recent_lines, parsed_events, _resp_ct, non_sse_tail)
         if not finished:
-            # [v57 移植 v43] FINISHED 是"正常说完"的唯一凭证。没收到就说明流被
-            # 上游/网络掐断，哪怕已经出过正文也可能断在半句——按中断处理触发
-            # 续写。v34 的 got_body 守卫在"说完后断流"上是对的，在"话说到
-            # 一半被掐"上会静默截断输出（2026-10-23 现场：回复断在代码块中间）。
-            logger.warning("[auto-continue] 未收到 FINISHED（got_body=%s），按中断处理触发续写", got_body)
+            # [v57 ported from v43] FINISHED is the only proof of "finished
+            # speaking properly". Not receiving it means the stream was cut by
+            # the upstream/network; even with prose already emitted it may
+            # have broken mid-sentence — treat as an interruption to trigger
+            # continuation. v34's got_body guard was right for "stream broke
+            # after speaking" but silently truncated output for "cut off
+            # mid-sentence" (2026-10-23 field: reply broke inside a code
+            # block).
+            logger.warning("[auto-continue] no FINISHED received (got_body=%s); treating as interruption to trigger continuation", got_body)
             raise _SseStreamInterrupted()
 
 
 _CONTINUE_PROMPT = (
-    "接着上文继续写。不要重复已经写过的内容，不要任何开场白、解释或复述。"
-    "如果上文已经完整写完了，只输出【END】，不要输出任何别的内容。"
+    "Continue writing from where the text above left off. Do not repeat "
+    "anything already written; no greetings, explanations, or restatements. "
+    "If the text above is already fully complete, output only 【END】 and "
+    "nothing else."
 )
 
-# [v64] 零可见内容场景的续写提示词。与 _CONTINUE_PROMPT 的分工：
-# 旧提示词的 【END】 逃逸口服务"已写出真实正文、只是被掐断"的场景——
-# 模型说句 【END】 表示写完，过滤器砍掉避免重复追加。但当着整个回合
-# 还没有发出过任何可见内容时（思考后上游直接结束回合），模型面对一个
-# 空的助手回合会顺势只吐 【END】，被过滤器整段砍光 -> 客户端只收到
-# 思考、finish_reason=stop，回合静默死亡（2026-10-25 01:04:11 线上实例
-# session d4a7e123：517 字思考后零输出，前 12 轮均为工具调用轮）。
-# 此场景明确告知"客户端什么都没收到"并禁用终止标记，要求直接产出。
+# [v64] Continuation prompt for the zero-visible-content case. Division of
+# labor with _CONTINUE_PROMPT: the old prompt's 【END】 escape hatch serves
+# the "real prose was written, just cut off" case — the model says 【END】 to
+# mean it is done, and the filter cuts it to avoid duplicate appends. But when
+# the turn has not yet emitted ANY visible content (the upstream ends the turn
+# right after thinking), the model facing an empty assistant turn tends to
+# emit only 【END】, which the filter cuts entirely -> the client receives only
+# thinking, finish_reason=stop, and the turn dies silently (2026-10-25
+# 01:04:11 production instance session d4a7e123: 517 chars of thinking then
+# zero output; the previous 12 turns were all tool-call turns).
+# This case explicitly tells the model "the client received nothing" and
+# disables the termination marker, demanding direct output.
 _CONTINUE_PROMPT_EMPTY = (
-    "【系统通知】你上一轮的回复只有思考过程，没有任何正文或工具调用，"
-    "客户端什么都没有收到。请直接给出完整的回复内容，或重新发出工具调用。"
-    "禁止输出【END】或其他终止标记，禁止复述思考内容，不要任何开场白、"
-    "解释或自我评价。"
+    "[SYSTEM NOTICE] Your previous reply contained only thinking, with no "
+    "prose or tool calls, and the client received nothing. Please output the "
+    "complete reply content directly, or re-issue the tool call. "
+    "Outputting 【END】 or any other termination marker is forbidden; do not "
+    "restate the thinking content; no greetings, explanations, or "
+    "self-evaluation."
 )
 
-# [v62] 畸形工具调用场景的续写提示词。与 _CONTINUE_PROMPT 的分工：
-# 通用提示词服务"断流/卡死/思考无输出"（模型不缺信息，只是被催续写）；
-# 本提示词服务"工具调用格式错误被静默吞掉"（2026-10-24 12:27 线上实例
-# session bb59b5d3：模型输出一句正文 + 缺 name 的原生调用，parser 吞块、
-# parse_tools 解析不出、finish_reason=stop，会话死掉）。
-# [v78] 改版：不再把畸形调用原文附进提示词——长会话里原文反而成了坏
-# 样例，模型照抄自己刚犯的错（2026-10-29 23:15 会话 cd859ddc 连续三轮
-# 重犯同一"缺 invoke 开口"形态的实证）。改为只描述常见病因与正确格式；
-# 原文仍由调用点写入服务端日志，运维可见性不受损。
+# [v62] Continuation prompt for the malformed-tool-call case. Division of
+# labor with _CONTINUE_PROMPT: the generic prompt serves "stream cut / hung /
+# thinking with no output" (the model lacks no information, it just needs to
+# be nudged to continue); this prompt serves "a tool call with a broken format
+# silently swallowed" (2026-10-24 12:27 production instance session bb59b5d3:
+# the model emitted one line of prose plus a native call missing its name; the
+# parser swallowed the block, parse_tools parsed nothing, finish_reason=stop,
+# session died).
+# [v78] Revision: the malformed call's original text is no longer attached to
+# the prompt — in long sessions the raw text becomes a bad example and the
+# model copies its own fresh mistake (production evidence 2026-10-29 23:15
+# session cd859ddc, three consecutive turns reproducing the same
+# "missing invoke opener" shape). Instead it only describes the common causes
+# and the correct format; the raw text is still written to server logs by the
+# call site, so operator visibility is unaffected.
 _MALFORMED_TOOL_PROMPT = (
-    "【系统通知】你上一轮发出的工具调用格式错误，服务端无法解析，已拒绝执行。"
-    "错误位置：你上一条消息里的那次工具调用，即紧挨本通知之前的最后一段输出。\n"
-    "常见病因：工具调用块缺少 <invoke name=\"工具名\"> 开口行，或闭合标签"
-    "丢了 </ 中的斜杠，或 name / arguments 字段缺失。\n"
-    "工具调用的正确格式为（name 与 arguments 两个字段都不可缺少；"
-    "示例仅供参照格式，切勿照抄示例内容，工具名必须是真实存在的工具）：\n"
-    "```\n<tool_call>{\"name\": \"工具名\", \"arguments\": {...}}</tool_call>\n```\n\n"
-    "请重新发出格式正确的工具调用；如果这个任务已不需要工具，"
-    "直接给出最终答案，不要复述上文，不要解释这个错误。"
+    "[SYSTEM NOTICE] The tool call you issued in your previous turn was "
+    "malformed and could not be parsed by the server, so it was rejected and "
+    "not executed. "
+    "Location of the error: the tool call in your previous message, i.e. the "
+    "last block of output immediately before this notice.\n"
+    "Common causes: the tool-call block is missing its "
+    "<invoke name=\"tool_name\"> opener line, or the closing tag lost the "
+    "slash in </, or the name / arguments fields are missing.\n"
+    "The correct format for a tool call is (both the name and the arguments "
+    "fields are indispensable; the example is for format reference only — "
+    "never copy its content, and the tool name must be a real, existing "
+    "tool):\n"
+    "```\n<tool_call>{\"name\": \"tool_name\", \"arguments\": {...}}</tool_call>\n```\n\n"
+    "Please re-issue the tool call in the correct format; if this task no "
+    "longer needs a tool, give the final answer directly — do not restate "
+    "the text above and do not explain this error."
 )
 
-# [v78-c] 递进披露：只有"再错就没有下一次"的最后一次续写才附上原文，
-# 供模型精确对照定位。此前各次绝不附原文（防坏样例模仿，2026-10-29
-# cd859ddc 三连犯实证）。最后一次附原文的风险可控：若这次仍失败，
-# 紧随其后的强制换血会把污染随旧会话整体丢弃；若这次成功，错误已被
-# 交付链消化，残留样例由换血阈值与抢救层继续兜底。
+# [v78-c] Escalating disclosure: only the final continuation — the one where
+# another mistake means no next chance — attaches the original text, so the
+# model can compare precisely to locate the error. No earlier attempt ever
+# attaches it (to prevent bad-example imitation; production evidence
+# 2026-10-29 cd859ddc, three consecutive repeats). The risk of attaching it on
+# the final try is contained: if this attempt also fails, the forced rollover
+# that immediately follows discards the pollution wholesale with the old
+# session; if it succeeds, the error has been absorbed by the delivery chain
+# and residual examples are still covered by the rollover threshold and the
+# salvage layer.
 _MALFORMED_TOOL_FINAL_SUFFIX = (
-    "\n\n【最后一次重试】以下是你上一条消息中写坏的调用原文，仅供对照定位"
-    "错误所在，切勿模仿其中的错误格式：\n"
+    "\n\n[FINAL RETRY] Below is the original text of the call you mangled in "
+    "your previous message, provided only so you can compare and locate the "
+    "error — never imitate its broken format:\n"
     "<rejected_call>\n{raw}\n</rejected_call>"
 )
 
-# [v78] 畸形续写计数（按上游 chat 记账）：send_message 每次因
-# malformed_tool_call 续写时 +1；干净收尾（FINISHED 且有可见正文）时清零。
-# app.handle_chat 在同会话计数达到阈值时强制换血（rollover 到全新上游
-# 会话）——上游会话记忆里积攒的模型自产坏样例我们改不到，唯一根治手段
-# 就是让会话搬家，自带摘要重建，坏样例不再回流。
+# [v78] Malformed-continuation counter (accounted per upstream chat):
+# +1 each time send_message continues due to malformed_tool_call; reset to
+# zero on a clean finish (FINISHED with visible prose). app.handle_chat forces
+# a rollover (to a brand-new upstream session) when the count for the same
+# session reaches the threshold — the model's self-produced bad examples
+# accumulated in the upstream session's memory are beyond our reach; the only
+# real cure is moving the session, rebuilding from a carried-over summary so
+# the bad examples no longer flow back.
 _MALFORMED_CONTINUE_COUNT = {}
 
 
@@ -3598,12 +3887,17 @@ def reset_malformed_continue_count(chat_id):
     _MALFORMED_CONTINUE_COUNT.pop(chat_id, None)
 
 
-# [v79] 空流兜底计数器：上游流"正常结束但零可见输出"（悬空轮）时 +1；
-# 有可见输出的正常回合清零。悬空轮会在上游会话记忆里留下"用户消息发出
-# 后模型零回复"的断点，后续上下文断裂（生产实证 2026-10-30 会话 67010e7d
-# 失忆事件：22:26:54 轮零输出 → 客户端收到空回复 → 模型对"四件事"失忆）。
-# 与 _MALFORMED_CONTINUE_COUNT 同一套机制：app.handle_chat 在同会话计数
-# 达到阈值时强制换血（rollover 到全新上游会话），摘要重建，坏状态不回流。
+# [v79] Empty-stream fallback counter: +1 when an upstream stream "ends
+# normally with zero visible output" (a dangling turn); reset to zero by a
+# normal turn with visible output. A dangling turn leaves a "user message
+# sent, model replied with nothing" breakpoint in the upstream session's
+# memory, and later context breaks (production evidence 2026-10-30 session
+# 67010e7d amnesia event: the 22:26:54 turn had zero output -> the client got
+# an empty reply -> the model forgot "the four things").
+# Same mechanism as _MALFORMED_CONTINUE_COUNT: app.handle_chat forces a
+# rollover (to a brand-new upstream session) when the count for the same
+# session reaches the threshold, rebuilding from a summary so the bad state
+# does not flow back.
 _EMPTY_STREAM_COUNT = {}
 
 
@@ -3621,11 +3915,14 @@ def reset_empty_stream_count(chat_id):
 
 
 def _extract_malformed_call(text: str, limit: int = 400) -> str:
-    """[v62] 从正文里提取畸形工具调用的原文（截断到 limit），供诊断提示词附载。
+    """[v62] Extract the original text of the malformed tool call from the
+    prose (truncated to limit), for the diagnostic prompt to attach.
 
-    策略：找到第一个工具标记（_TOOL_MARKUP_HINT_RE，代码围栏内的示例跳过），
-    从该处起 600 字符内找最后一个 > 作为调用块结尾（覆盖原生跨行 JSON 与
-    DSML 多行参数块）；取不到就退回标记后 300 字符。
+    Strategy: find the first tool marker (_TOOL_MARKUP_HINT_RE, skipping
+    examples inside code fences), then within 600 chars from that point find
+    the last > as the end of the call block (covers native multi-line JSON as
+    well as DSML multi-line parameter blocks); if none found, fall back to
+    300 chars after the marker.
     """
     if not text:
         return ""
@@ -3643,14 +3940,18 @@ _END_MARKERS = ("【END】", "[END]", "<END>")
 
 
 class _ContinuationFilter:
-    """续写轮的输出过滤器。
+    """Output filter for continuation turns.
 
-    第一轮原样透传，不做任何改写。续写轮把输出缓冲到 flush，做三件事：
-    1. 砍掉终止标记之后的所有内容（模型用【END】表示"上文已完整"）
-    2. 去掉前导空行/空白
-    3. 与已发内容做尾部去重（模型常把最后一句原样重说一遍）
+    The first turn passes through verbatim, no rewriting. Continuation turns
+    buffer output until flush and do three things:
+    1. Cut everything after a termination marker (the model uses 【END】 to
+       mean "the text above is complete")
+    2. Strip leading blank lines/whitespace
+    3. Tail-deduplicate against already-sent content (the model often repeats
+       its final sentence verbatim)
 
-    去重要求重叠 >= 8 字符才削，避免"的"、"了"这类单字巧合造成误删。
+    Dedup requires an overlap of >= 8 characters before cutting, so single
+    character coincidences cannot cause false deletions.
     """
 
     def __init__(self, passthrough, tail=""):
@@ -3698,18 +3999,22 @@ class _ContinuationFilter:
 
 
 class _VisibleTracker:
-    """[v64] 跨 chunk 判断客户端是否收到过"可见正文"（非思考内容）。
+    """[v64] Tracks across chunks whether the client ever received "visible
+    prose" (non-thinking content).
 
-    喂入的必须是经过 _ContinuationFilter 之后真正 yield 给客户端的内容
-    （续写轮被砍掉的 【END】 不会进来——客户端本就没看到它）。
+    What is fed in must be content that actually reached the client after
+    _ContinuationFilter (a 【END】 cut from a continuation turn never enters
+    here — the client never saw it).
 
-    语义与 app._StreamTagSplitter 的 think_done 闭锁对齐：首个思考块
-    闭合之后，后续内容一律算可见（splitter 也不再把它分流为 reasoning）；
-    工具调用标记算可见——它对用户/下游是真实产出。
+    Semantics align with app._StreamTagSplitter's think_done latch: after the
+    first thinking block closes, all subsequent content counts as visible
+    (the splitter no longer routes it as reasoning either); tool-call markup
+    counts as visible — it is real output to the user/downstream.
 
-    前提契约：调用方保证 "<think>"/"</think>" 标签原子到达（_emit_from_event
-    正是整串 yield；_ContinuationFilter 的 passthrough 与 flush 都不切分
-    chunk），故无需 splitter 那样的标签前缀扣留逻辑。
+    Contract: the caller guarantees "<think>"/"</think>" tags arrive
+    atomically (_emit_from_event yields them as whole strings; neither
+    _ContinuationFilter's passthrough nor flush splits chunks), so no
+    splitter-style tag-prefix hold-back logic is needed.
     """
 
     __slots__ = ("in_think", "done", "seen")
@@ -3745,22 +4050,27 @@ class _VisibleTracker:
                 i = j + 8
 
 
-# [v77 PR#71 移植] DeepSeek 网页端每账号同时只能生成一条回复；第二个并发
-# 发送会报 "A message is being generated" / "Messages too frequent"。改为
-# 按账号排队发送。所有生成都走 send_message，因此覆盖全部调用方。
+# [v77 PR#71 port] The DeepSeek web backend allows only one reply being
+# generated per account at a time; a second concurrent send raises
+# "A message is being generated" / "Messages too frequent". Sends are now
+# queued per account. All generation goes through send_message, so every
+# caller is covered.
 _send_locks = {}
 
 
 def token_busy(auth_token):
-    """[v77 PR#71 移植] 该账号正在生成（其发送锁被持有）时为 True。"""
+    """[v77 PR#71 port] True while the account is generating (its send lock is
+    held)."""
     lock = _send_locks.get(auth_token)
     return bool(lock and lock.locked())
 
 
 async def send_message(chat_id, auth_token, message, parent_message_id, thinking=False, search=False, file_ids_=None, max_continue=2):
-    # [v77 PR#71 移植] 上游流由独立任务排空：即使消费方中途放弃这个
-    # generator（客户端消失且未 aclose），锁也会在 DeepSeek 结束时释放——
-    # 跨 yield 持锁会泄漏锁，把该账号之后的所有请求全部卡死。
+    # [v77 PR#71 port] The upstream stream is drained by an independent task:
+    # even if the consumer abandons this generator midway (client vanished
+    # without aclose), the lock is released when DeepSeek finishes — holding
+    # the lock across yields would leak it and deadlock every later request
+    # for that account.
     lock = _send_locks.setdefault(auth_token, asyncio.Lock())
     queue = asyncio.Queue()
     done = object()
@@ -3789,40 +4099,50 @@ async def send_message(chat_id, auth_token, message, parent_message_id, thinking
                 raise item
             yield item
     finally:
-        # 消费方关闭我们（断连、abort）时仍取消上游。
+        # still cancel the upstream when the consumer closes us (disconnect,
+        # abort).
         task.cancel()
 
 
 async def _send_message_locked(chat_id, auth_token, message, parent_message_id, thinking=False, search=False, file_ids_=None, max_continue=2):
-    """带自动续写的对外入口。
+    """Public entry point with automatic continuation.
 
-    上游流在 FINISHED 之前异常中断（断流/断连/上游提前关闭）时，自动以
-    『继续』在同会话内续写——parent 严格按上游 ready 广播的真实编号前进
-    （[v85] 全量原生适配：广播没到则原地不动，绝不猜测），续写内容无缝
-    拼进同一个客户端流。最多自动续写 max_continue 次。
+    When the upstream stream ends abnormally before FINISHED (stall/
+    disconnect/early close), it automatically continues within the same
+    session with a "continue" message — parent advances strictly by the real
+    numbers broadcast in the upstream ready event ([v85] full native
+    adaptation: no broadcast means no movement, never a guess), and the
+    continuation content is spliced seamlessly into the same client stream.
+    At most max_continue automatic continuations.
 
-    [v64] 两处加固（根因：2026-10-25 01:04 线上"思考完没输出"）：
-    1. 提示词分流：本回合还没发出过任何可见正文时，续写不用带 【END】
-       逃逸口的 _CONTINUE_PROMPT，换用明令禁止终止标记的
-       _CONTINUE_PROMPT_EMPTY——否则模型对着空助手回合只吐 【END】，
-       被过滤器砍光后客户端静默无所得。
-    2. 收尾安全网：整个回合结束时可见正文仍为空（续写轮只吐终止标记），
-       还有预算就换提示词再试，没预算给出可见提示而非静默 return。
+    [v64] Two hardenings (root cause: the 2026-10-25 01:04 production
+    "thinking done, no output"):
+    1. Prompt branching: when this turn has not yet emitted any visible
+       prose, continuation does not use _CONTINUE_PROMPT with its 【END】
+       escape hatch; it switches to _CONTINUE_PROMPT_EMPTY, which explicitly
+       forbids termination markers — otherwise the model facing an empty
+       assistant turn emits only 【END】, the filter cuts it all, and the
+       client silently receives nothing.
+    2. Finish safety net: if visible prose is still empty at the end of the
+       whole turn (continuation turns only emitted termination markers), retry
+       with the other prompt while budget remains; when the budget is gone,
+       emit a visible notice instead of returning silently.
     """
     parent = parent_message_id
     msg = message
     files = file_ids_
-    _LAST_REAL_PARENT.pop(chat_id, None)  # [v84] 本轮尚未产生新编号
+    _LAST_REAL_PARENT.pop(chat_id, None)  # [v84] this turn has produced no new number yet
     emitted = ""
-    # [v64] 客户端可见正文跟踪（跨 attempt 累积）；喂入的均为过滤后
-    # 真正 yield 给客户端的内容。
+    # [v64] Client-visible prose tracking (accumulated across attempts); what
+    # is fed in is always filtered content that actually reached the client.
     visible = _VisibleTracker()
     for attempt in range(max_continue + 1):
         flt = _ContinuationFilter(passthrough=(attempt == 0), tail=emitted)
-        # [v57 移植 v50] 续写轮原样透传 thinking，不强制关闭：
-        # v39/v40 曾实验 _thinking = thinking if attempt == 0 else False，
-        # 实测第二轮上游会把新思考当正文吐出来（B3 思考泄漏），真终局
-        # 已回退为该行。
+        # [v57 ported from v50] Continuation turns pass thinking through
+        # verbatim instead of forcing it off: v39/v40 experimented with
+        # _thinking = thinking if attempt == 0 else False, and in practice the
+        # upstream emitted the second turn's new thinking as prose (the B3
+        # thinking leak); the real final version reverted to this line.
         _thinking = thinking
         clean_end = False
         interrupt_reason = "interrupted"
@@ -3838,7 +4158,7 @@ async def _send_message_locked(chat_id, auth_token, message, parent_message_id, 
                 emitted = (emitted + out)[-400:]
                 visible.feed(out)
                 yield out
-            clean_end = True  # 正常完成（上游发出 FINISHED）
+            clean_end = True  # completed normally (upstream sent FINISHED)
         except _SseStreamFinished:
             for out in flt.flush():
                 emitted = (emitted + out)[-400:]
@@ -3850,97 +4170,122 @@ async def _send_message_locked(chat_id, auth_token, message, parent_message_id, 
                 emitted = (emitted + out)[-400:]
                 visible.feed(out)
                 yield out
-            # except as 变量在块结束即解绑（PEP 3110），先取出再用
+            # `except as` variables are unbound at block exit (PEP 3110);
+            # extract before use
             interrupt_reason = getattr(e, "reason", "interrupted")
             interrupt_detail = getattr(e, "detail", "")
             pass
         except UpstreamError as e:
-            # [v81] 空流重试：上游偶发返回完全空的 SSE（零碎片）。实锤
-            # 2026-10-31 21:02（key:2 客户端）：工具结果回传轮上游空流，
-            # 502 直接穿透到客户端，用户看到"模型调用完工具就停了"。
-            # 空流 = 本轮什么都没产出，按"无可见正文的中断"处理走续写
-            # （visible.seen=False 自动命中 v64 的禁 END 提示词分流）。
-            # 上下文超限变体（prompt may exceed）不重试——继续问只会再
-            # 超限；其余错误码（401/403/429/400、上游报错事件）语义明确，
-            # 照旧上抛。
+            # [v81] Empty-stream retry: the upstream occasionally returns a
+            # completely empty SSE (zero fragments). Evidence 2026-10-31
+            # 21:02 (key:2 client): on a tool-result round the upstream sent
+            # an empty stream, the 502 pierced straight through to the
+            # client, and the user saw "the model stopped right after calling
+            # the tool".
+            # An empty stream = this turn produced nothing; handle it as
+            # "interruption with no visible prose" and continue
+            # (visible.seen=False automatically hits v64's END-forbidden
+            # prompt branch). The context-overflow variant (prompt may
+            # exceed) is not retried — asking again would just overflow
+            # again; other error codes (401/403/429/400, upstream error
+            # events) have clear semantics and are raised as before.
             if getattr(e, "status", None) == 502 and "no assistant fragments" in str(e):
                 for out in flt.flush():
                     emitted = (emitted + out)[-400:]
                     visible.feed(out)
                     yield out
                 interrupt_reason = "empty_stream"
-                logger.warning("[v81] 上游空流（502 零输出），按中断处理走自动续写")
+                logger.warning("[v81] upstream empty stream (502, zero output); treating as interruption to auto-continue")
             else:
                 raise
         if clean_end:
-            # [v84] 上游广播了真实编号 -> 直接对接（含本轮可能产生的续写，
-            # meta 只保留最后一次广播，即本 exchange 最终 response id）。
-            # 同时写入全局表供 app 层 save_session 读取。取不到真实编号
-            # 时维持 v83 语义：空流不推进、真中断 +2 猜测。
+            # [v84] The upstream broadcast a real number -> wire up directly
+            # (including any continuation this turn may have produced; meta
+            # keeps only the last broadcast, i.e. this exchange's final
+            # response id). Also written to the global table for the app
+            # layer's save_session. When no real number is available, keep
+            # v83 semantics: empty streams do not advance, real interruptions
+            # use the +2 guess.
             if _meta.get("response_message_id"):
                 parent = _meta["response_message_id"]
                 _LAST_REAL_PARENT[chat_id] = parent
             asyncio.create_task(_prefetch_pow(auth_token, "/api/v0/chat/completion"))
             if visible.seen:
-                # [v78] 干净收尾（FINISHED 且有可见正文）：畸形续写计数清零，
-                # 会话视为恢复健康，不触发换血。
+                # [v78] Clean finish (FINISHED with visible prose): reset the
+                # malformed-continuation counter; the session is considered
+                # healthy again and no rollover is triggered.
                 reset_malformed_continue_count(chat_id)
-                return  # 正常完成（上游发出 FINISHED）
-            # [v64] 收尾安全网：整个回合没有发出过任何可见正文——续写轮
-            # 只吐了 【END】 被过滤器整段砍光（或反复只吐思考）。不能
-            # 静默 return：客户端将只收到思考 + finish_reason=stop，回合
-            # 静默死亡（01:04 故障形态）。还有预算就换提示词再试，没预算
-            # 给出可见提示。
+                return  # completed normally (upstream sent FINISHED)
+            # [v64] Finish safety net: the whole turn emitted no visible prose —
+            # continuation turns only emitted 【END】 which the filter cut
+            # entirely (or repeatedly only thinking). Cannot return silently:
+            # the client would receive only thinking + finish_reason=stop and
+            # the turn would die silently (the 01:04 failure shape). Retry
+            # with the other prompt while budget remains; once the budget is
+            # gone, emit a visible notice.
             if attempt >= max_continue:
-                logger.warning("[auto-continue] 连续多轮无可见正文，给出可见提示收尾")
+                logger.warning("[auto-continue] several turns in a row with no visible prose; ending with a visible notice")
                 yield chr(10) + chr(10) + (
-                    "（上游连续多轮只返回思考过程、未产出任何正文，已停止自动重试。"
-                    "请重新发送消息或稍后再试。）")
+                    "(The upstream returned only thinking for several turns in a row without producing any prose; automatic retries have stopped. "
+                    "Please resend your message or try again later.)")
                 return
-            logger.warning("[auto-continue] 续写后仍无可见正文（疑似只吐终止标记），"
-                           "换用禁 END 提示词重试 %d/%d", attempt + 1, max_continue)
+            logger.warning("[auto-continue] still no visible prose after continuation (suspected termination-marker-only output); "
+                           "retrying with the END-forbidden prompt %d/%d", attempt + 1, max_continue)
             interrupt_reason = "empty_continuation"
         if attempt >= max_continue:
-            logger.warning("[auto-continue] 自动续写已达上限(%d)，按现状收尾", max_continue)
-            yield chr(10) + chr(10) + "（上游在思考后反复中断，已重试 %d 次仍未产出正文）" % max_continue
+            logger.warning("[auto-continue] automatic continuation limit reached (%d); finishing as-is", max_continue)
+            yield chr(10) + chr(10) + "(The upstream kept interrupting after thinking; %d retries still produced no prose)" % max_continue
             return
-        logger.warning("[auto-continue] 上游流未正常结束（reason=%s），自动续写第 %d/%d 次",
+        logger.warning("[auto-continue] upstream stream did not end normally (reason=%s); automatic continuation %d/%d",
                        interrupt_reason, attempt + 1, max_continue)
-        # [v85] 全量原生适配：parent 只认 ready 广播的真实编号。广播没到
-        # （PoW 拒/空流/秒断连）= 上游零入库，parent 原地不动，续写轮用
-        # 同一 parent 原生重发；+2 猜测语义已废除（v83 23:57 实锤猜测会
-        # 把链路推进确定无效的编号引发 biz_code 26 连环失败）。
+        # [v85] Full native adaptation: parent trusts only real numbers
+        # broadcast in ready. No broadcast (PoW rejection / empty stream /
+        # instant disconnect) = the upstream stored nothing; parent stays put
+        # and the continuation turn re-sends natively with the same parent;
+        # the +2 guess semantics are retired (evidence v83 23:57: guessing
+        # pushed the chain onto certainly-invalid numbers, causing cascading
+        # biz_code 26 failures).
         if _meta.get("response_message_id"):
             parent = _meta["response_message_id"]
             _LAST_REAL_PARENT[chat_id] = parent
-        # [v62] 畸形工具调用场景换用诊断提示词：告诉模型错在哪、附原始调用、
-        # 给正确格式、给两条出路（重写调用 or 直接作答）——模型知道病因才会
-        # 重写正确调用，而不是对着通用的"继续写"掷硬币。其余场景行为不变。
-        # [v64] 追加分流：本回合还没有任何可见正文时（visible.seen=False），
-        # 旧提示词的 【END】 逃逸口会被模型当成"没啥可续"的出口——只吐
-        # 【END】 被砍光 -> 静默死回合。换用禁终止标记的
-        # _CONTINUE_PROMPT_EMPTY。已有可见正文时行为与 v62 完全一致。
+        # [v62] The malformed-tool-call case switches to the diagnostic
+        # prompt: tell the model what went wrong, attach the original call,
+        # give the correct format, and offer two ways out (rewrite the call or
+        # answer directly) — only knowing the cause lets the model rewrite a
+        # correct call instead of coin-flipping against a generic "keep
+        # writing". Other cases are unchanged.
+        # [v64] Additional branch: when this turn has no visible prose yet
+        # (visible.seen=False), the old prompt's 【END】 escape hatch would be
+        # treated by the model as an exit for "nothing to continue" — emitting
+        # only 【END】 which gets cut -> silently dead turn. Switch to
+        # _CONTINUE_PROMPT_EMPTY, which forbids termination markers. With
+        # visible prose already present, behavior is identical to v62.
         if interrupt_reason == "malformed_tool_call":
-            # [v78] 计数 + 不再回贴原文（原文只进日志；连续犯错的会话由
-            # app 层按 _MALFORMED_CONTINUE_COUNT 强制换血）。
+            # [v78] Counting + no longer re-attaching the raw text (it goes to
+            # logs only; continuously failing sessions are force-rolled-over
+            # by the app layer per _MALFORMED_CONTINUE_COUNT).
             _MALFORMED_CONTINUE_COUNT[chat_id] = _MALFORMED_CONTINUE_COUNT.get(chat_id, 0) + 1
             logger.warning(
-                "[v78] 畸形工具调用原文（仅日志，chat=%s 累计 %d 次）：%.400s",
+                "[v78] malformed tool call raw text (log only, chat=%s, %d total): %.400s",
                 str(chat_id)[:8], _MALFORMED_CONTINUE_COUNT[chat_id], interrupt_detail,
             )
             msg = _MALFORMED_TOOL_PROMPT
             if attempt >= max_continue - 1:
-                # [v78-c] 递进披露：本次是最后一次续写（再错即达上限收尾
-                # 并触发换血），附上原文帮模型精确定位。
+                # [v78-c] Escalating disclosure: this is the final continuation
+                # (one more failure means the limit is hit and a rollover
+                # triggers); attach the raw text to help the model locate the
+                # error precisely.
                 msg += _MALFORMED_TOOL_FINAL_SUFFIX.format(raw=interrupt_detail[:400])
         elif interrupt_reason == "empty_continuation" or not visible.seen:
             msg = _CONTINUE_PROMPT_EMPTY
         else:
             msg = _CONTINUE_PROMPT
         files = []
-        # [v61] 边界哨兵：让 app.stream_response 重置 splitter 的 think_done
-        # 闭锁，使续写轮开头的 "\n<think>" 被重新识别为 reasoning 而不是
-        # 漏进 content（见 _RetryBoundary 文档）。空串，对内容无贡献。
+        # [v61] Boundary sentinel: makes app.stream_response reset the
+        # splitter's think_done latch so the continuation turn's leading
+        # "\n<think>" is recognized as reasoning again instead of leaking into
+        # content (see the _RetryBoundary docstring). An empty string,
+        # contributing nothing to the content.
         yield _RetryBoundary()
 
 

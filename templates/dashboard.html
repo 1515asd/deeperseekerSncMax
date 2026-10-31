@@ -1,74 +1,74 @@
 {% extends "base.html" %}
-{% block title %}仪表盘 - DeeperSeeker{% endblock %}
+{% block title %}Dashboard - DeeperSeeker{% endblock %}
 {% block content %}
-<h1>仪表盘</h1>
+<h1>Dashboard</h1>
 
 <section>
-    <h2>添加认证令牌</h2>
+    <h2>Add Auth Token</h2>
     <div class="steps">
-        <p><strong>步骤：</strong></p>
+        <p><strong>Steps:</strong></p>
         <ol>
-            <li>打开浏览器<strong>无痕/隐私窗口</strong></li>
-            <li>访问 <a href="https://chat.deepseek.com" target="_blank">chat.deepseek.com</a> 并登录</li>
-            <li>提取令牌 —— <strong>按你的设备选一种方式</strong>（两套都保留，用哪套都行）：</li>
+            <li>Open a browser <strong>incognito/private window</strong></li>
+            <li>Visit <a href="https://chat.deepseek.com" target="_blank">chat.deepseek.com</a> and log in</li>
+            <li>Extract the token — <strong>pick one method for your device</strong> (both are kept, either works):</li>
         </ol>
 
-        <p><strong>方式 A · 电脑 / 安卓（有开发者工具）</strong></p>
-        <p>打开开发者工具（F12）→ 控制台（Console）→ 粘贴：</p>
+        <p><strong>Method A · Desktop / Android (with developer tools)</strong></p>
+        <p>Open developer tools (F12) → Console → paste:</p>
         <code>JSON.parse(localStorage.getItem("userToken")).value</code>
 
-        <p><strong>方式 B · iPhone / iPad（快捷指令）—— 推荐，实测可用</strong></p>
-        <p>用快捷指令的「在网页上运行 JavaScript」提取。它有完整页面权限，<strong>不会</strong>像书签那样被 iOS 报「The operation is insecure」：</p>
+        <p><strong>Method B · iPhone / iPad (Shortcuts) — recommended, verified to work</strong></p>
+        <p>Use the Shortcuts action "Run JavaScript on Web Page" to extract it. It has full page access and, <strong>unlike</strong> bookmarks, won't be blocked by iOS with "The operation is insecure":</p>
         <ol>
-            <li>快捷指令 App → 右上角 <strong>+</strong> 新建 → 添加操作「<strong>在网页上运行 JavaScript</strong>」→ 脚本框粘贴：</li>
+            <li>Shortcuts app → tap <strong>+</strong> in the top-right to create a new one → add the action "<strong>Run JavaScript on Web Page</strong>" → paste this into the script box:</li>
         </ol>
         <pre style="white-space:pre-wrap;word-break:break-all;background:#f6f8fa;padding:10px;border-radius:6px;font-size:12px"><code>var out = '';
 try {
   var r = localStorage.getItem('userToken');
   if (r) { try { out = JSON.parse(r).value || r; } catch(e) { out = r; } }
 } catch(e) { out = ''; }
-if (out) { completion(out); } else { completion('未取到：请确认 Safari 已登录 chat.deepseek.com'); }</code></pre>
+if (out) { completion(out); } else { completion('Nothing retrieved: make sure Safari is logged in to chat.deepseek.com'); }</code></pre>
         <ol start="2">
-            <li>再添加操作「<strong>拷贝至剪贴板</strong>」</li>
-            <li><strong>关键一步（漏了会“运行完没结果”）</strong>：编辑快捷指令底部「接收」→ 类型选「<strong>Safari 网页</strong>」，并确认 JS 操作的「网页」输入已连上上一步</li>
-            <li>使用：Safari 打开已登录的 <strong>chat.deepseek.com</strong>（页面完全加载后）→ 点<strong>分享</strong> → <strong>运行快捷指令</strong> → 令牌进剪贴板并弹窗</li>
+            <li>Add another action "<strong>Copy to Clipboard</strong>"</li>
+            <li><strong>Crucial step (missing it causes "no result after running")</strong>: at the bottom of the shortcut editor, set "Receives" → type to "<strong>Safari Web Page</strong>", and make sure the JS action's "Web Page" input is connected to the previous step</li>
+            <li>Usage: in Safari, open <strong>chat.deepseek.com</strong> while logged in (after the page fully loads) → tap <strong>Share</strong> → <strong>Run Shortcut</strong> → the token goes to your clipboard and a popup shows it</li>
         </ol>
 
         <details style="margin-top:10px">
-            <summary style="cursor:pointer">方式 C · Safari 书签小工具（备选：部分 iOS 会报 The operation is insecure，报错就用方式 B）</summary>
+            <summary style="cursor:pointer">Method C · Safari bookmarklet (fallback: some iOS versions report "The operation is insecure" — if that happens, use Method B)</summary>
             <div style="padding:8px 12px">
-                <p>iOS 不允许在地址栏直接执行 <code>javascript:</code>，书签是唯一入口。但部分 iOS 会禁掉书签脚本的 localStorage 读取（报 SecurityError，与「阻止所有 Cookie」设置无关）——报错请改用方式 B。</p>
+                <p>iOS doesn't allow running <code>javascript:</code> directly in the address bar, so bookmarks are the only entry point. However, some iOS versions block localStorage access from bookmark scripts (a SecurityError, unrelated to the "Block All Cookies" setting) — if you hit this, use Method B instead.</p>
                 <ol>
-                    <li>Safari 打开任意普通页面 → <strong>分享</strong> → <strong>添加到书签</strong> → 存储</li>
-                    <li>书签列表 → <strong>编辑</strong>该条 → 「地址」整段替换为下面的代码 → 存储</li>
-                    <li>在已登录的 chat.deepseek.com 页面点书签运行 → 自动复制</li>
+                    <li>In Safari, open any normal page → <strong>Share</strong> → <strong>Add Bookmark</strong> → Save</li>
+                    <li>Bookmarks list → <strong>Edit</strong> that entry → replace the entire "URL" field with the code below → Save</li>
+                    <li>On a logged-in chat.deepseek.com page, tap the bookmark to run it → auto-copies</li>
                 </ol>
-                <pre style="white-space:pre-wrap;word-break:break-all;background:#f6f8fa;padding:10px;border-radius:6px;font-size:12px;max-height:220px;overflow:auto"><code>javascript:(function(){var t='';try{var r=localStorage.getItem('userToken');if(r){try{t=JSON.parse(r).value||r;}catch(e){t=r;}}}catch(e){alert('读取失败: '+e.message+'（请改用方式 B 快捷指令）');return;}if(!t||t.length&lt;20){alert('未找到 userToken。请确认已登录且页面加载完成');return;}var a=document.createElement('textarea');a.value=t;a.style.cssText='position:fixed;left:-9999px';document.body.appendChild(a);a.select();a.setSelectionRange(0,999999);var ok=document.execCommand('copy');a.remove();alert((ok?'已复制到剪贴板 ✓\n\n':'复制失败，请手动长按复制\n\n')+'长度 '+t.length+'\n'+t.substring(0,12)+'...');})();</code></pre>
+                <pre style="white-space:pre-wrap;word-break:break-all;background:#f6f8fa;padding:10px;border-radius:6px;font-size:12px;max-height:220px;overflow:auto"><code>javascript:(function(){var t='';try{var r=localStorage.getItem('userToken');if(r){try{t=JSON.parse(r).value||r;}catch(e){t=r;}}}catch(e){alert('Read failed: '+e.message+' (use Method B Shortcuts instead)');return;}if(!t||t.length&lt;20){alert('userToken not found. Make sure you are logged in and the page has fully loaded');return;}var a=document.createElement('textarea');a.value=t;a.style.cssText='position:fixed;left:-9999px';document.body.appendChild(a);a.select();a.setSelectionRange(0,999999);var ok=document.execCommand('copy');a.remove();alert((ok?'Copied to clipboard ✓\n\n':'Copy failed, long-press to copy manually\n\n')+'Length '+t.length+'\n'+t.substring(0,12)+'...');})();</code></pre>
             </div>
         </details>
-        <p class="hint">安卓也可以用方式 C 的书签（新版 Chrome 同样禁止在地址栏执行 <code>javascript:</code>），或继续用 F12 控制台。</p>
+        <p class="hint">Android can also use the Method C bookmark (newer Chrome versions also block javascript: in the address bar), or keep using the F12 console.</p>
     </div>
     <div class="warning">
-        注意：如果你在浏览器里退出 DeepSeek 登录，此令牌会随之失效。
+        Note: if you log out of DeepSeek in your browser, this token will become invalid.
     </div>
     <form method="post" action="/tokens/add">
-        <input type="text" name="alias" placeholder="别名（可选，例如：主号、小号1）" style="width:220px">
-        <input type="text" name="auth_token" placeholder="在此粘贴令牌（不要带引号）" style="width:400px">
-        <button type="submit">添加令牌</button>
+        <input type="text" name="alias" placeholder="Alias (optional, e.g.: main, alt1)" style="width:220px">
+        <input type="text" name="auth_token" placeholder="Paste token here (no quotes)" style="width:400px">
+        <button type="submit">Add Token</button>
     </form>
 </section>
 
 <section>
-    <h2>令牌池（{{ tokens|length }}）</h2>
+    <h2>Token Pool ({{ tokens|length }})</h2>
     {% if tokens %}
     <table>
         <thead>
             <tr>
                 <th>ID</th>
-                <th>别名</th>
-                <th>令牌</th>
-                <th>状态</th>
-                <th>操作</th>
+                <th>Alias</th>
+                <th>Token</th>
+                <th>Status</th>
+                <th>Actions</th>
             </tr>
         </thead>
         <tbody>
@@ -79,13 +79,13 @@ if (out) { completion(out); } else { completion('未取到：请确认 Safari �
                 <td><code>{{ tok['token'][:12] }}…{{ tok['token'][-4:] }}</code></td>
                 <td>
                     <span class="status {% if tok['status'] == 'ACTIVE' %}ok{% elif tok['status'] == 'RATE_LIMITED' %}warn{% else %}err{% endif %}">
-                        {{ {'ACTIVE':'正常','RATE_LIMITED':'限速冷却'}.get(tok['status'], tok['status']) }}
+                        {{ {'ACTIVE':'Active','RATE_LIMITED':'Rate-Limited'}.get(tok['status'], tok['status']) }}
                     </span>
                 </td>
                 <td>
                     <form method="post" action="/tokens/{{ tok['id'] }}/delete" style="display:inline"
-                          onsubmit="return confirm('确定删除吗？')">
-                        <button type="submit" class="btn-sm btn-danger">删除</button>
+                          onsubmit="return confirm('Delete this token?')">
+                        <button type="submit" class="btn-sm btn-danger">Delete</button>
                     </form>
                 </td>
             </tr>
@@ -93,14 +93,14 @@ if (out) { completion(out); } else { completion('未取到：请确认 Safari �
         </tbody>
     </table>
     {% else %}
-    <p>暂无令牌，请在上方添加。</p>
+    <p>No tokens yet. Add one above.</p>
     {% endif %}
 </section>
 
 <section>
-    <h2>接口信息</h2>
-    <p>OpenAI 兼容：<code>http://free-bots.heavencloud.in:3383/v1</code></p>
-    <p>Anthropic 兼容：<code>http://free-bots.heavencloud.in:3383</code></p>
-    <p>模型：<code>v4.1flash</code>（DeepSeek 默认模型）</p>
+    <h2>API Endpoints</h2>
+    <p>OpenAI-compatible: <code>http://free-bots.heavencloud.in:3383/v1</code></p>
+    <p>Anthropic-compatible: <code>http://free-bots.heavencloud.in:3383</code></p>
+    <p>Model: <code>v4.1flash</code> (DeepSeek default model)</p>
 </section>
 {% endblock %}

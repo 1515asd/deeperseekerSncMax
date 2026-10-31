@@ -28,12 +28,16 @@ from fastapi.templating import Jinja2Templates
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 
-# ── [v74] 重试保险丝（真幂等）─────────────────────────────────────────
-# 官方 API 无状态 → 客户端重试绝对安全；我们有状态会话，完成后重试会让
-# 上游重复执行。此缓存记录"刚完成"的请求结果：窗口内同签名请求直接回放，
-# 不重复执行。仅记录成功完成的回合（失败/中断不记，重试照常放行）。
-# 权限取舍：窗口默认 120 秒——网络重试都在秒级；人类点"重新生成"通常会
-# 先删掉上一条回复（消息列表变化 → 签名不同 → 不受影响）。
+# ── [v74] Retry fuse (true idempotency) ─────────────────────────────
+# The official API is stateless → client retries are perfectly safe; our
+# sessions are stateful, and a retry after completion would make the upstream
+# execute again. This cache records results of "just completed" requests:
+# within the window, a same-signature request replays the cached response
+# instead of executing again. Only successfully completed turns are recorded
+# (failures/interrupts are not recorded, so retries pass through as usual).
+# Window trade-off: default 120 seconds — network retries happen within
+# seconds; a human clicking "regenerate" usually deletes the previous reply
+# first (the message list changes → different signature → unaffected).
 _DUP_CACHE = {}
 _DUP_CACHE_MAX = 256
 
@@ -47,13 +51,15 @@ def _dup_dbg(msg):
 
 
 def _dup_record(sig, body):
-    # [v83] 失败收尾提示（"（上游……已重试 N 次仍未产出正文）"等）不缓存：
-    # 它被 yield 给客户端是为了让用户知道发生了什么，不是有效回答——缓存
-    # 它会让 dup-guard 在窗口内把失败提示原样回放，用户重发同一条消息
-    # 永远拿不到真正的重试（2026-10-31 23:57 线上实锤）。
+    # [v83] Failure-closing notices ("(upstream ... retried N times without
+    # producing any content)" etc.) are not cached: they are yielded to the
+    # client to tell the user what happened, not a valid answer — caching them
+    # would let dup-guard replay the failure notice verbatim within the window,
+    # and the user would never get a real retry by resending the same message
+    # (confirmed in production 2026-10-31 23:57).
     try:
         _c = (((body or {}).get("choices") or [{}])[0].get("message") or {}).get("content") or ""
-        if _c.strip().startswith("（上游"):
+        if _c.strip().startswith("(The upstream"):
             _dup_dbg(f"record sig={str(sig)[:16]} SKIPPED (failure notice)")
             return
     except Exception:
@@ -74,10 +80,11 @@ def _dup_lookup(sig):
 
 
 def _json_mode_coerce(resp_text):
-    """[v73] JSON 模式出口校验：从原始输出提取合法 JSON 值。
+    """[v73] JSON-mode exit validation: extract a valid JSON value from raw output.
 
-    返回 (text, ok)。三层尝试：原文直解 → 剥 markdown 围栏 → 首尾括号截取。
-    全部失败时原样返回（不阻塞交付）。"""
+    Returns (text, ok). Three attempts in order: parse as-is → strip markdown
+    fences → slice between the first and last brackets. On total failure the
+    text is returned unchanged (delivery is never blocked)."""
     body = re.sub(r"<think>.*?</think>", "", resp_text, flags=re.DOTALL).strip()
     fence = re.match(r"^```(?:json)?\s*(.*?)\s*```$", body, flags=re.DOTALL)
     if fence:
@@ -101,12 +108,15 @@ def _json_mode_coerce(resp_text):
 
 
 def _dump_prompt_debug(session_id: str, text: str):
-    """DEEPSEEKER_STREAM_DEBUG=1 时，把每轮实际发给模型的 prompt 落盘。
+    """When DEEPSEEKER_STREAM_DEBUG=1, dump the prompt actually sent to the
+    model on each turn to disk.
 
-    定位"结果错位/串线"：模型对"哪个结果对应哪条调用"的判断完全取决于
-    这份打包文本（[TOOL RESULTS] 的 Command 配对）。有它就能对照模型
-    自报的"收到旧结果"判断是真错位还是模型误读。独立目录独立 20 份环，
-    不与输出 dump（debug_streams）互相挤占。"""
+    Diagnosing "misaligned/crossed results": the model's judgment of "which
+    result belongs to which call" depends entirely on this packed text (the
+    Command pairing of [TOOL RESULTS]). With it we can check the model's
+    self-reported "received stale results" against reality and tell true
+    misalignment from model misreading. Its own directory with its own
+    20-file ring, so it never competes with the output dump (debug_streams)."""
     if os.getenv("DEEPSEEKER_STREAM_DEBUG") != "1" or not text:
         return
     try:
@@ -126,11 +136,13 @@ def _dump_prompt_debug(session_id: str, text: str):
 
 
 def _dump_stream_debug(session_id: str, text: str, kind: str = "stream"):
-    """DEEPSEEKER_STREAM_DEBUG=1 时，把官网返回的原始聚合文本落盘，
-    用于定位流式损坏发生在哪一环（官网输出 / 服务端处理 / 客户端显示）。
-    只保留最近 20 份，防止磁盘累积。
-    同时写入 db 表 debug_dumps —— 面板文件 API 的子目录读取通道不稳定，
-    根目录 db 下载是可靠的取证通道。"""
+    """When DEEPSEEKER_STREAM_DEBUG=1, dump the raw aggregated text returned
+    by the web session to disk, to locate which stage corrupted the stream
+    (web output / server processing / client display).
+    Only the most recent 20 files are kept to avoid disk buildup.
+    Also written to the db table debug_dumps — the panel file API's
+    subdirectory read channel is unreliable; downloading the root-level db
+    is the dependable forensics channel."""
     if os.getenv("DEEPSEEKER_STREAM_DEBUG") != "1" or not text:
         return
     try:
@@ -425,7 +437,7 @@ async def _db(fn, *args, **kwargs):
 async def lifespan(app: FastAPI):
     await _db(init_db)
     _install_key_access_formatter()
-    # [v57 移植 v35] 预热：wasm 编译 + 上游 TLS + PoW 池。30s 封顶，失败不影响启动。
+    # [v57 ported from v35] Warmup: wasm compilation + upstream TLS + PoW pool. 30s cap; failure does not block startup.
     try:
         await asyncio.wait_for(warmup_pool(), timeout=30)
     except Exception as exc:
@@ -817,8 +829,9 @@ async def handle_chat(
     json_mode=False,
     _force_rollover=False,
 ):
-    # [v77 PR#70/72 移植] 把请求级信息放进 ContextVar：parse_tools 反推
-    # 工具名用工具表；build_prompt 挂 effort 指令用档位。
+    # [v77 PR#70/72 port] Put request-scoped info into ContextVars: parse_tools
+    # maps tool names via the tool table; build_prompt attaches effort
+    # instructions based on the effort tier.
     _request_tools.set(tools or [])
     auth_token = await _db(get_auth_token)
     if not auth_token:
@@ -919,9 +932,10 @@ async def handle_chat(
                         next_messages.append(ast_msg)
                         next_sig = await generate_signature(next_messages, model, scope)
 
-                        # [v85] saved_parent 只返回真实编号；None = 本回合
-                        # 无广播（链路未推进），跳过保存保留原映射。
-                        # baseline 与链路无关，无条件保存。
+                        # [v85] saved_parent only returns a real message id; None = no
+                        # broadcast this turn (chain not advanced) — skip saving and
+                        # keep the original mapping.
+                        # baseline is chain-independent and saved unconditionally.
                         await _db(set_chat_baseline, new_session_id, _packed_first_message_tokens(messages),
                                   estimate_conversation_tokens_cached(messages))
                         _sp = saved_parent(new_session_id, 0)
@@ -1048,25 +1062,37 @@ async def handle_chat(
                 parent_message_id = fresh["parent_message_id"]
 
         _rollover_baseline, _creation_total = await _db(get_chat_baseline, session_id)
-        _tail_text = None  # [v77.5/B] 换本时的最近原文尾巴（未换本则 None）
-        # [v72] 定期重建：除了上下文超限，会话轮数超过阈值也触发同一套
-        # rollover 流程（删映射→生成摘要→新上游会话→按客户端真实历史全量
-        # 重打包，重建后首条路径自动带任务锚点+对账单）。动机：长会话中
-        # 上游历史积累畸形输出与旧叙事偏置（生产实证 2026-10-25 会话
-        # ae65e2aa：数小时旧叙事淹没 30 秒前的金手指指令），且滑窗会无声
-        # 丢失中段信息；定期重建等于定期把模型的世界观对齐到客户端账本。
+        _tail_text = None  # [v77.5/B] most recent raw-text tail at rollover time (None if no rollover)
+        # [v72] Periodic rebuild: besides context overflow, exceeding a turn
+        # threshold triggers the same rollover flow (delete mappings → generate
+        # summary → new upstream chat → fully re-pack from the client's real
+        # history; the first message after the rebuild automatically carries the
+        # task anchor + reconciliation statement). Motivation: long chats
+        # accumulate malformed output and stale-narrative bias in upstream
+        # history (production evidence 2026-10-25 session ae65e2aa: hours of
+        # stale narrative drowning out a gold-finger instruction given 30
+        # seconds earlier), and the sliding window silently drops mid-history
+        # content; periodic rebuilding periodically re-aligns the model's world
+        # view with the client's ledger.
         _rebuild_due = parent_message_id >= int(os.getenv("DEEPSEEKER_REBUILD_PARENT", "240"))
-        # [v78] 畸形续写计数换血：上游会话记忆里积攒的模型自产坏样例改不到
-        # （我们重挂的是同一个上游会话），连续多轮 malformed 续写说明坏样例
-        # 已在自我繁殖——强制搬家到全新上游会话，摘要重建，坏样例不再回流。
+        # [v78] Malformed-continuation counter transfusion: upstream chat memory
+        # accumulates model-generated bad examples that we cannot fix (we
+        # re-attach to the same upstream chat); several consecutive turns of
+        # malformed continuations mean the bad examples are self-replicating —
+        # force a move to a brand-new upstream chat with a rebuilt summary so
+        # the bad examples no longer flow back in.
         _malformed_rollover = malformed_continue_count(session_id) >= int(
             os.getenv("DEEPSEEKER_MALFORMED_ROLLOVER_THRESHOLD", "2"))
-        # [v79] 空流兜底换血：连续多轮"流正常结束但零输出"（悬空轮）说明该
-        # 上游会话已进入不可自愈的坏状态——悬空轮留在上游记忆里让后续上下文
-        # 断裂（失忆），且我们无法向悬空轮回填内容。与畸形计数同一机制：
-        # 下一轮入口判定达标即搬家重建摘要，坏状态不回流。单次空轮视为瞬时
-        # 抖动不搬家（阈值 2 起效），可用
-        # DEEPSEEKER_EMPTY_STREAM_ROLLOVER_THRESHOLD 调节。
+        # [v79] Empty-stream fallback transfusion: several consecutive turns of
+        # "stream ends normally but zero output" (dangling turns) mean the
+        # upstream chat has entered an unrecoverable bad state — dangling turns
+        # linger in upstream memory and break subsequent context (amnesia), and
+        # we cannot backfill content into a dangling turn. Same mechanism as the
+        # malformed counter: once the threshold is met at the next turn's entry,
+        # we move and rebuild the summary so the bad state does not flow back. A
+        # single empty turn counts as a transient hiccup and does not trigger a
+        # move (threshold 2); tunable via
+        # DEEPSEEKER_EMPTY_STREAM_ROLLOVER_THRESHOLD.
         _empty_rollover = empty_stream_count(session_id) >= int(
             os.getenv("DEEPSEEKER_EMPTY_STREAM_ROLLOVER_THRESHOLD", "2"))
         if parent_message_id != 0 and (needs_rollover(messages, _rollover_baseline, tools=tools, creation_total=_creation_total) or _rebuild_due or _force_rollover or _malformed_rollover or _empty_rollover):
@@ -1083,12 +1109,17 @@ async def handle_chat(
                 session_id,
             )
             await _db(delete_sessions_for_chat, token_id, session_id)
-            # [v77.5/B] 接力摘要三件套：
-            #   1) 滚动摘要——只消化"上次消化点之后、原文尾巴之前"的增量，
-            #      旧内容由上一代摘要保住，代代相传，无天花板；
-            #   2) 最近原文——尾巴段原样进新会话首条，压缩损失不碰最新上下文；
-            #   3) 分段接力——切片超过 DIGEST_CHUNK_TOKENS 时按消息切块顺序
-            #      消化（每块 = 旧摘要 + 块文本 → 更新版摘要），永不硬吞。
+            # [v77.5/B] The relay-summary trio:
+            #   1) Rolling summary — digests only the delta "after the last
+            #      digest point and before the raw-text tail"; older content is
+            #      preserved by the previous generation's summary, passed down
+            #      through generations with no ceiling;
+            #   2) Recent raw text — the tail segment goes verbatim into the new
+            #      chat's first message, so compression loss never touches the
+            #      latest context;
+            #   3) Segmented relay — when a slice exceeds DIGEST_CHUNK_TOKENS it
+            #      is digested in message-chunk order (each chunk = old summary
+            #      + chunk text → updated summary), never swallowed whole.
             _old_roll, _roll_marker = await _db(get_rolling_state, session_id)
             _slice_msgs, _tail_msgs, _sizes, _total_now = compute_rollover_split(
                 messages, marker=_roll_marker, tail_budget=int(ROLLOVER_TAIL_TOKENS * 0.9))
@@ -1110,16 +1141,20 @@ async def handle_chat(
             _tail_text = render_history_tail(_tail_msgs, ROLLOVER_TAIL_TOKENS) if len(_tail_msgs) > 1 else ""
             session_id = await create_new_chat(tok["token"])
             await _db(save_session, sig, token_id, session_id, 0)
-            # [v77.3] rollover 后记账：baseline=摘要版首条的实际 token（很小），
-            # creation_total=客户端全量（摘要代表全部旧历史）——增长从此处
-            # 重新起算，旧历史不再被算成"增长"（风暴根源）。
-            # [v77.7] baseline 必须含尾巴重量：换本后的新首条 = 摘要 + 尾巴
-            # （ROLLOVER_TAIL_TOKENS）+ 最新消息。漏算尾巴会导致下次换本在
-            # "尾巴 + 阈值"时才触发——尾巴越大，中途静默遗忘越多。
+            # [v77.3] Post-rollover accounting: baseline = actual tokens of the
+            # summarized first message (very small); creation_total = the
+            # client's full history (the summary represents all old history) —
+            # growth restarts from here, and old history no longer counts as
+            # "growth" (the root cause of the storm).
+            # [v77.7] baseline must include the tail's weight: the new first
+            # message after rollover = summary + tail (ROLLOVER_TAIL_TOKENS) +
+            # latest message. Undercounting the tail makes the next rollover
+            # trigger only at "tail + threshold" — the larger the tail, the
+            # more silent mid-way forgetting.
             await _db(set_chat_baseline, session_id,
                       len(rollover_summary) // 3 + ROLLOVER_TAIL_TOKENS + estimate_conversation_tokens_cached(messages[-1:]),
                       estimate_conversation_tokens_cached(messages))
-            # [v77.5/B] 滚动摘要记账：本代已消化到"尾巴起点"
+            # [v77.5/B] Rolling-summary accounting: this generation has digested up to "the tail's starting point"
             await _db(set_rolling_state, session_id, rollover_summary, _new_marker)
             parent_message_id = 0
             # The rollover itself was serialized under the OLD chat's lock;
@@ -1144,17 +1179,20 @@ async def handle_chat(
 
         is_first = parent_message_id == 0
 
-        # [v74] 重试保险丝：窗口内同签名（完全相同的消息列表）已完成 → 直接
-        # 回放缓存结果，不重复执行。官方 API 因无状态而天然幂等；此为有状态
-        # 通道的对位机制。仅拦非 Anthropic 路径；窗口 120 秒可调
-        # （DEEPSEEKER_DUP_WINDOW）。人类"重新生成"通常先删上一条回复，
-        # 消息列表变化 → 签名不同 → 不受影响。
+        # [v74] Retry fuse: a same-signature (identical message list) request
+        # completed within the window → replay the cached result without
+        # executing again. The official API is naturally idempotent thanks to
+        # being stateless; this is the counterpart mechanism for a stateful
+        # channel. Only non-Anthropic paths are intercepted; the 120-second
+        # window is tunable (DEEPSEEKER_DUP_WINDOW). A human "regenerate"
+        # usually deletes the previous reply first, changing the message list
+        # → different signature → unaffected.
         if not is_anthropic:
             cached_body = _dup_lookup(sig)
             _dup_dbg(f"lookup sig={str(sig)[:16]} hit={cached_body is not None} cache_n={len(_DUP_CACHE)}")
             if cached_body is not None:
                 logger.warning(
-                    "[dup-guard] sig=%s 窗口内已完成，回放缓存结果（不重复执行）",
+                    "[dup-guard] sig=%s completed within the window; replaying cached result (no re-execution)",
                     str(sig)[:12],
                 )
                 if stream:
@@ -1182,27 +1220,38 @@ async def handle_chat(
                                     rollover_summary=rollover_summary,
                                     rollover_tail_text=_tail_text)
         if json_mode:
-            # [v73] JSON 模式：提示层强约束（第一层防线；第二层出口校验在交付前）
+            # [v73] JSON mode: prompt-level hard constraint (first line of
+            # defense; the second, exit validation, runs before delivery)
             prompt += (
-                "\n\n[OUTPUT FORMAT · 强制]\n"
+                "\n\n[OUTPUT FORMAT · MANDATORY]\n"
                 "Respond with ONE valid JSON value (object, array, string, number or boolean) and NOTHING else.\n"
                 "No markdown fences, no explanations, no text before or after the JSON.\n"
                 "If you still need tool results, call tools first; once data is sufficient, output ONLY the final JSON."
             )
         if resume_recovered and not is_first:
-            # 接回中断会话：压制历史旧指令，防止模型反问"指令怎么不一样了"
+            # Resuming an interrupted chat: suppress stale instructions from
+            # history to keep the model from asking "why do the instructions differ?"
             prompt = RESUME_NOTICE + prompt
         if tools and not is_first:
-            # 工具指令漂移修复 v2：完整工具说明只在会话首条注入，会被官网
-            # 滑窗（~65 万）逐渐挤出；且历史里积累的畸形 DSML 输出会被模型
-            # 模仿（恶性循环）。对策：每轮在最新消息末尾重申迷你铁律——它
-            # 永远在滑窗之内，长对话中遵从度不衰减。成本 ~100 token/轮。
-            # [v75-c] 警告牌去粘性：旧实现扫最近 6 条消息，客户端历史里滞留的
-            # 旧拒绝记录会让调用成功后仍持续贴牌（生产实证 2026-10-25 会话
-            # e1751fe3：11 次贴牌 3 次误贴，全是成功后误贴，加剧模型格式摇摆）。
-            # 新实现只认"最近一条工具结果"：窗口内最后一条 role=tool 消息是
-            # 拒绝才贴牌；陈年错误（滑出最近 3 条）不翻出来骂。历史全量统计：
-            # 旧规则 8 正确 + 3 误贴 + 0 漏贴；新规则 8 正确 + 0 误贴 + 0 漏贴。
+            # Tool-instruction drift fix v2: injecting the full tool spec only
+            # in the chat's first message lets the web session's sliding window
+            # (~650k tokens) gradually push it out; moreover, malformed DSML
+            # output accumulated in history gets imitated by the model (a
+            # vicious cycle). Countermeasure: re-assert the mini iron rules at
+            # the end of the latest message every turn — they always stay inside
+            # the sliding window, so compliance does not decay in long
+            # conversations. Cost ~100 tokens/turn.
+            # [v75-c] De-stickying the warning label: the old implementation
+            # scanned the last 6 messages, so stale rejection records lingering
+            # in client history kept the label applied even after a successful
+            # call (production evidence 2026-10-25 session e1751fe3: 11 labels
+            # applied, 3 misapplied, all after success — amplifying the model's
+            # format oscillation). The new implementation only trusts "the most
+            # recent tool result": the label is applied only if the last
+            # role=tool message within the window is a rejection; aged errors
+            # (slid out of the last 3 messages) are not dredged up for scolding.
+            # Full history stats: old rule 8 correct + 3 misapplied + 0 missed;
+            # new rule 8 correct + 0 misapplied + 0 missed.
             _last_tool_rejected = False
             for _m in messages[-3:]:
                 if isinstance(_m, dict) and _m.get("role") == "tool":
@@ -1210,33 +1259,36 @@ async def handle_chat(
                         r"Tool call rejected|missing required parameter|参数为空|arguments (?:were |)empty|invalid tool call",
                         str(_m.get("content") or ""), re.I))
             if _last_tool_rejected:
-                # 客户端回传了工具拒绝/参数错误反馈：用户不必再手动提醒，
-                # 服务端检测到后自动加码。
+                # The client sent back a tool-rejection/parameter-error report:
+                # no manual reminder needed — the server detects it and doubles
+                # down automatically.
                 prompt += (
-                    "\n\n[⚠️ 上一次工具调用已被系统拒绝]\n"
-                    "历史中检测到工具调用被拒绝的记录（参数为空或缺失）。"
-                    "这一次必须严格按下述规范执行，任何再次被拒绝的调用都会终止任务。"
-                    "特别注意第 3 条收尾纪律：参数值写完立即闭合，闭合后立即停止，禁止输出任何残片垃圾——"
-                    "历史中已多次出现这类垃圾（\"参数>\"、\"???参数>\"），它们会导致调用被整条拒绝："
+                    "\n\n[⚠️ The previous tool call was rejected by the system]\n"
+                    "History shows a rejected tool call (empty or missing parameters)."
+                    "This time, strictly follow the spec below; any call rejected again will terminate the task."
+                    "Pay special attention to rule 3 (closing discipline): close the call immediately after writing the argument values, stop right after closing, and never emit any trailing debris —"
+                    "such debris has appeared many times in history (\"parameter>\", \"???parameter>\") and gets the entire call rejected:"
                 )
             prompt += (
-                "\n\n[工具调用规范 · 每轮重申]\n"
-                "1. 需要工具时：输出一个工具调用块，块内为合法 JSON，含 name 与 arguments 两个键。\n"
-                "2. arguments 的每个必填字段都要有具体值；空对象或字段缺失的调用会被系统直接拒绝。\n"
-                "3. 参数值写完立即闭合，闭合后不得再追加任何字符。\n"
-                "4. 不需要工具时直接给正文，不输出任何标签。\n"
-                "5. 历史中出现过的畸形调用样例一律忽略，只以本规范为准。\n"
-                "6. 各工具的参数定义见对话开头的工具说明；记不清必填项就先向用户确认。"
+                "\n\n[Tool Call Spec · Repeated Every Turn]\n"
+                "1. When you need a tool: emit one tool-call block containing valid JSON with the two keys name and arguments.\n"
+                "2. Every required field in arguments must have a concrete value; calls with an empty object or missing fields are rejected outright by the system.\n"
+                "3. Close the call immediately after writing the argument values; append no characters after closing.\n"
+                "4. When no tool is needed, reply with plain content and emit no tags.\n"
+                "5. Ignore any malformed call examples from history; this spec is the only authority.\n"
+                "6. Parameter definitions for each tool are in the tool spec at the start of the conversation; if unsure of required fields, ask the user first."
             )
 
         _dump_prompt_debug(session_id, prompt)
         gen = send_message(session_id, tok["token"], prompt, parent_message_id, thinking, search, file_ids)
         gen = await _preflight_stream(gen)
         if stream and tools and not is_anthropic and os.getenv("DEEPSEEKER_STREAM_SPLITTER", "1") != "1":
-            # 降级路径（开关关闭时）：工具轮走可靠的非流式管线 + 伪流式输出。
-            # 默认关闭——v14 的 _StreamTagSplitter 已把流式标记解析改为
-            # 跨 chunk 安全（穷举切分一致性测试通过），无需牺牲首字节。
-            # 真出问题随时 DEEPSEEKER_STREAM_SPLITTER=0 秒回退。
+            # Degraded path (when the switch is off): tool turns use the
+            # reliable non-streaming pipeline + pseudo-streamed output.
+            # Off by default — v14's _StreamTagSplitter already made streaming
+            # tag parsing cross-chunk safe (exhaustive split-consistency tests
+            # pass), so there is no need to sacrifice time-to-first-byte.
+            # If it ever breaks, DEEPSEEKER_STREAM_SPLITTER=0 rolls back instantly.
             result = await handle_chat(
                 messages, model, thinking, False, tools, is_anthropic,
                 req_model, scope, _attempt=_attempt,
@@ -1247,7 +1299,7 @@ async def handle_chat(
             except Exception:
                 return result
             if "choices" not in body:
-                return result  # 上游错误原样透传
+                return result  # pass upstream errors through unchanged
             return StreamingResponse(
                 _pseudo_stream(body, model),
                 media_type="text/event-stream",
@@ -1260,12 +1312,16 @@ async def handle_chat(
             return StreamingResponse(stream_response(gen, model, messages, token_id, session_id, sig, tools, parent_message_id, scope), media_type="text/event-stream")
         else:
             resp_text = await collect_response(gen)
-            # [v79] 空流兜底：上游流正常结束但零可见输出 = 悬空轮（映射仍
-            # 保存在本会话，上游记忆里留下"用户消息发出后模型零回复"的断点）。
-            # 计入空回合计数，连续达标时下一轮 handle_chat 入口强制换血
-            # （见 _empty_rollover）。有输出的正常回合清零计数。
-            # [v83] 与流式路径同修：失败收尾提示（"（上游……）"）不算输出。
-            if resp_text.strip() and not resp_text.strip().startswith("（上游"):
+            # [v79] Empty-stream fallback: the upstream stream ends normally but
+            # with zero visible output = a dangling turn (the mapping is still
+            # saved for this session, leaving a break in upstream memory of
+            # "user message sent, model never replied").
+            # Count it toward the empty-turn counter; when the streak meets the
+            # threshold, the next handle_chat entry forces a transfusion
+            # (see _empty_rollover). Normal turns with output reset the counter.
+            # [v83] Fixed alongside the streaming path: failure-closing notices
+            # ("(upstream ...)") do not count as output.
+            if resp_text.strip() and not resp_text.strip().startswith("(The upstream"):
                 reset_empty_stream_count(session_id)
             else:
                 _empty_n = bump_empty_stream_count(session_id)
@@ -1273,16 +1329,17 @@ async def handle_chat(
                     "[v79 empty-stream] chat %s completed with ZERO visible output (streak %d); empty completion returned to client",
                     str(session_id)[:8], _empty_n,
                 )
-            # [v78] 缺开口/掉斜杠抢救：修复后再走解析/投递/展示全链路
+            # [v78] Missing-open/dropped-slash salvage: repair first, then run the full parse/deliver/display pipeline
             _salvaged = _salvage_tool_markup(resp_text)
             if _salvaged != resp_text:
-                logger.warning("[v78 salvage] 非流式正文修复畸形工具标记")
+                logger.warning("[v78 salvage] repaired malformed tool markup in non-streamed content")
                 resp_text = _salvaged
             _dump_stream_debug(session_id, resp_text)
             await _db(mark_active, token_id)
 
             if json_mode:
-                # [v73] 第二层防线：出口校验 + 修复（提取合法 JSON，失败原样放行）
+                # [v73] Second line of defense: exit validation + repair (extract
+                # valid JSON; on failure pass through unchanged)
                 resp_text, _json_ok = _json_mode_coerce(resp_text)
             parsed_tools, clean_text = parse_tools(resp_text)
             clean_text = re.sub(r"<think>.*?</think>", "", clean_text, flags=re.DOTALL).strip()
@@ -1296,23 +1353,28 @@ async def handle_chat(
             next_messages.append(ast_msg)
             next_sig = await generate_signature(next_messages, model, scope)
 
-            # [v85] 只在拿到真实编号时保存；None = 链路未推进，保留原映射
+            # [v85] Save only when a real message id was obtained; None = chain
+            # not advanced, keep the original mapping
             _sp = saved_parent(session_id, parent_message_id)
             if _sp is not None:
                 await _db(save_session, sig, token_id, session_id, _sp)
                 await _db(save_session, next_sig, token_id, session_id, _sp)
             _resp = format_response(resp_text, model, messages, tools)
-            # [v77 P0-6 审计补漏] OpenAI 非流式完成轮的用量落库——此前只在
-            # 流式（stream_response）与 Anthropic 非流式路径落库，OpenAI
-            # 非流式完成轮漏记（线上实证 2026-10-27：工具轮无 usage 行）。
-            # 此处即成功路径（失败走上方 except），无需 failed 判断
+            # [v77 P0-6 audit fix] Persist usage for OpenAI non-streaming
+            # completion turns — previously only the streaming (stream_response)
+            # and Anthropic non-streaming paths recorded usage; OpenAI
+            # non-streaming completion turns were missed (production evidence
+            # 2026-10-27: tool turns had no usage row).
+            # This is the success path (failures take the except above), so no
+            # failed check is needed
             with suppress(Exception):
                 _u = (_resp or {}).get("usage") or {}
                 await _db(record_usage, scope or "unknown", "openai",
                           req_model or model,
                           _u.get("prompt_tokens") or _count_messages_tokens(messages),
                           _u.get("completion_tokens") or count_tok(_completion_usage_text(clean_text, parsed_tools)))
-            # [v74] 记录完成结果：窗口内同签名重试直接回放，不重复执行
+            # [v74] Record the completed result: same-signature retries within
+            # the window replay it instead of executing again
             if isinstance(_resp, dict) and "choices" in _resp:
                 _dup_record(sig, _resp)
                 _dup_dbg(f"record sig={str(sig)[:16]}")
@@ -1364,9 +1426,10 @@ async def handle_chat(
 
         logger.exception("Chat request failed (session %s, parent %s): %s", session_id, parent_message_id, e)
         await _db(delete_sessions_for_chat, token_id, session_id)
-        # [v77 PR#67 移植] 上下文属于上游 CHAT 而不属于 TOKEN——普通重试
-        # （换号、同会话）必然同样死亡。分类为上下文型失败时，重试强制走
-        # 摘要 rollover；每轮最多一次（force 标志不粘滞，review fix）。
+        # [v77 PR#67 port] Context belongs to the upstream CHAT, not the TOKEN —
+        # an ordinary retry (new token, same chat) would die the same way. When
+        # classified as a context-type failure, the retry forces a summary
+        # rollover; at most once per turn (the force flag is not sticky, review fix).
         _force_rollover_next = bool(is_context_limit_error(e)) and not _force_rollover
         if _force_rollover_next:
             logger.warning(
@@ -1414,30 +1477,43 @@ async def handle_chat(
                 slot.release()
 
 
-# --- usage 计费 token 的增量缓存 (v57 移植 v37 + 修正) ---------------------
-# count_tok(_messages_text(messages)) 每轮都把整段历史重新 tokenize 一遍，
-# 算出来的数字只塞进 usage 字段。上下文越大越慢：25% CPU 配额下 80 万
-# token 要 2-5 秒，而 Anthropic 路径把这个计算放在首字节之前，直接压在
-# TTFB 上。正常对话每轮重发的都是同一份前缀，因此按消息前缀缓存，命中
-# 最长前缀后只 tokenize 新增的尾部几条。
+# --- incremental cache for usage billing tokens (v57 ported from v37 + fixes) ---
+# count_tok(_messages_text(messages)) re-tokenizes the entire history every
+# turn, and the number only goes into the usage field. The bigger the context,
+# the slower: at a 25% CPU quota, 800k tokens take 2-5 seconds, and the
+# Anthropic path runs this computation before the first byte, hitting TTFB
+# directly. Normal conversations resend the same prefix every turn, so cache
+# by message prefix: after the longest-prefix hit, only tokenize the few new
+# tail messages.
 #
-# [v57 修正1 复合漂移] v37 原版把"派生估计值"也存进缓存当基值，误差逐轮
-# 复合——实测 50 轮对话漂移累积到 15 token（每轮 +1：拼接处的 "\n" 在
-# 全量文本里与相邻字符合并，分开计则各算各的）。本版规则：入缓存的只能
-# 是"直接重算"的值，派生估计（基值 + 裸计尾条）绝不入缓存——它只回答
-# 本轮，不当基值。误差因此退化为单点拼接效应，<=1 token 且不复合
-# （50 轮随机对话实测最大 1）。
+# [v57 fix 1, compounding drift] v37 also stored "derived estimates" in the
+# cache as base values, so errors compounded turn over turn — measured drift
+# over a 50-turn conversation reached 15 tokens (+1 per turn: the "\n" at the
+# concatenation point merges with neighboring characters in the full text but
+# counts separately when computed apart). Rule in this version: only
+# "directly recomputed" values may enter the cache; derived estimates (base +
+# bare count of the tail messages) never do — they only answer the current
+# turn and never become a base value. Error therefore degrades to a single
+# concatenation effect, <=1 token and non-compounding (measured max 1 over 50
+# random turns).
 #
-# [v57 修正2 双口径] v37 的 miss 路径返回并缓存 文本+"\n" 的计数，而
-# 上游 test_stream_usage 断言 usage.prompt_tokens 等于裸文本直算值——
-# 尾部 "\n" 多算一个 token 就会差 1。因此缓存条目改存两个直接重算值：
-#   direct = count_tok(文本)          精确命中时的返回值，与 v33 直算口径
-#                                    一致（也是上游断言要求的口径）；
-#   base   = count_tok(文本 + "\n")   仅作尾条拼接的基值：尾部分隔符算进
-#                                    基值，下一轮的拼接点才与全量文本一致。
-# 精确命中返回 direct；带尾条命中返回 base + 裸计尾条。派生值一律不入
-# 缓存，直接重算从"仅首轮"变成"约每 9 轮一次"（8 深度窗口内没有直接值
-# 时可命中；仍在首字节前，比每轮全量重算快 9 倍）。
+# [v57 fix 2, two calibers] v37's miss path returned and cached the count of
+# text+"\n", while the upstream test_stream_usage asserts usage.prompt_tokens
+# equals the bare-text direct count — one extra token for the trailing "\n"
+# makes it off by exactly 1. So cache entries now store two directly
+# recomputed values:
+#   direct = count_tok(text)          the value returned on an exact hit; the
+#                                     same caliber as v33's direct count (and
+#                                     the one the upstream test requires);
+#   base   = count_tok(text + "\n")   only a base for concatenating tail
+#                                     messages: the trailing separator counts
+#                                     into the base, so the next turn's
+#                                     concatenation point matches the full text.
+# Exact hits return direct; tail-inclusive hits return base + the bare tail
+# count. Derived values never enter the cache; direct recomputation drops from
+# "first turn only" to "roughly once every 9 turns" (a hit is possible when no
+# direct value exists within the 8-deep window; still before the first byte,
+# 9x faster than a full recount every turn).
 _USAGE_TOK_CACHE = None
 _USAGE_TOK_CACHE_MAX = 2048
 
@@ -1470,11 +1546,11 @@ def _count_messages_tokens(messages):
         if cached is None:
             continue
         if back:
-            # 基值含尾部分隔符 "\n"，尾条裸计；派生值绝不入缓存
+            # base value includes the trailing "\n"; tail messages are counted bare; derived values never enter the cache
             return cached[1] + count_tok(_messages_text(messages[n - back:]))
         return cached[0]
-    # 窗口内没有直接值：两个口径都直接重算，一起入缓存。
-    # 只存直接值——派生值不当基值，误差因此不会逐轮复合。
+    # No direct value within the window: recompute both calibers and cache them together.
+    # Store only direct values — derived values never become base values, so the error cannot compound turn over turn.
     direct = count_tok(_messages_text(messages))
     base = count_tok(_messages_text(messages) + "\n")
     full_key = _usage_prefix_key(messages)
@@ -1549,17 +1625,20 @@ def _choice(delta, index=0, finish_reason=None):
 
 
 class _StreamTagSplitter:
-    """跨 chunk 安全的 <think> 分离器（真流式零损坏）。
+    """Cross-chunk-safe <think> splitter (true streaming, zero corruption).
 
-    旧的逐 chunk 状态机对每个分片单独判断 `"</think>" in chunk`：标记
-    一旦跨分片（`</th` + `ink>`）就漏判，状态错乱 → 思考内容泄漏进正文、
-    相邻字节被吞（replace/split 丢字节）、并把 DSML 之类的其它标记
-    切碎直达客户端。
+    The old per-chunk state machine tested `"</think>" in chunk` on each
+    fragment: once the marker straddled fragments (`</th` + `ink>`) the test
+    missed it and state desynced → thinking content leaked into the body,
+    adjacent bytes were swallowed (replace/split dropped bytes), and other
+    markers like DSML were shredded on their way to the client.
 
-    本实现只在缓冲区里"完整匹配到标记"才处理，并把尾部"可能是标记
-    前缀"的一小段扣留等待后续数据；所有输出字节都取自原文，从不做
-    replace/split。只有 <think>/</think> 的前缀会被扣留——其它以 '<'
-    开头的标记（<｜DSML｜> 工具家族等）一律原样透传，绝不切碎。"""
+    This implementation only acts when the marker is fully matched inside the
+    buffer, and withholds a small tail that "might be a marker prefix" until
+    more data arrives; every output byte is taken verbatim from the source —
+    no replace/split, ever. Only prefixes of <think>/</think> are withheld —
+    any other marker starting with '<' (the <｜DSML｜> tool family, etc.) is
+    passed through untouched, never shredded."""
 
     OPEN = "<think>"
     CLOSE = "</think>"
@@ -1570,7 +1649,7 @@ class _StreamTagSplitter:
         self.think_done = False
 
     def _hold(self, tag):
-        """把 buf 切成 (可安全输出, 需扣留)。"""
+        """Split buf into (safe to emit, must withhold)."""
         if not tag:
             return self.buf, ""
         idx = self.buf.rfind("<")
@@ -1582,7 +1661,7 @@ class _StreamTagSplitter:
         return self.buf, ""
 
     def feed(self, chunk):
-        """返回 [(kind, text)]，kind ∈ {"reasoning", "content"}。"""
+        """Return [(kind, text)], kind ∈ {"reasoning", "content"}."""
         self.buf += chunk
         out = []
         while self.buf:
@@ -1606,11 +1685,14 @@ class _StreamTagSplitter:
                     out.append(("content", safe))
                 return out
             if i:
-                # [v59] 开标签前的纯空白是 _send_message_once "\n<think>"  yield 的
-                # 前导分隔符，不属于正文：放行会让每个流式轮次的 content 都被
-                # 漏进一个孤换行（工具轮正文恰好只有它，2026-10-24 用户报告）。
-                # Anthropic 路径早就 lstrip("\n") 剥掉它，此处对齐同一语义；
-                # 有实际文字的前导内容（模型真的先写正文再思考）仍原样放行。
+                # [v59] Pure whitespace before the open tag is the leading
+                # separator of _send_message_once's "\n<think>" yield and is not
+                # body text: letting it through would leak a lone newline into
+                # every streaming turn's content (tool-turn bodies consist of
+                # exactly that; user report 2026-10-24). The Anthropic path has
+                # long stripped it with lstrip("\n"); align to the same semantics
+                # here. Leading content with actual text (the model really did
+                # write the body before thinking) still passes through as-is.
                 pre = self.buf[:i]
                 if pre.strip():
                     out.append(("content", pre))
@@ -1628,10 +1710,12 @@ class _StreamTagSplitter:
 
 
 async def _pseudo_stream(result: dict, model: str):
-    """把非流式的完整响应切成 SSE chunk 伪流式吐出（工具轮可靠管线）。
+    """Slice a non-streaming complete response into pseudo-streamed SSE chunks
+    (the reliable tool-turn pipeline).
 
-    一次性给完 tool_calls（OpenAI 流式允许参数整体到达）；正文分 8 片，
-    片间微延迟让客户端有流式观感。"""
+    tool_calls are delivered in one shot (OpenAI streaming allows arguments to
+    arrive whole); the body is split into 8 slices with micro-delays between
+    them to give the client a streaming feel."""
     cid = "chatcmpl-" + uuid.uuid4().hex
     created = int(time.time())
     choice = result["choices"][0]
@@ -1651,7 +1735,7 @@ async def _pseudo_stream(result: dict, model: str):
 
 async def stream_response(gen, model, messages, token_id, session_id, sig, tools, parent_message_id=0, scope=""):
     parser = StreamToolParser()
-    # [v81] 泄露闸门：解析器认不出的畸形工具标记不再以正文流出
+    # [v81] Leak gate: malformed tool markup the parser cannot recognize no longer flows out as body text
     gate = _LeakGate()
     # One completion = one id/created: every SSE chunk of a stream must share
     # the same id + created so clients and gateways (New API, sub2api) can
@@ -1667,12 +1751,16 @@ async def stream_response(gen, model, messages, token_id, session_id, sig, tools
     try:
         splitter = _StreamTagSplitter()
         async for chunk in gen:
-            # [v61] 续写轮边界哨兵：空串 str 子类，必须先于下面的 falsy 检查
-            # 拦截。重置 splitter——其 think_done 闭锁（见 _StreamTagSplitter
-            # / functions._RetryBoundary 文档）会让续写轮开头的 "\n<think>"
-            # 不再被识别，整段思考漏进 content。重置后续写轮的思考正确分流
-            # 到 reasoning。丢弃的是 attempt 尾部 ≤6 字符的 held 标签前缀，
-            # 续写轮以 "\n" 开头不依赖跨 attempt 的标签完整性。
+            # [v61] Continuation-turn boundary sentinel: an empty-string str
+            # subclass that must be intercepted before the falsy check below.
+            # Reset the splitter — its think_done latch (see the _StreamTagSplitter
+            # / functions._RetryBoundary docs) would otherwise stop recognizing
+            # the "\n<think>" at the start of a continuation turn, leaking the
+            # whole thinking section into content. After the reset, the
+            # continuation turn's thinking routes correctly to reasoning. What is
+            # discarded is the ≤6-char held tag prefix at the attempt's tail;
+            # continuation turns start with "\n" and do not rely on tag
+            # integrity across attempts.
             if isinstance(chunk, _RetryBoundary):
                 splitter = _StreamTagSplitter()
                 continue
@@ -1699,22 +1787,28 @@ async def stream_response(gen, model, messages, token_id, session_id, sig, tools
                     if "text" in r:
                         for piece in gate.feed(r["text"]):
                             yield f"data: {json.dumps(_chat_chunk([_choice({'content': piece})], cid=cid, created=created, model=model))}\n\n"
-        # [v81] 流结束裁决：暂扣区放行围栏内内容、丢弃围栏外标记残渣
+        # [v81] End-of-stream adjudication: the holding area releases fenced content and discards marker debris outside fences
         for piece in gate.flush():
             yield f"data: {json.dumps(_chat_chunk([_choice({'content': piece})], cid=cid, created=created, model=model))}\n\n"
         if gate.dropped:
             logger.warning("[v81 leak-gate] chat %s: dropped %d chars of unparsed tool markup from visible content", str(session_id)[:8], gate.dropped)
         _dump_stream_debug(session_id, full_text)
-        # [v79] 空流兜底：走到这里 = 流正常结束（客户端取消/上游异常都走
-        # 下方 except，不会到达）。full_text 为空 = 上游零输出悬空轮，计入
-        # 空回合计数，连续达标时下一轮入口强制换血（见 _empty_rollover）；
-        # 有输出的正常回合清零。注：此处 save_session 仍会保存映射（悬空轮
-        # 的映射保留是既有行为，客户端重试同 sig 可重放），换血判定在下一
-        # 轮入口统一处理，不在此处打断响应。
-        # [v83] 失败收尾提示（"（上游……）"开头的说明文字）不算有效输出：
-        # 旧判定把它当正文 -> 空流计数被清零 -> v79 换血永远不触发，坏会话
-        # 无限循环失败（2026-10-31 23:57 线上实锤）。
-        if full_text.strip() and not full_text.strip().startswith("（上游"):
+        # [v79] Empty-stream fallback: reaching here = the stream ended normally
+        # (client cancels / upstream exceptions take the except below and never
+        # arrive). Empty full_text = a dangling turn with zero upstream output;
+        # count it toward the empty-turn counter, and when the streak meets the
+        # threshold the next turn's entry forces a transfusion (see
+        # _empty_rollover); turns with output reset the counter. Note: save_session
+        # here still saves the mapping (keeping dangling-turn mappings is
+        # existing behavior; a client retry with the same sig can replay it);
+        # transfusion judgment is handled uniformly at the next turn's entry,
+        # not by interrupting the response here.
+        # [v83] Failure-closing notices (explanatory text starting with
+        # "(upstream ...)") do not count as valid output: the old check treated
+        # them as body text -> the empty-stream counter was reset -> the v79
+        # transfusion never fired and bad chats looped failures forever
+        # (confirmed in production 2026-10-31 23:57).
+        if full_text.strip() and not full_text.strip().startswith("(The upstream"):
             reset_empty_stream_count(session_id)
         else:
             _empty_n = bump_empty_stream_count(session_id)
@@ -1753,8 +1847,9 @@ async def stream_response(gen, model, messages, token_id, session_id, sig, tools
         except Exception:
             pass
     finally:
-        # [v78] 缺开口/掉斜杠抢救：修复后再解析，畸形块也能正常投递
-        # 工具调用，不再触发"纯标记无正文"的续写循环。
+        # [v78] Missing-open/dropped-slash salvage: repair before parsing so
+        # malformed blocks still deliver tool calls instead of triggering the
+        # "pure markup, no body" continuation loop.
         parsed_tools, clean_text = parse_tools(_salvage_tool_markup(full_text))
         clean_text = re.sub(r"<think>.*?</think>", "", clean_text, flags=re.DOTALL).strip()
         clean_text = re.sub(r"</?(?:tool_calls?|invoke|function_call|parameter)[^>]*>", "", clean_text, flags=re.IGNORECASE).strip()
@@ -1768,14 +1863,15 @@ async def stream_response(gen, model, messages, token_id, session_id, sig, tools
                 ast_msg["content"] = clean_text
             next_messages.append(ast_msg)
             next_sig = generate_signature_sync(next_messages, model, scope)
-            # [v85] 只在拿到真实编号时保存；None = 链路未推进，保留原映射
+            # [v85] Save only when a real message id was obtained; None = chain
+            # not advanced, keep the original mapping
             _sp = saved_parent(session_id, parent_message_id)
             if _sp is not None:
                 await _db(save_session, sig, token_id, session_id, _sp)
                 await _db(save_session, next_sig, token_id, session_id, _sp)
 
         if not aborted and not failed:
-            # [v74] 记录完成结果：窗口内同签名重试直接回放，不重复执行
+            # [v74] Record the completed result: same-signature retries within the window replay it instead of executing again
             try:
                 _dup_record(sig, {
                     "id": cid, "object": "chat.completion", "created": created, "model": model,
@@ -1815,8 +1911,9 @@ async def stream_response(gen, model, messages, token_id, session_id, sig, tools
                 usage_chunk = _chat_chunk([], cid=cid, created=created, model=model)
                 usage_chunk["usage"] = {"prompt_tokens": in_tokens, "completion_tokens": out_tokens, "total_tokens": in_tokens + out_tokens}
                 yield f"data: {json.dumps(usage_chunk)}\n\n"
-                # [v77 P0-6 移植] 完成轮用量落库（客户端可见成功才记，
-                # 失败/中止流不记——重试只计一次是结构性规则）
+                # [v77 P0-6 port] Persist usage for completion turns (recorded
+                # only when the client saw success; failed/aborted streams are
+                # not recorded — counting a retry once is a structural rule)
                 with suppress(Exception):
                     await _db(record_usage, scope or "unknown", "openai", model, in_tokens, out_tokens)
                 yield "data: [DONE]\n\n"
@@ -1832,7 +1929,7 @@ async def stream_anthropic_response(gen, model, messages, token_id, session_id, 
     yield start_evt
 
     parser = StreamToolParser()
-    # [v81] 泄露闸门：解析器认不出的畸形工具标记不再以正文流出
+    # [v81] Leak gate: malformed tool markup the parser cannot recognize no longer flows out as body text
     gate = _LeakGate()
     full_text = ""
     text_block_started = False
@@ -1885,7 +1982,7 @@ async def stream_anthropic_response(gen, model, messages, token_id, session_id, 
                             text_block_started = True
                         delta_evt = f"event: content_block_delta\ndata: {json.dumps({'type': 'content_block_delta', 'index': block_index, 'delta': {'type': 'text_delta', 'text': piece}})}\n\n"
                         yield delta_evt
-        # [v81] 流结束裁决：暂扣区放行围栏内内容、丢弃围栏外标记残渣
+        # [v81] End-of-stream adjudication: the holding area releases fenced content and discards marker debris outside fences
         for piece in gate.flush():
             if piece:
                 if not text_block_started:
@@ -1922,8 +2019,9 @@ async def stream_anthropic_response(gen, model, messages, token_id, session_id, 
         except Exception:
             pass
     finally:
-        # [v78] 缺开口/掉斜杠抢救：修复后再解析，畸形块也能正常投递
-        # 工具调用，不再触发"纯标记无正文"的续写循环。
+        # [v78] Missing-open/dropped-slash salvage: repair before parsing so
+        # malformed blocks still deliver tool calls instead of triggering the
+        # "pure markup, no body" continuation loop.
         parsed_tools, clean_text = parse_tools(_salvage_tool_markup(full_text))
         clean_text = re.sub(r"<think>.*?</think>", "", clean_text, flags=re.DOTALL).strip()
         clean_text = re.sub(r"</?(?:tool_calls?|invoke|function_call|parameter)[^>]*>", "", clean_text, flags=re.IGNORECASE).strip()
@@ -1935,7 +2033,7 @@ async def stream_anthropic_response(gen, model, messages, token_id, session_id, 
         out_tokens = count_tok(usage_out) if usage_out else 0
 
         if not failed:
-            # [v77 P0-6 移植] 非流式完成轮用量落库
+            # [v77 P0-6 port] Persist usage for non-streaming completion turns
             with suppress(Exception):
                 await _db(record_usage, scope or "unknown", "anthropic", req_model or model,
                           _count_messages_tokens(messages), out_tokens)
@@ -1947,7 +2045,8 @@ async def stream_anthropic_response(gen, model, messages, token_id, session_id, 
                 ast_msg["content"] = clean_text
             next_messages.append(ast_msg)
             next_sig = generate_signature_sync(next_messages, model, scope)
-            # [v85] 只在拿到真实编号时保存；None = 链路未推进，保留原映射
+            # [v85] Save only when a real message id was obtained; None = chain
+            # not advanced, keep the original mapping
             _sp = saved_parent(session_id, parent_message_id)
             if _sp is not None:
                 await _db(save_session, sig, token_id, session_id, _sp)
@@ -1973,7 +2072,7 @@ async def stream_anthropic_response(gen, model, messages, token_id, session_id, 
             for r in parser.flush():
                 if "text" in r:
                     flushed_text += r["text"]
-            # [v81] 暂扣区裁决：围栏内放行，围栏外标记残渣丢弃
+            # [v81] Holding-area adjudication: release inside fences, discard marker debris outside
             for piece in gate.flush():
                 flushed_text += piece
 
@@ -2114,11 +2213,12 @@ def format_anthropic_response(result, model):
 async def files_upload(request: Request):
     if not check_key(request):
         return JSONResponse({"error": "Invalid API key"}, status_code=401)
-    # [v77 PR#72 审计修复] effort 档位在此设置（此前链路断裂：
-    # request_effort 无人 set，max 档指令从未挂上）
+    # [v77 PR#72 audit fix] The effort tier is set here (previously the chain
+    # was broken: request_effort was never set and the max-tier instructions
+    # never attached)
     _request_effort.set(effort_level(body) if isinstance(body, dict) else None)
-    # [v77 P0-7] 显式模式开关：DEEPSEEKER_MODE=official 时走官方 API，
-    # 无静默回退。
+    # [v77 P0-7] Explicit mode switch: with DEEPSEEKER_MODE=official, use the
+    # official API; no silent fallback.
     if official_api.official_mode_enabled():
         _body = await request.json()
         return await _official_chat_response(
@@ -2311,7 +2411,7 @@ async def _json_body(request: Request):
     return body
 
 
-# ============ [v77 P0-7 移植] 官方 API 直通（DEEPSEEKER_MODE=official 显式开启） ============
+# ============ [v77 P0-7 port] Official API passthrough (enabled explicitly via DEEPSEEKER_MODE=official) ============
 _OFFICIAL_PASSTHROUGH_FIELDS = (
     "messages",
     "temperature",
@@ -2323,11 +2423,12 @@ _OFFICIAL_PASSTHROUGH_FIELDS = (
 
 
 async def _official_chat_response(body, model, stream, tools, request):
-    """[v77 P0-7] 用官方 API 服务 /v1/chat/completions。
+    """[v77 P0-7] Serve /v1/chat/completions via the official API.
 
-    同一鉴权（调用方已查）、同一种用量记录（surface='official'、掩码 key、
-    上游报真实 usage）、工具按原生 OpenAI 格式转发。官方 key 永不进日志
-    或错误体（official_api 内部脱敏）。"""
+    Same auth (already checked by the caller), same usage recording
+    (surface='official', masked key, upstream reports real usage), tools
+    forwarded in native OpenAI format. The official key never reaches logs
+    or error bodies (redacted inside official_api)."""
     payload = {k: body[k] for k in _OFFICIAL_PASSTHROUGH_FIELDS if k in body}
     payload["model"] = official_api.map_model(model)
     if tools:
@@ -2384,7 +2485,8 @@ async def chat_completions(request: Request):
     search = body.get("search", False)
     stream = body.get("stream", False)
     tools = body.get("tools", None)
-    # [v73] JSON 输出模式：仅当客户端显式声明时激活，正常请求零影响
+    # [v73] JSON output mode: activates only when the client explicitly
+    # requests it; zero impact on normal requests
     resp_fmt = body.get("response_format") or {}
     json_mode = isinstance(resp_fmt, dict) and resp_fmt.get("type") in ("json_object", "json_schema")
     return await handle_chat(messages, model, thinking, search, stream, tools, scope=get_api_key(request), json_mode=json_mode)
@@ -2740,7 +2842,7 @@ async def dashboard(request: Request):
 
 @app.post("/v1/pool/restore")
 async def v1_pool_restore(request: Request):
-    """[v77 P0-3] 恢复隔离账号（管理员手动操作，隔离的唯一出口）。"""
+    """[v77 P0-3] Restore a quarantined account (manual admin action; the only way out of quarantine)."""
     try:
         get_current_admin(request)
     except HTTPException:
@@ -2756,14 +2858,14 @@ async def v1_pool_restore(request: Request):
 
 @app.get("/pool")
 async def pool_dashboard(request: Request):
-    """[v77 P0-3/P0-6 移植] 池状态 + 用量统计可视化页（管理员）。"""
+    """[v77 P0-3/P0-6 port] Pool status + usage statistics dashboard page (admin)."""
     try:
         get_current_admin(request)
     except HTTPException:
         return HTMLResponse("<meta http-equiv='refresh' content='0;url=/login'>")
     return HTMLResponse("""<!DOCTYPE html>
-<html lang="zh"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>账号池与用量</title>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Account Pool &amp; Usage</title>
 <style>
 body{font-family:-apple-system,sans-serif;background:#0f172a;color:#e2e8f0;margin:0;padding:24px}
 h1{font-size:20px} h2{font-size:16px;margin:24px 0 8px}
@@ -2775,11 +2877,11 @@ button{background:#334155;color:#e2e8f0;border:0;border-radius:4px;padding:3px 1
 button:hover{background:#475569}
 .meta{color:#64748b;font-size:12px;margin-top:16px}
 </style></head><body>
-<h1>账号池状态 <span class="meta" id="ts"></span></h1>
-<table id="pool"><thead><tr><th>ID</th><th>别名</th><th>状态</th><th>说明</th><th>进行中</th><th>上次使用</th><th>冷却</th><th>操作</th></tr></thead><tbody></tbody></table>
-<h2>用量统计（按天 × 按 key）</h2>
-<table id="usage"><thead><tr><th>日期</th><th>Key</th><th>通道</th><th>请求数</th><th>输入 tokens</th><th>输出 tokens</th></tr></thead><tbody></tbody></table>
-<div class="meta">每 10 秒自动刷新 · v77</div>
+<h1>Account Pool Status <span class="meta" id="ts"></span></h1>
+<table id="pool"><thead><tr><th>ID</th><th>Alias</th><th>Status</th><th>Note</th><th>In-flight</th><th>Last Used</th><th>Cooldown</th><th>Actions</th></tr></thead><tbody></tbody></table>
+<h2>Usage Statistics (by day × by key)</h2>
+<table id="usage"><thead><tr><th>Date</th><th>Key</th><th>Surface</th><th>Requests</th><th>Input tokens</th><th>Output tokens</th></tr></thead><tbody></tbody></table>
+<div class="meta">Auto-refreshes every 10 seconds · v77</div>
 <script>
 async function refresh(){
   const [pool, usage] = await Promise.all([
@@ -2793,7 +2895,7 @@ async function refresh(){
       tr.innerHTML = `<td>${t.id}</td><td>${t.label}</td>`
         + `<td class="${t.state_class}">${t.status}</td><td>${t.state_note}</td>`
         + `<td>${t.in_flight}</td><td>${t.last_used}</td><td>${t.cooldown}</td>`
-        + `<td>${t.can_restore ? `<button onclick="restore(${t.id})">恢复</button>` : ''}</td>`;
+        + `<td>${t.can_restore ? `<button onclick="restore(${t.id})">Restore</button>` : ''}</td>`;
       tb.appendChild(tr);
     }
   }
@@ -2818,7 +2920,7 @@ refresh(); setInterval(refresh, 10000);
 
 @app.get("/v1/usage")
 async def v1_usage(request: Request):
-    """[v77 P0-6] 用量统计 JSON（管理员）。"""
+    """[v77 P0-6] Usage statistics JSON (admin)."""
     try:
         get_current_admin(request)
     except HTTPException:
@@ -2829,7 +2931,7 @@ async def v1_usage(request: Request):
 
 @app.get("/v1/pool")
 async def v1_pool(request: Request):
-    """[v77 P0-3] 账号池运维视图 JSON（管理员，无凭据字段）。"""
+    """[v77 P0-3] Account pool operations view JSON (admin; no credential fields)."""
     try:
         get_current_admin(request)
     except HTTPException:
@@ -2867,13 +2969,15 @@ async def root(request: Request):
 
 
 async def _deep_health_probe():
-    """[v77 P0-9 移植] 一次端到端上游往返（含 PoW）：创建空聊天会话。
+    """[v77 P0-9 port] One end-to-end upstream round trip (incl. PoW): create an empty chat session.
 
-    成本：每次调用一个空上游会话——这是本桥能跑的最诚实的探针，因为
-    会话创建正是 PoW/客户端版本/账号死亡时最先断的那一跳。探针从不发
-    消息，也绝不报告 token 材料。状态感知选号：走 pick_token()，跳过
-    隔离与冷却中的行（旧式抓第一行的做法会误报降级、还会把上游流量
-    送进已知死亡的凭据）。"""
+    Cost: one empty upstream session per call — the most honest probe this
+    bridge can run, because session creation is exactly the hop that breaks
+    first when PoW/client version/account dies. The probe never sends messages
+    and never reports token material. State-aware token pick: goes through
+    pick_token(), skipping quarantined and cooling-down rows (the old
+    grab-the-first-row approach misreported degradation and sent upstream
+    traffic to credentials known to be dead)."""
     token_id = await _db(pick_token)
     auth_token = None
     if token_id is not None:
@@ -2900,8 +3004,9 @@ async def _deep_health_probe():
 
 @app.get("/health")
 async def health(request: Request):
-    # [v77 P0-9 移植] ?deep=1 需要鉴权，且 401 先于任何上游流量——
-    # 浅层检查保持公开，探针永远不能被当成免费中转测试器。
+    # [v77 P0-9 port] ?deep=1 requires auth, and the 401 precedes any upstream
+    # traffic — the shallow check stays public; the probe must never be usable
+    # as a free relay tester.
     deep = (request.query_params.get("deep") or "").strip().lower() in ("1", "true", "yes")
     if deep and not check_key(request):
         return JSONResponse({"error": "Invalid API key"}, status_code=401)
@@ -2922,7 +3027,7 @@ async def health(request: Request):
         data["active_tokens"] = active
         data["cookies_valid"] = cookies_valid
         data["version"] = "v85"
-        # [v77 P0-9 移植] 深度探针：真实端到端上游往返
+        # [v77 P0-9 port] Deep probe: a real end-to-end upstream round trip
         if deep:
             probe = await _deep_health_probe()
             data["deep"] = probe

@@ -16,6 +16,16 @@ Use at your own risk.
 A kind request: do not spam the server, respect DeepSeek's limits, and use it for personal purposes only.
 
 
+## Branches
+
+- **`main`** — the development line: fast hotfixes, code comments and server
+  logs in Chinese. Every stable release lands here first.
+- **`english`** (this branch) — the **full-English stable release line**:
+  identical code with all comments, docstrings, log messages, in-chat notices
+  and dashboard UI translated to English. Synced from `main` on every stable
+  release. If you prefer a 100% English codebase and dashboard, install from
+  this branch.
+
 ## v85 — Fixed stable release (please install this one)
 
 > **DeepSeek changed their web protocol on 2026-10-31**: the traditional
