@@ -2235,15 +2235,25 @@ async def files_upload(request: Request):
     _set_key_name(tok.get("alias"))
     slot = acquire_token_slot(tok_id)  # B3: upload counts toward the token's in-flight load
     try:
-        form = await request.form()
-        file_obj = form.get("file")
-        if not file_obj:
-            return JSONResponse({"error": "No file provided"}, status_code=400)
-        file_bytes = await file_obj.read(25 * 1024 * 1024 + 1)
+        # [v86] Runtime lacks python-multipart: multipart bodies go through
+        # the stdlib extractor; request.form() kept for other content types.
+        ctype = request.headers.get("content-type", "")
+        if ctype.startswith("multipart/form-data"):
+            filename, file_bytes = _multipart_extract_file(await request.body(), ctype)
+            if not file_bytes:
+                return JSONResponse({"error": "No file provided"}, status_code=400)
+            up_ct = "application/octet-stream"
+        else:
+            form = await request.form()
+            file_obj = form.get("file")
+            if not file_obj:
+                return JSONResponse({"error": "No file provided"}, status_code=400)
+            file_bytes = await file_obj.read(25 * 1024 * 1024 + 1)
+            filename = getattr(file_obj, "filename", "file.bin")
+            up_ct = getattr(file_obj, "content_type", "application/octet-stream")
         if len(file_bytes) > 25 * 1024 * 1024:
             return JSONResponse({"error": "File too large"}, status_code=413)
-        filename = getattr(file_obj, "filename", "file.bin")
-        content_type = getattr(file_obj, "content_type", "application/octet-stream")
+        content_type = up_ct
         file_info = None
         async for status, data in upload_file(file_bytes, filename, content_type, tok["token"]):
             if status == "success":
@@ -2801,9 +2811,54 @@ def _prune_admin_sessions():
         SESSIONS.pop(sid, None)
 
 
+def _parse_urlencoded_form(raw: bytes) -> dict:
+    """[v86] Stdlib parser for application/x-www-form-urlencoded bodies.
+
+    The runtime image ships without python-multipart; newer Starlette
+    asserts on every request.form() call, so plain key-value forms
+    (login, tokens/add) are parsed manually with urllib.parse.
+    """
+    from urllib.parse import parse_qsl
+    return dict(parse_qsl(raw.decode("utf-8", "replace"), keep_blank_values=True))
+
+
+def _multipart_extract_file(body: bytes, content_type: str):
+    """[v86] Lightweight stdlib multipart/form-data file extraction.
+
+    Locates the part named "file" and returns (filename, content);
+    returns (None, None) when not found. The boundary is generated
+    randomly by the client, so splitting on it directly is safe.
+    """
+    import re
+    m = re.search(r'boundary=(?:"([^"]+)"|([^;,\s]+))', content_type or "")
+    if not m:
+        return None, None
+    boundary = (m.group(1) or m.group(2)).strip().encode("latin-1")
+    delim = b"--" + boundary
+    for part in body.split(delim):
+        part = part.strip(b"\r\n")
+        if not part or part == b"--":
+            continue
+        head, sep, content = part.partition(b"\r\n\r\n")
+        if not sep:
+            continue
+        if content.endswith(b"\r\n"):
+            content = content[:-2]
+        headers = head.decode("utf-8", "replace")
+        if 'name="file"' not in headers:
+            continue
+        fn = re.search(r'filename="([^"]*)"', headers)
+        return (fn.group(1) if fn else "file.bin"), content
+    return None, None
+
+
 @app.post("/login", response_class=HTMLResponse)
 async def login_submit(request: Request):
-    form = await request.form()
+    ctype = request.headers.get("content-type", "")
+    if ctype.startswith("application/x-www-form-urlencoded"):
+        form = _parse_urlencoded_form(await request.body())
+    else:
+        form = await request.form()
     username = form.get("username", "")
     password = form.get("password", "")
     _prune_admin_sessions()
@@ -2942,7 +2997,12 @@ async def tokens_add(request: Request):
         get_current_admin(request)
     except HTTPException:
         return HTMLResponse("<meta http-equiv='refresh' content='0;url=/login'>")
-    form = await request.form()
+    # [v86] urlencoded forms parsed via stdlib (no python-multipart on runtime)
+    ctype = request.headers.get("content-type", "")
+    if ctype.startswith("application/x-www-form-urlencoded"):
+        form = _parse_urlencoded_form(await request.body())
+    else:
+        form = await request.form()
     auth_token = form.get("auth_token", "").strip().strip("'\"")
     alias = form.get("alias", "").strip() or None
     if auth_token:
