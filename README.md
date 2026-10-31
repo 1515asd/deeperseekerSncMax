@@ -16,6 +16,50 @@ Use at your own risk.
 A kind request: do not spam the server, respect DeepSeek's limits, and use it for personal purposes only.
 
 
+## v85 — Fixed stable release (please install this one)
+
+> **DeepSeek changed their web protocol on 2026-10-31**: the traditional
+> `parent_message_id: 0` on a brand-new chat is now rejected by the server
+> (`biz_code 26 "invalid message id"`), and the error arrives as plain JSON,
+> which the old parser mistook for an empty stream. Every proxy built on this
+> reverse API was affected.
+
+The interim protocol-fix commits (`v82`–`v84`) were **emergency test
+releases** — if you hit issues with them, that was expected. **This v85 is the
+fixed stable release, and we recommend everyone install this one.**
+
+### What was fixed in v85
+
+- **Full native protocol adaptation** — the first message of every chat now
+  omits `parent_message_id` entirely (the only server-side-safe form across
+  all access points), and every follow-up turn uses the **real message IDs
+  that DeepSeek now broadcasts at the start of each stream**. The legacy
+  "+2 guessing" fallback has been removed from the codebase completely:
+  the message chain is 100% driven by server-provided IDs.
+- **"Model goes silent after a tool call"** — upstream occasionally returns
+  a completely empty 502 stream; these are now detected and auto-retried
+  instead of silently ending the turn.
+- **Tool-call markup leaking into visible chat text** — malformed tool-call
+  fragments are now intercepted before they reach the client.
+- **Old conversations failing in a loop** — conversations whose server-side
+  state was invalidated by the protocol change now self-heal automatically.
+
+### Important note if you used earlier versions
+
+Conversations started **before** the protocol change may fail on their next
+message (the old server-side chat session is gone). Your history is **not
+lost** — the client resends it automatically. Two ways to recover:
+
+1. **Wait a while** for the old server-side chat to expire, then simply send
+   a message in that conversation again — the full history is resent and the
+   conversation's memory is rebuilt automatically.
+2. **Or delete it right away**: go to the DeepSeek website, open your account,
+   find that conversation, and **delete it** — then start a new chat. A fresh
+   server-side chat is created and the full history is resent just the same.
+
+If you tried this project before and it seemed broken after 2026-10-31,
+please **retry with this version**.
+
 ## Fork Improvements (this fork)
 
 This fork is maintained for **long-running, self-hosted deployments on free-tier
