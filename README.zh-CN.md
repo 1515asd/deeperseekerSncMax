@@ -53,6 +53,8 @@
 
 ## 快速开始
 
+**第一次用？先读[使用指南（中文）](docs/GUIDE.zh-CN.md)**——大白话讲清楚安装、面板、原理与常见问题。英文版见 [docs/GUIDE.md](docs/GUIDE.md)。
+
 ```bash
 git clone https://github.com/1515asd/rh-deeperseeker.git
 cd rh-deeperseeker
