@@ -1,29 +1,51 @@
+<div align="center">
+
 # DeeperSeeker
 
 **Self-hosted DeepSeek gateway that speaks the OpenAI & Anthropic API standards.**
-Point any OpenAI/Anthropic-compatible client — Claude Code, Cline, LibreChat,
-Open WebUI, LobeChat, Cherry Studio, anything — at this server and it just works,
+
+[![License: MIT](https://img.shields.io/github/license/1515asd/rh-deeperseeker.svg)](LICENSE)
+[![Last Commit](https://img.shields.io/github/last-commit/1515asd/rh-deeperseeker/main.svg)](https://github.com/1515asd/rh-deeperseeker/commits/main)
+[![Stars](https://img.shields.io/github/stars/1515asd/rh-deeperseeker.svg)](https://github.com/1515asd/rh-deeperseeker/stargazers)
+[![Forks](https://img.shields.io/github/forks/1515asd/rh-deeperseeker.svg)](https://github.com/1515asd/rh-deeperseeker/network/members)
+![Release](https://img.shields.io/badge/release-v85_stable-2ea44f.svg)
+![Branch](https://img.shields.io/badge/branch-english__available-blueviolet.svg)
+
+Point any OpenAI/Anthropic-compatible client at this server and it just works,
 with streaming, tool calling, and long-context session management.
+
+**Works with** · Claude Code · Cline · LibreChat · Open WebUI · LobeChat · Cherry Studio · Dify · anything OpenAI/Anthropic-compatible
+
+[English](README.md) | [简体中文](README.zh-CN.md)
+
+</div>
+
+## Highlights
+
+- **Zero-cost DeepSeek API** — runs on the free DeepSeek web tier, no official API key needed; exposes standard OpenAI Chat Completions and Anthropic Messages endpoints
+- **First & fastest protocol fix** — when DeepSeek changed their web protocol on 2026-10-31 and broke every proxy on this reverse API, this fork shipped the **first working fix in 25 minutes** and a hardened stable release within 3 hours
+- **Native real-message-ID protocol** — fully adapted to DeepSeek's server-broadcast message IDs; zero guessing anywhere in the chain
+- **Tool-calling leak gate** — malformed tool-call markup is intercepted across 16 known shapes before it can leak into model output
+- **Empty-stream auto-retry** — upstream 502s / silent model stops trigger automatic continuation (≤2 retries), no more "the model just stopped mid-answer"
+- **Long-context rollover** — automatic summary handoff keeps 100+ turn conversations alive; no more "long chat stops responding"
+- **Token-pool disaster recovery** — multi-account rotation with stale-session self-healing and poisoned-session rebuild
+- **Built-in dashboard** — usage, token pool and request monitoring UI out of the box
+- **100% English build available** — the [`english`](https://github.com/1515asd/rh-deeperseeker/tree/english) branch ships identical code with all logs, in-chat notices and dashboard UI in English
 
 ## Why this fork
 
 Upstream [`AmanCode22/deeperseeker`](https://github.com/AmanCode22/deeperseeker)
-(MIT) is a solid base, but it has been dormant since 2026-10-26. This fork is
-maintained for **long-running, self-hosted deployments on free-tier platforms**:
+(MIT) is a solid base, but it has been **dormant since 2026-10-26** — and when
+the 2026-10-31 protocol change landed, it left every deployment on the old code
+broken. This fork keeps long-running, self-hosted deployments on free-tier
+platforms alive, with 110+ commits in the last three weeks and sub-hour
+emergency response times.
 
-- **Actively maintained** — 110+ commits in the last three weeks. When DeepSeek
-  changed their web protocol on 2026-10-31 and broke every proxy built on this
-  reverse API, this fork shipped the **first working fix in 25 minutes** and a
-  hardened stable release within 3 hours.
-- **Production-hardened** — stream-interrupt auto-continue, context rollover
-  with summary handoff (no more "long chat stops responding"), tool-call leak
-  gate, empty-stream auto-retry, token-pool disaster recovery, stale-session
-  self-healing.
-- **Two branches**: `main` is the dev line (fast hotfixes, Chinese comments);
-  **[`english`](https://github.com/1515asd/rh-deeperseeker/tree/english)** is
-  the **full-English stable line** — identical code with all comments, logs,
-  in-chat notices and dashboard UI in English. Newly added; pick it if you
-  want a 100% English experience.
+**Branches**: `main` is the dev line (fast hotfixes); 
+**[`english`](https://github.com/1515asd/rh-deeperseeker/tree/english)** is
+the **full-English stable line** — identical code, all comments, logs,
+in-chat notices and dashboard UI in English. Newly added; pick it if you
+want a 100% English experience.
 
 If this fork saved you a broken setup, a star helps others find it.
 
