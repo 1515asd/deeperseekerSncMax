@@ -3882,7 +3882,13 @@ async def _send_message_locked(chat_id, auth_token, message, parent_message_id, 
             return
         logger.warning("[auto-continue] 上游流未正常结束（reason=%s），自动续写第 %d/%d 次",
                        interrupt_reason, attempt + 1, max_continue)
-        parent = parent + 2  # next_parent 语义：本次 exchange 上游产生 user+assistant 两条消息
+        # [v83] 空流场景 parent 不推进：空流 = 上游连请求都没收进去（PoW
+        # 拒绝 / biz 26 / 零输出），本次 exchange 没有入库任何消息，+2 纯属
+        # 瞎猜——还会把原本可能有效的 parent 弄成确定无效（2026-10-31
+        # 23:57 线上实锤：PoW 拒 -> +2 续写 -> biz_code 26 连环失败）。
+        # 真中断场景上游可能已入库消息，维持 +2 既有语义。
+        if interrupt_reason != "empty_stream":
+            parent = parent + 2  # next_parent 语义：本次 exchange 上游产生 user+assistant 两条消息
         # [v62] 畸形工具调用场景换用诊断提示词：告诉模型错在哪、附原始调用、
         # 给正确格式、给两条出路（重写调用 or 直接作答）——模型知道病因才会
         # 重写正确调用，而不是对着通用的"继续写"掷硬币。其余场景行为不变。

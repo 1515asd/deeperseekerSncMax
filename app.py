@@ -47,6 +47,17 @@ def _dup_dbg(msg):
 
 
 def _dup_record(sig, body):
+    # [v83] 失败收尾提示（"（上游……已重试 N 次仍未产出正文）"等）不缓存：
+    # 它被 yield 给客户端是为了让用户知道发生了什么，不是有效回答——缓存
+    # 它会让 dup-guard 在窗口内把失败提示原样回放，用户重发同一条消息
+    # 永远拿不到真正的重试（2026-10-31 23:57 线上实锤）。
+    try:
+        _c = (((body or {}).get("choices") or [{}])[0].get("message") or {}).get("content") or ""
+        if _c.strip().startswith("（上游"):
+            _dup_dbg(f"record sig={str(sig)[:16]} SKIPPED (failure notice)")
+            return
+    except Exception:
+        pass
     _DUP_CACHE[sig] = {"ts": time.time(), "body": body}
     while len(_DUP_CACHE) > _DUP_CACHE_MAX:
         _DUP_CACHE.pop(next(iter(_DUP_CACHE)))
@@ -1248,7 +1259,8 @@ async def handle_chat(
             # 保存在本会话，上游记忆里留下"用户消息发出后模型零回复"的断点）。
             # 计入空回合计数，连续达标时下一轮 handle_chat 入口强制换血
             # （见 _empty_rollover）。有输出的正常回合清零计数。
-            if resp_text.strip():
+            # [v83] 与流式路径同修：失败收尾提示（"（上游……）"）不算输出。
+            if resp_text.strip() and not resp_text.strip().startswith("（上游"):
                 reset_empty_stream_count(session_id)
             else:
                 _empty_n = bump_empty_stream_count(session_id)
@@ -1691,7 +1703,10 @@ async def stream_response(gen, model, messages, token_id, session_id, sig, tools
         # 有输出的正常回合清零。注：此处 save_session 仍会保存映射（悬空轮
         # 的映射保留是既有行为，客户端重试同 sig 可重放），换血判定在下一
         # 轮入口统一处理，不在此处打断响应。
-        if full_text.strip():
+        # [v83] 失败收尾提示（"（上游……）"开头的说明文字）不算有效输出：
+        # 旧判定把它当正文 -> 空流计数被清零 -> v79 换血永远不触发，坏会话
+        # 无限循环失败（2026-10-31 23:57 线上实锤）。
+        if full_text.strip() and not full_text.strip().startswith("（上游"):
             reset_empty_stream_count(session_id)
         else:
             _empty_n = bump_empty_stream_count(session_id)
