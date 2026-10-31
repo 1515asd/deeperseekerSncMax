@@ -815,20 +815,23 @@ def _format_span(seconds):
 def get_pool_view():
     """[v77 P0-3 移植] 每账号的运维视图。
 
-    状态、负载、计时器以可直接渲染的字符串给出，且不含任何凭据字段：
-    token 列刻意缺席——此输出直接进 HTML，浏览器会缓存、截图会带走。
+    状态、负载、计时器以可直接渲染的字符串给出，且不含任何可用凭据字段：
+    完整 token 列刻意缺席——此输出直接进 HTML，浏览器会缓存、截图会带走。
+    token_head 只暴露前 8 位 + 末 4 位用于人眼区分账号（旧版仪表盘本就
+    显示前 12 位，不新增暴露面）。
     """
     now = time.time()
     conn = get_db()
     rows = conn.execute(
-        "SELECT id, alias, status, rate_limited_until, last_used, consecutive_403 "
+        "SELECT id, alias, status, rate_limited_until, last_used, consecutive_403, token "
         "FROM tokens ORDER BY id"
     ).fetchall()
     conn.close()
 
     view = []
-    for tid, alias, status, until, last_used, streak in rows:
+    for tid, alias, status, until, last_used, streak, token in rows:
         streak = streak or 0
+        token_head = f"{(token or '')[:8]}…{((token or '')[-4:] if len(token or '') > 12 else '')}" if token else "—"
         if status == "QUARANTINED":
             state_class, cooldown = "err", "—"
             note = "quarantined — manual return required"
@@ -848,6 +851,7 @@ def get_pool_view():
             {
                 "id": tid,
                 "label": alias if alias else f"untagged #{tid}",
+                "token_head": token_head,
                 "status": status,
                 "state_class": state_class,
                 "state_note": note,
