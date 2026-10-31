@@ -1136,37 +1136,28 @@ def delete_session(sig):
 
 
 def next_parent(parent_message_id):
-    """Compute the parent_message_id to use for the next turn on a chat session.
-
-    Invariant: each successful /chat/completion request appends exactly one user
-    message and one assistant message to the DeepSeek chat session, so if the
-    request was sent with parent_message_id P, the last message id afterwards is
-    P + 1 and the next request must use P + 2.
-
-    DeepSeek's web API exposes no endpoint to list a session's messages, so this
-    increment cannot be verified against the server; it is centralized here so
-    every save_session() call site (token-rotation branch, non-stream and both
-    streaming paths) stays consistent if the invariant ever changes.
-    """
-    return parent_message_id + 2
+    """[v86 已废除] 旧协议的 +2 猜测。新协议下上游在流开头广播真实编号
+    （ready 事件），parent 链只认真实编号——本函数保留空壳仅为兼容旧
+    导入名，任何路径都不得再用猜测值推进链路。"""
+    raise NotImplementedError("next_parent (+2 guess) removed in v85: use _LAST_REAL_PARENT / saved_parent")
 
 
 # [v84] 新协议直接对接：上游 2026-10-31 起在流开头广播真实消息编号
 # （event ready -> {"request_message_id": N, "response_message_id": M}）。
-# 我们在 _send_message_once 里捕获它，_send_message_locked 收尾时存入本表；
-# app 层 save_session 改用 saved_parent() 优先取真实编号，取不到才回退
-# next_parent 猜测。至此 parent 链不再依赖任何猜测——中断场景的编号
-# 错位风险归零（实测 R1/R2/R3 真实编号与 +2 猜测吻合，本改动是兜底
-# 上游未来改变编号规则时的确定性保障）。
+# 我们在 _send_message_once 里捕获它，_send_message_locked 收尾时存入本表。
+# [v85] 全量原生适配完成：saved_parent 只返回真实编号，绝无猜测回退——
+# 广播没到 = 上游零入库，链路状态未知，调用方跳过保存（保留原映射），
+# 下轮原生重发同一 parent。旧协议的 +2 语义已从所有路径移除。
 _LAST_REAL_PARENT = {}
 
 
 def saved_parent(chat_id, prev_parent):
-    """save_session 专用：优先上游广播的真实编号，回退 +2 猜测。"""
-    real = _LAST_REAL_PARENT.get(chat_id)
-    if real:
-        return real
-    return next_parent(prev_parent)
+    """save_session 专用：只认上游广播的真实编号。
+
+    返回 None 表示本回合没有任何广播（上游零入库，链路未推进），调用方
+    必须跳过 save_session——保留原映射，绝不写入猜测值。prev_parent 参数
+    仅为兼容调用点签名，已不参与计算。"""
+    return _LAST_REAL_PARENT.get(chat_id)
 
 
 def delete_sessions_for_chat(token_id, session_id):
@@ -3806,8 +3797,9 @@ async def _send_message_locked(chat_id, auth_token, message, parent_message_id, 
     """带自动续写的对外入口。
 
     上游流在 FINISHED 之前异常中断（断流/断连/上游提前关闭）时，自动以
-    『继续』在同会话内续写——parent 按 next_parent 语义（+2）链式前进，
-    续写内容无缝拼进同一个客户端流。最多自动续写 max_continue 次。
+    『继续』在同会话内续写——parent 严格按上游 ready 广播的真实编号前进
+    （[v85] 全量原生适配：广播没到则原地不动，绝不猜测），续写内容无缝
+    拼进同一个客户端流。最多自动续写 max_continue 次。
 
     [v64] 两处加固（根因：2026-10-25 01:04 线上"思考完没输出"）：
     1. 提示词分流：本回合还没发出过任何可见正文时，续写不用带 【END】
@@ -3914,19 +3906,13 @@ async def _send_message_locked(chat_id, auth_token, message, parent_message_id, 
             return
         logger.warning("[auto-continue] 上游流未正常结束（reason=%s），自动续写第 %d/%d 次",
                        interrupt_reason, attempt + 1, max_continue)
-        # [v83] 空流场景 parent 不推进：空流 = 上游连请求都没收进去（PoW
-        # 拒绝 / biz 26 / 零输出），本次 exchange 没有入库任何消息，+2 纯属
-        # 瞎猜——还会把原本可能有效的 parent 弄成确定无效（2026-10-31
-        # 23:57 线上实锤：PoW 拒 -> +2 续写 -> biz_code 26 连环失败）。
-        # 真中断场景上游可能已入库消息，维持 +2 既有语义。
-        # [v84] 中断场景优先用 ready 广播的真实编号（广播到达 = 该 exchange
-        # 已入库，最终 response id 是确定的）；广播没到（如 PoW 拒/空流，
-        # 上游零入库）才回退：空流不推进（v83），真中断 +2 猜测。
+        # [v85] 全量原生适配：parent 只认 ready 广播的真实编号。广播没到
+        # （PoW 拒/空流/秒断连）= 上游零入库，parent 原地不动，续写轮用
+        # 同一 parent 原生重发；+2 猜测语义已废除（v83 23:57 实锤猜测会
+        # 把链路推进确定无效的编号引发 biz_code 26 连环失败）。
         if _meta.get("response_message_id"):
             parent = _meta["response_message_id"]
             _LAST_REAL_PARENT[chat_id] = parent
-        elif interrupt_reason != "empty_stream":
-            parent = parent + 2  # next_parent 语义：本次 exchange 上游产生 user+assistant 两条消息
         # [v62] 畸形工具调用场景换用诊断提示词：告诉模型错在哪、附原始调用、
         # 给正确格式、给两条出路（重写调用 or 直接作答）——模型知道病因才会
         # 重写正确调用，而不是对着通用的"继续写"掷硬币。其余场景行为不变。

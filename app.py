@@ -202,7 +202,6 @@ from functions import (
     effort_level,
     request_effort as _request_effort,
     request_tools as _request_tools,
-    next_parent,
     parse_tools,
     _salvage_tool_markup,
     malformed_continue_count,
@@ -920,10 +919,15 @@ async def handle_chat(
                         next_messages.append(ast_msg)
                         next_sig = await generate_signature(next_messages, model, scope)
 
-                        await _db(save_session, sig, new_token_id, new_session_id, saved_parent(new_session_id, 0))
+                        # [v85] saved_parent 只返回真实编号；None = 本回合
+                        # 无广播（链路未推进），跳过保存保留原映射。
+                        # baseline 与链路无关，无条件保存。
                         await _db(set_chat_baseline, new_session_id, _packed_first_message_tokens(messages),
                                   estimate_conversation_tokens_cached(messages))
-                        await _db(save_session, next_sig, new_token_id, new_session_id, saved_parent(new_session_id, 0))
+                        _sp = saved_parent(new_session_id, 0)
+                        if _sp is not None:
+                            await _db(save_session, sig, new_token_id, new_session_id, _sp)
+                            await _db(save_session, next_sig, new_token_id, new_session_id, _sp)
                         if rot_owner is not None:
                             rot_owner.release()
                         return format_response(resp_text, model, messages, tools)
@@ -1292,8 +1296,11 @@ async def handle_chat(
             next_messages.append(ast_msg)
             next_sig = await generate_signature(next_messages, model, scope)
 
-            await _db(save_session, sig, token_id, session_id, saved_parent(session_id, parent_message_id))
-            await _db(save_session, next_sig, token_id, session_id, saved_parent(session_id, parent_message_id))
+            # [v85] 只在拿到真实编号时保存；None = 链路未推进，保留原映射
+            _sp = saved_parent(session_id, parent_message_id)
+            if _sp is not None:
+                await _db(save_session, sig, token_id, session_id, _sp)
+                await _db(save_session, next_sig, token_id, session_id, _sp)
             _resp = format_response(resp_text, model, messages, tools)
             # [v77 P0-6 审计补漏] OpenAI 非流式完成轮的用量落库——此前只在
             # 流式（stream_response）与 Anthropic 非流式路径落库，OpenAI
@@ -1761,8 +1768,11 @@ async def stream_response(gen, model, messages, token_id, session_id, sig, tools
                 ast_msg["content"] = clean_text
             next_messages.append(ast_msg)
             next_sig = generate_signature_sync(next_messages, model, scope)
-            await _db(save_session, sig, token_id, session_id, saved_parent(session_id, parent_message_id))
-            await _db(save_session, next_sig, token_id, session_id, saved_parent(session_id, parent_message_id))
+            # [v85] 只在拿到真实编号时保存；None = 链路未推进，保留原映射
+            _sp = saved_parent(session_id, parent_message_id)
+            if _sp is not None:
+                await _db(save_session, sig, token_id, session_id, _sp)
+                await _db(save_session, next_sig, token_id, session_id, _sp)
 
         if not aborted and not failed:
             # [v74] 记录完成结果：窗口内同签名重试直接回放，不重复执行
@@ -1937,8 +1947,11 @@ async def stream_anthropic_response(gen, model, messages, token_id, session_id, 
                 ast_msg["content"] = clean_text
             next_messages.append(ast_msg)
             next_sig = generate_signature_sync(next_messages, model, scope)
-            await _db(save_session, sig, token_id, session_id, saved_parent(session_id, parent_message_id))
-            await _db(save_session, next_sig, token_id, session_id, saved_parent(session_id, parent_message_id))
+            # [v85] 只在拿到真实编号时保存；None = 链路未推进，保留原映射
+            _sp = saved_parent(session_id, parent_message_id)
+            if _sp is not None:
+                await _db(save_session, sig, token_id, session_id, _sp)
+                await _db(save_session, next_sig, token_id, session_id, _sp)
 
         # Declared BEFORE _tb so the helper's closure reads top-down — it used
         # to be defined after _tb and worked only by late binding (Stage 1
@@ -2908,7 +2921,7 @@ async def health(request: Request):
     if check_key(request):
         data["active_tokens"] = active
         data["cookies_valid"] = cookies_valid
-        data["version"] = "v77"
+        data["version"] = "v85"
         # [v77 P0-9 移植] 深度探针：真实端到端上游往返
         if deep:
             probe = await _deep_health_probe()
