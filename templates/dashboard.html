@@ -1,106 +1,266 @@
 {% extends "base.html" %}
 {% block title %}仪表盘 - DeeperSeeker{% endblock %}
 {% block content %}
-<h1>仪表盘</h1>
+<style>
+  :root{
+    --font:-apple-system,BlinkMacSystemFont,"SF Pro","Helvetica Neue",Helvetica,Arial,sans-serif;
+    --blue:#007aff;--blue-h:#0045b7;--green:#28cd41;--orange:#ff9500;--red:#ff3b30;--gray:#8e8e93;
+    --bg:#f5f5f7;--card:#ffffff;--glass:hsla(0,0%,100%,.8);
+    --p1:rgba(0,0,0,.85);--p2:rgba(0,0,0,.5);--p3:rgba(0,0,0,.25);--div:rgba(0,0,0,.12);
+    --sh-card:inset 0 0 0 1px rgba(255,255,255,.05),0 0 0 .5px rgba(0,0,0,.12),0 4px 24px rgba(0,0,0,.08);
+    --sh-hover:0 12px 48px rgba(0,0,0,.16);
+    --r-sm:9px;--r-md:12px;--r-lg:17px;--r-full:1000px;
+    --tr:.2s ease-out;
+  }
+  @media(prefers-color-scheme:dark){:root{
+    --blue:#0a84ff;--blue-h:#47c1ff;--green:#32d74b;--orange:#ff9f0a;--red:#ff453a;--gray:#98989d;
+    --bg:#151515;--card:#1f1f1f;--glass:rgba(30,30,30,.8);
+    --p1:rgba(255,255,255,.85);--p2:rgba(255,255,255,.55);--p3:rgba(255,255,255,.25);--div:rgba(255,255,255,.1);
+    --sh-card:inset 0 0 0 1px rgba(255,255,255,.05),0 0 0 .5px rgba(0,0,0,.4),0 4px 24px rgba(0,0,0,.35);
+    --sh-hover:0 12px 48px rgba(0,0,0,.55);
+  }}
+  *{box-sizing:border-box}
+  body{background:var(--bg);color:var(--p1);font-family:var(--font);font-size:14px;line-height:1.4;
+       -webkit-font-smoothing:antialiased;margin:0}
+  nav{position:sticky;top:0;z-index:100;background:var(--glass);
+      -webkit-backdrop-filter:saturate(240%) blur(60px);backdrop-filter:saturate(240%) blur(60px);
+      border-bottom:.5px solid var(--div);padding:14px 30px;display:flex;align-items:center;gap:16px}
+  nav a{color:var(--blue);text-decoration:none;font-size:14px}
+  nav a:hover{opacity:.75}
+  nav .brand{margin-left:auto;color:var(--p2);font-weight:600;letter-spacing:-.01em}
+  main{max-width:1120px;margin:0 auto;padding:34px 30px 60px}
+  h1{font-size:26px;font-weight:700;letter-spacing:-.02em;margin:0 0 6px;display:flex;align-items:center;gap:12px}
+  .sub{color:var(--p2);font-size:13px;margin:0 0 26px}
+  h2{font-size:17px;font-weight:700;letter-spacing:-.01em;margin:34px 0 14px;display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+  .cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(158px,1fr));gap:14px}
+  .card{background:var(--card);border-radius:var(--r-lg);box-shadow:var(--sh-card);padding:18px 20px;
+        transition:transform var(--tr),box-shadow var(--tr)}
+  .card:hover{transform:translateY(-2px);box-shadow:var(--sh-hover)}
+  .card .num{font-size:28px;font-weight:700;letter-spacing:-.02em;font-variant-numeric:tabular-nums;line-height:1.15}
+  .card .lbl{color:var(--p2);font-size:12px;margin-top:5px}
+  .c-green .num{color:var(--green)}.c-red .num{color:var(--red)}.c-orange .num{color:var(--orange)}.c-blue .num{color:var(--blue)}
+  .wrap{background:var(--card);border-radius:var(--r-lg);box-shadow:var(--sh-card);overflow:auto}
+  table{border-collapse:collapse;width:100%;font-size:13px}
+  th,td{padding:11px 18px;text-align:left;border-bottom:.5px solid var(--div);white-space:nowrap}
+  th{color:var(--p2);font-weight:600;font-size:12px}
+  tbody tr{transition:background var(--tr)}
+  tbody tr:hover{background:rgba(var(--blue-rgb,0,122,255),.04)}
+  tbody tr:last-child td{border-bottom:0}
+  .badge{display:inline-flex;align-items:center;padding:3px 10px;border-radius:var(--r-full);font-size:12px;font-weight:600}
+  .b-ok{color:var(--green);background:rgba(40,205,65,.14)}
+  .b-warn{color:var(--orange);background:rgba(255,149,0,.14)}
+  .b-err{color:var(--red);background:rgba(255,59,48,.14)}
+  .b-idle{color:var(--p2);background:var(--div)}
+  button,.btn{background:var(--blue);color:#fff;border:0;border-radius:var(--r-sm);padding:8px 18px;cursor:pointer;
+              font-size:13px;font-weight:600;font-family:var(--font);transition:background var(--tr),transform var(--tr)}
+  button:hover{background:var(--blue-h)}
+  button:active{transform:scale(.97)}
+  .btn-sm{padding:4px 12px;font-size:12px;border-radius:7px}
+  .btn-danger{background:var(--red)}.btn-danger:hover{opacity:.85}
+  .btn-ghost{background:var(--div);color:var(--p1)}.btn-ghost:hover{opacity:.8}
+  input[type=text],input[type=password]{background:var(--card);border:.5px solid var(--div);color:var(--p1);
+        border-radius:var(--r-sm);padding:9px 12px;font-size:13px;font-family:var(--font);transition:border var(--tr),box-shadow var(--tr)}
+  input:focus{outline:0;border-color:var(--blue);box-shadow:0 0 0 3.5px rgba(0,122,255,.22)}
+  .hint,.meta{color:var(--p2);font-size:12px}
+  .warning{background:rgba(255,149,0,.1);border:.5px solid rgba(255,149,0,.35);border-radius:var(--r-md);
+           padding:12px 16px;font-size:13px;color:var(--p1);margin:12px 0}
+  details{background:var(--card);border-radius:var(--r-lg);box-shadow:var(--sh-card);padding:6px 20px;margin-top:12px}
+  summary{cursor:pointer;color:var(--blue);font-size:14px;font-weight:600;padding:10px 0;list-style:none}
+  summary::-webkit-details-marker{display:none}
+  summary::before{content:"›";display:inline-block;margin-right:8px;transition:transform var(--tr);color:var(--p2)}
+  details[open] summary::before{transform:rotate(90deg)}
+  code{background:var(--div);border-radius:5px;padding:2px 7px;font-size:12px;word-break:break-all}
+  pre{background:var(--div);border-radius:var(--r-md);padding:12px 14px;font-size:12px;overflow:auto}
+  pre code{background:none;padding:0}
+  a{color:var(--blue);text-decoration:none}a:hover{opacity:.75}
+  .dot{display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:8px;animation:pulse 2s ease-in-out infinite}
+  @keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
+  .sec{margin-left:auto;font-weight:400;font-size:12px;display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+  .info-card p{margin:9px 0;font-size:13px}
+  @media(max-width:640px){main{padding:22px 18px}th,td{white-space:normal;padding:9px 12px;font-size:12px}nav{padding:12px 18px}}
+</style>
+
+<h1>DeeperSeeker <span id="ver" class="badge b-idle">…</span></h1>
+<p class="sub">数据每 10 秒自动刷新 · 上游深检每 30 秒执行一次 · <span id="ts">—</span></p>
+
+<div class="cards">
+  <div class="card c-green"><div class="num" id="c-active">—</div><div class="lbl">活跃令牌</div></div>
+  <div class="card"><div class="num" id="c-tokens">—</div><div class="lbl">令牌总数</div></div>
+  <div class="card c-orange"><div class="num" id="c-flight">—</div><div class="lbl">进行中请求</div></div>
+  <div class="card c-blue"><div class="num" id="c-req">—</div><div class="lbl">今日请求</div></div>
+  <div class="card c-blue"><div class="num" id="c-tok">—</div><div class="lbl">今日 tokens</div></div>
+  <div class="card"><div class="num" id="c-sess">—</div><div class="lbl">活跃会话映射</div></div>
+</div>
+
+<h2>上游健康<span class="sec">深度检查（真实端到端往返，含 PoW） <button class="btn-sm btn-ghost" onclick="refreshDeep()">立即探测</button></span></h2>
+<div class="cards">
+  <div class="card" id="d-up"><div class="num">…</div><div class="lbl">上游可达 / PoW</div></div>
+  <div class="card c-blue"><div class="num" id="d-lat">—</div><div class="lbl">端到端延迟 (ms)</div></div>
+  <div class="card"><div class="num" id="d-cookie">—</div><div class="lbl">备用 Cookie</div></div>
+</div>
+
+<h2>令牌池<span class="sec"><span class="badge b-ok">正常</span> <span class="badge b-warn">限速冷却</span> <span class="badge b-err">隔离</span></span></h2>
+<div class="wrap">
+<table id="pool">
+  <thead><tr><th>ID</th><th>别名</th><th>令牌</th><th>状态</th><th>说明</th><th>进行中</th><th>上次使用</th><th>冷却剩余</th><th>操作</th></tr></thead>
+  <tbody></tbody>
+</table>
+</div>
+
+<h2>用量统计<span class="sec">按天 × 按 API Key</span></h2>
+<div class="wrap">
+<table id="usage">
+  <thead><tr><th>日期</th><th>Key</th><th>通道</th><th>请求数</th><th>输入 tokens</th><th>输出 tokens</th></tr></thead>
+  <tbody></tbody>
+</table>
+</div>
 
 <section>
-    <h2>添加认证令牌</h2>
-    <div class="steps">
-        <p><strong>步骤：</strong></p>
-        <ol>
-            <li>打开浏览器<strong>无痕/隐私窗口</strong></li>
-            <li>访问 <a href="https://chat.deepseek.com" target="_blank">chat.deepseek.com</a> 并登录</li>
-            <li>提取令牌 —— <strong>按你的设备选一种方式</strong>（两套都保留，用哪套都行）：</li>
-        </ol>
+  <h2>添加认证令牌</h2>
+  <div class="warning">令牌等同于你的 DeepSeek 账号：只贴进自己的面板，别给任何人。浏览器里退出 DeepSeek 登录后，令牌随之失效。</div>
+  <div class="card" style="padding:20px">
+    <form method="post" action="/tokens/add" style="display:flex;gap:10px;flex-wrap:wrap">
+      <input type="text" name="alias" placeholder="别名（可选，如：小号1）" style="width:200px">
+      <input type="text" name="auth_token" placeholder="粘贴令牌（不要带引号）" style="flex:1;min-width:280px">
+      <button type="submit">添加令牌</button>
+    </form>
+  </div>
 
-        <p><strong>方式 A · 电脑 / 安卓（有开发者工具）</strong></p>
-        <p>打开开发者工具（F12）→ 控制台（Console）→ 粘贴：</p>
-        <code>JSON.parse(localStorage.getItem("userToken")).value</code>
+  <details>
+    <summary>怎么拿到令牌？三种方法选一种就行</summary>
+    <div style="padding:4px 2px 14px">
+      <p><strong>方法 A · 电脑 / 安卓（最简单）</strong></p>
+      <ol>
+        <li>开一个<strong>无痕窗口</strong>，登录 <a href="https://chat.deepseek.com" target="_blank">chat.deepseek.com</a></li>
+        <li>按 <strong>F12</strong> 打开开发者工具 → 切到「控制台 / Console」→ 粘贴下面这行回车：</li>
+      </ol>
+      <pre><code>JSON.parse(localStorage.getItem("userToken")).value</code></pre>
+      <p class="hint">输出的一长串就是令牌，复制它。</p>
 
-        <p><strong>方式 B · iPhone / iPad（快捷指令）—— 推荐，实测可用</strong></p>
-        <p>用快捷指令的「在网页上运行 JavaScript」提取。它有完整页面权限，<strong>不会</strong>像书签那样被 iOS 报「The operation is insecure」：</p>
-        <ol>
-            <li>快捷指令 App → 右上角 <strong>+</strong> 新建 → 添加操作「<strong>在网页上运行 JavaScript</strong>」→ 脚本框粘贴：</li>
-        </ol>
-        <pre style="white-space:pre-wrap;word-break:break-all;background:#f6f8fa;padding:10px;border-radius:6px;font-size:12px"><code>var out = '';
+      <p><strong>方法 B · iPhone / iPad（快捷指令，实测可用）</strong></p>
+      <ol>
+        <li>快捷指令 App → 右上角 <strong>+</strong> 新建 → 添加操作「<strong>在网页上运行 JavaScript</strong>」，脚本框粘贴：</li>
+      </ol>
+      <pre><code>var out = '';
 try {
   var r = localStorage.getItem('userToken');
   if (r) { try { out = JSON.parse(r).value || r; } catch(e) { out = r; } }
 } catch(e) { out = ''; }
 if (out) { completion(out); } else { completion('未取到：请确认 Safari 已登录 chat.deepseek.com'); }</code></pre>
-        <ol start="2">
-            <li>再添加操作「<strong>拷贝至剪贴板</strong>」</li>
-            <li><strong>关键一步（漏了会“运行完没结果”）</strong>：编辑快捷指令底部「接收」→ 类型选「<strong>Safari 网页</strong>」，并确认 JS 操作的「网页」输入已连上上一步</li>
-            <li>使用：Safari 打开已登录的 <strong>chat.deepseek.com</strong>（页面完全加载后）→ 点<strong>分享</strong> → <strong>运行快捷指令</strong> → 令牌进剪贴板并弹窗</li>
-        </ol>
+      <ol start="2">
+        <li>再添加操作「<strong>拷贝至剪贴板</strong>」</li>
+        <li><strong>关键一步（漏了会"运行完没结果"）</strong>：编辑快捷指令底部「接收」→ 类型选「<strong>Safari 网页</strong>」，并确认 JS 操作的「网页」输入已连上上一步</li>
+        <li>使用：Safari 打开已登录的 chat.deepseek.com（页面加载完）→ 分享 → 运行快捷指令 → 令牌进剪贴板</li>
+      </ol>
 
-        <details style="margin-top:10px">
-            <summary style="cursor:pointer">方式 C · Safari 书签小工具（备选：部分 iOS 会报 The operation is insecure，报错就用方式 B）</summary>
-            <div style="padding:8px 12px">
-                <p>iOS 不允许在地址栏直接执行 <code>javascript:</code>，书签是唯一入口。但部分 iOS 会禁掉书签脚本的 localStorage 读取（报 SecurityError，与「阻止所有 Cookie」设置无关）——报错请改用方式 B。</p>
-                <ol>
-                    <li>Safari 打开任意普通页面 → <strong>分享</strong> → <strong>添加到书签</strong> → 存储</li>
-                    <li>书签列表 → <strong>编辑</strong>该条 → 「地址」整段替换为下面的代码 → 存储</li>
-                    <li>在已登录的 chat.deepseek.com 页面点书签运行 → 自动复制</li>
-                </ol>
-                <pre style="white-space:pre-wrap;word-break:break-all;background:#f6f8fa;padding:10px;border-radius:6px;font-size:12px;max-height:220px;overflow:auto"><code>javascript:(function(){var t='';try{var r=localStorage.getItem('userToken');if(r){try{t=JSON.parse(r).value||r;}catch(e){t=r;}}}catch(e){alert('读取失败: '+e.message+'（请改用方式 B 快捷指令）');return;}if(!t||t.length&lt;20){alert('未找到 userToken。请确认已登录且页面加载完成');return;}var a=document.createElement('textarea');a.value=t;a.style.cssText='position:fixed;left:-9999px';document.body.appendChild(a);a.select();a.setSelectionRange(0,999999);var ok=document.execCommand('copy');a.remove();alert((ok?'已复制到剪贴板 ✓\n\n':'复制失败，请手动长按复制\n\n')+'长度 '+t.length+'\n'+t.substring(0,12)+'...');})();</code></pre>
-            </div>
-        </details>
-        <p class="hint">安卓也可以用方式 C 的书签（新版 Chrome 同样禁止在地址栏执行 <code>javascript:</code>），或继续用 F12 控制台。</p>
+      <details style="margin-top:10px">
+        <summary>方法 C · Safari 书签小工具（备选：部分 iOS 会报 The operation is insecure，报错就用方法 B）</summary>
+        <div style="padding:8px 0">
+          <p>iOS 不允许在地址栏直接执行 <code>javascript:</code>，书签是唯一入口。但部分 iOS 会禁掉书签脚本的 localStorage 读取——报错请改用方法 B。</p>
+          <ol>
+            <li>Safari 打开任意普通页面 → 分享 → 添加到书签 → 存储</li>
+            <li>书签列表 → 编辑该条 → 「地址」整段替换为下面的代码 → 存储</li>
+            <li>在已登录的 chat.deepseek.com 页面点书签运行 → 自动复制</li>
+          </ol>
+          <pre><code>javascript:(function(){var t='';try{var r=localStorage.getItem('userToken');if(r){try{t=JSON.parse(r).value||r;}catch(e){t=r;}}}catch(e){alert('读取失败: '+e.message+'（请改用方式 B 快捷指令）');return;}if(!t||t.length&lt;20){alert('未找到 userToken。请确认已登录且页面加载完成');return;}var a=document.createElement('textarea');a.value=t;a.style.cssText='position:fixed;left:-9999px';document.body.appendChild(a);a.select();a.setSelectionRange(0,999999);var ok=document.execCommand('copy');a.remove();alert((ok?'已复制到剪贴板 ✓\n\n':'复制失败，请手动长按复制\n\n')+'长度 '+t.length+'\n'+t.substring(0,12)+'...');})();</code></pre>
+          <p class="hint">安卓也可以用方法 C 的书签（新版 Chrome 同样禁止地址栏执行 javascript:），或继续用 F12 控制台。</p>
+        </div>
+      </details>
     </div>
-    <div class="warning">
-        注意：如果你在浏览器里退出 DeepSeek 登录，此令牌会随之失效。
-    </div>
-    <form method="post" action="/tokens/add">
-        <input type="text" name="alias" placeholder="别名（可选，例如：主号、小号1）" style="width:220px">
-        <input type="text" name="auth_token" placeholder="在此粘贴令牌（不要带引号）" style="width:400px">
-        <button type="submit">添加令牌</button>
-    </form>
+  </details>
 </section>
 
 <section>
-    <h2>令牌池（{{ tokens|length }}）</h2>
-    {% if tokens %}
-    <table>
-        <thead>
-            <tr>
-                <th>ID</th>
-                <th>别名</th>
-                <th>令牌</th>
-                <th>状态</th>
-                <th>操作</th>
-            </tr>
-        </thead>
-        <tbody>
-            {% for tok in tokens %}
-            <tr>
-                <td>{{ tok['id'] }}</td>
-                <td>{{ tok['alias'] or '—' }}</td>
-                <td><code>{{ tok['token'][:12] }}…{{ tok['token'][-4:] }}</code></td>
-                <td>
-                    <span class="status {% if tok['status'] == 'ACTIVE' %}ok{% elif tok['status'] == 'RATE_LIMITED' %}warn{% else %}err{% endif %}">
-                        {{ {'ACTIVE':'正常','RATE_LIMITED':'限速冷却'}.get(tok['status'], tok['status']) }}
-                    </span>
-                </td>
-                <td>
-                    <form method="post" action="/tokens/{{ tok['id'] }}/delete" style="display:inline"
-                          onsubmit="return confirm('确定删除吗？')">
-                        <button type="submit" class="btn-sm btn-danger">删除</button>
-                    </form>
-                </td>
-            </tr>
-            {% endfor %}
-        </tbody>
-    </table>
-    {% else %}
-    <p>暂无令牌，请在上方添加。</p>
-    {% endif %}
+  <h2>接口信息</h2>
+  <div class="card info-card" style="padding:20px">
+    <p>OpenAI 兼容端点：<code id="ep-openai">…</code></p>
+    <p>Anthropic 兼容端点：<code id="ep-anthropic">…</code></p>
+    <p>默认模型：<code>deepseek-v4.1-flash</code>（可在请求体里指定其他已暴露模型）</p>
+    <p class="hint">把上面任意一个地址填进支持 OpenAI / Anthropic 协议的客户端（Claude Code、Cherry Studio、Open WebUI 等）即可使用。</p>
+  </div>
 </section>
 
-<section>
-    <h2>接口信息</h2>
-    <p>OpenAI 兼容：<code>http://free-bots.heavencloud.in:3383/v1</code></p>
-    <p>Anthropic 兼容：<code>http://free-bots.heavencloud.in:3383</code></p>
-    <p>模型：<code>v4.1flash</code>（DeepSeek 默认模型）</p>
-</section>
+<script>
+const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const fmt = n => (n ?? 0).toLocaleString();
+
+async function refreshPool() {
+  try {
+    const pool = await fetch('/v1/pool').then(r => r.json());
+    const tb = document.querySelector('#pool tbody'); tb.innerHTML = '';
+    let flight = 0;
+    for (const t of (pool.pool || [])) {
+      flight += t.in_flight || 0;
+      const cls = t.state_class || '';
+      const badge = cls.includes('ok') ? 'b-ok' : cls.includes('warn') ? 'b-warn' : cls.includes('err') ? 'b-err' : 'b-idle';
+      const tr = document.createElement('tr');
+      tr.innerHTML = `<td>${t.id}</td><td>${esc(t.label)}</td>`
+        + `<td><code>${esc(t.token_head || '—')}</code></td>`
+        + `<td><span class="badge ${badge}">${esc(t.status)}</span></td>`
+        + `<td>${esc(t.state_note)}</td><td>${t.in_flight}</td>`
+        + `<td>${esc(t.last_used)}</td><td>${esc(t.cooldown)}</td>`
+        + `<td>${t.can_restore ? `<button class="btn-sm" onclick="restore(${t.id})">恢复</button> ` : ''}`
+        + `<button class="btn-sm btn-danger" onclick="del(${t.id})">删除</button></td>`;
+      tb.appendChild(tr);
+    }
+    document.getElementById('c-flight').textContent = fmt(flight);
+    if (!(pool.pool || []).length) tb.innerHTML = '<tr><td colspan="9" class="hint" style="text-align:center;padding:24px">池是空的 —— 在下方「添加认证令牌」加入第一个账号</td></tr>';
+  } catch (e) { console.error('pool', e); }
+}
+
+async function refreshUsage() {
+  try {
+    const u = await fetch('/v1/usage').then(r => r.json());
+    const tb = document.querySelector('#usage tbody'); tb.innerHTML = '';
+    for (const row of (u.usage || [])) {
+      const tr = document.createElement('tr');
+      tr.innerHTML = `<td>${esc(row.day)}</td><td>${esc(row.key)}</td><td>${esc(row.surfaces || '—')}</td>`
+        + `<td>${fmt(row.requests)}</td><td>${fmt(row.input_tokens)}</td><td>${fmt(row.output_tokens)}</td>`;
+      tb.appendChild(tr);
+    }
+    if (!(u.usage || []).length) tb.innerHTML = '<tr><td colspan="6" class="hint" style="text-align:center;padding:24px">还没有调用记录</td></tr>';
+  } catch (e) { console.error('usage', e); }
+}
+
+async function refreshDeep() {
+  try {
+    const d = await fetch('/v1/admin/stats').then(r => r.json());
+    document.getElementById('ver').textContent = d.version || '';
+    document.getElementById('c-active').textContent = fmt(d.active_tokens);
+    document.getElementById('c-tokens').textContent = fmt(d.total_tokens);
+    document.getElementById('c-sess').textContent = fmt(d.sessions);
+    const today = d.today || {};
+    document.getElementById('c-req').textContent = fmt(today.requests);
+    document.getElementById('c-tok').textContent = fmt((today.input_tokens || 0) + (today.output_tokens || 0));
+    const up = d.deep || {};
+    const card = document.getElementById('d-up');
+    if (up.upstream_reachable && up.pow_ok) {
+      card.className = 'card c-green';
+      card.querySelector('.num').innerHTML = '<span class="dot" style="background:var(--green)"></span>正常';
+    } else {
+      card.className = 'card c-red';
+      card.querySelector('.num').innerHTML = '<span class="dot" style="background:var(--red)"></span>异常';
+      card.querySelector('.lbl').textContent = up.reason ? ('上游可达 / PoW · ' + up.reason) : '上游可达 / PoW';
+    }
+    document.getElementById('d-lat').textContent = up.latency_ms != null ? fmt(up.latency_ms) : '—';
+    document.getElementById('d-cookie').textContent = d.cookies_valid ? '有效' : '无 / 过期';
+    document.getElementById('ts').textContent = '更新于 ' + new Date().toLocaleTimeString();
+  } catch (e) { console.error('deep', e); }
+}
+
+async function restore(id) { await fetch('/v1/pool/restore', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({token_id:id})}); refreshPool(); }
+async function del(id) { if (!confirm('确定从池中删除该令牌？')) return; await fetch(`/tokens/${id}/delete`, {method:'POST'}); refreshPool(); }
+
+// 接口地址跟随访问面板用的域名，避免硬编码
+(() => {
+  const base = location.origin;
+  document.getElementById('ep-openai').textContent = base + '/v1';
+  document.getElementById('ep-anthropic').textContent = base;
+})();
+
+refreshPool(); refreshUsage(); refreshDeep();
+setInterval(refreshPool, 10000);
+setInterval(refreshUsage, 10000);
+setInterval(refreshDeep, 30000);
+</script>
 {% endblock %}

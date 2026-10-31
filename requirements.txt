@@ -5,3 +5,4 @@ python-dotenv
 deepseek-tokenizer
 wasmtime
 jinja2
+python-multipart

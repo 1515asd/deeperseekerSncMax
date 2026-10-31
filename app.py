@@ -8,6 +8,7 @@ import re
 import secrets
 import sqlite3
 import time
+import calendar
 import unicodedata
 import uuid
 from collections import OrderedDict
@@ -21,7 +22,7 @@ from dotenv import load_dotenv
 from uvicorn.logging import AccessFormatter
 from fastapi import FastAPI, Request, Depends, HTTPException, status
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
-from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
+from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
@@ -192,6 +193,7 @@ from functions import (
     set_rolling_state,
     get_token,
     get_tokens,
+    get_db,
     init_db,
     mark_limited,
     mark_active,
@@ -2133,15 +2135,25 @@ async def files_upload(request: Request):
     _set_key_name(tok.get("alias"))
     slot = acquire_token_slot(tok_id)  # B3: upload counts toward the token's in-flight load
     try:
-        form = await request.form()
-        file_obj = form.get("file")
-        if not file_obj:
-            return JSONResponse({"error": "No file provided"}, status_code=400)
-        file_bytes = await file_obj.read(25 * 1024 * 1024 + 1)
+        # [v86.1] 运行时缺 python-multipart，multipart 表单改用标准库
+        # 轻量解析器提取 name="file" 段；解析失败再回退 request.form()。
+        ctype = request.headers.get("content-type", "")
+        if ctype.startswith("multipart/form-data"):
+            filename, file_bytes = _multipart_extract_file(await request.body(), ctype)
+            if not file_bytes:
+                return JSONResponse({"error": "No file provided"}, status_code=400)
+            up_ct = "application/octet-stream"
+        else:
+            form = await request.form()
+            file_obj = form.get("file")
+            if not file_obj:
+                return JSONResponse({"error": "No file provided"}, status_code=400)
+            file_bytes = await file_obj.read(25 * 1024 * 1024 + 1)
+            filename = getattr(file_obj, "filename", "file.bin")
+            up_ct = getattr(file_obj, "content_type", "application/octet-stream")
         if len(file_bytes) > 25 * 1024 * 1024:
             return JSONResponse({"error": "File too large"}, status_code=413)
-        filename = getattr(file_obj, "filename", "file.bin")
-        content_type = getattr(file_obj, "content_type", "application/octet-stream")
+        content_type = up_ct
         file_info = None
         async for status, data in upload_file(file_bytes, filename, content_type, tok["token"]):
             if status == "success":
@@ -2697,9 +2709,54 @@ def _prune_admin_sessions():
         SESSIONS.pop(sid, None)
 
 
+def _parse_urlencoded_form(raw: bytes) -> dict:
+    """[v86.1] 标准库解析 application/x-www-form-urlencoded 表单体。
+
+    线上运行时不带 python-multipart，Starlette 新版对任何 request.form()
+    调用都直接断言报错（v86 上线当晚登录 500 实锤），因此登录/添加令牌
+    这类纯键值表单改用 urllib.parse 手动解析，不再依赖该库。
+    """
+    from urllib.parse import parse_qsl
+    return dict(parse_qsl(raw.decode("utf-8", "replace"), keep_blank_values=True))
+
+
+def _multipart_extract_file(body: bytes, content_type: str):
+    """[v86.1] 轻量 multipart/form-data 文件提取（标准库实现）。
+
+    只找 name="file" 的那一段，返回 (filename, content)；找不到返回
+    (None, None)。边界串由客户端随机生成，直接按边界切分即可，二进制
+    内容中撞上完整边界串的概率可以忽略。
+    """
+    import re
+    m = re.search(r'boundary=(?:"([^"]+)"|([^;,\s]+))', content_type or "")
+    if not m:
+        return None, None
+    boundary = (m.group(1) or m.group(2)).strip().encode("latin-1")
+    delim = b"--" + boundary
+    for part in body.split(delim):
+        part = part.strip(b"\r\n")
+        if not part or part == b"--":
+            continue
+        head, sep, content = part.partition(b"\r\n\r\n")
+        if not sep:
+            continue
+        if content.endswith(b"\r\n"):
+            content = content[:-2]
+        headers = head.decode("utf-8", "replace")
+        if 'name="file"' not in headers:
+            continue
+        fn = re.search(r'filename="([^"]*)"', headers)
+        return (fn.group(1) if fn else "file.bin"), content
+    return None, None
+
+
 @app.post("/login", response_class=HTMLResponse)
 async def login_submit(request: Request):
-    form = await request.form()
+    ctype = request.headers.get("content-type", "")
+    if ctype.startswith("application/x-www-form-urlencoded"):
+        form = _parse_urlencoded_form(await request.body())
+    else:
+        form = await request.form()
     username = form.get("username", "")
     password = form.get("password", "")
     _prune_admin_sessions()
@@ -2756,64 +2813,12 @@ async def v1_pool_restore(request: Request):
 
 @app.get("/pool")
 async def pool_dashboard(request: Request):
-    """[v77 P0-3/P0-6 移植] 池状态 + 用量统计可视化页（管理员）。"""
+    """[v86] 旧池页面已并入统一仪表盘（/dashboard），重定向兼容旧书签。"""
     try:
         get_current_admin(request)
     except HTTPException:
         return HTMLResponse("<meta http-equiv='refresh' content='0;url=/login'>")
-    return HTMLResponse("""<!DOCTYPE html>
-<html lang="zh"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>账号池与用量</title>
-<style>
-body{font-family:-apple-system,sans-serif;background:#0f172a;color:#e2e8f0;margin:0;padding:24px}
-h1{font-size:20px} h2{font-size:16px;margin:24px 0 8px}
-table{border-collapse:collapse;width:100%;font-size:13px}
-th,td{border:1px solid #334155;padding:6px 10px;text-align:left}
-th{background:#1e293b;color:#94a3b8}
-.ok{color:#4ade80}.warn{color:#fbbf24}.err{color:#f87171}
-button{background:#334155;color:#e2e8f0;border:0;border-radius:4px;padding:3px 10px;cursor:pointer}
-button:hover{background:#475569}
-.meta{color:#64748b;font-size:12px;margin-top:16px}
-</style></head><body>
-<h1>账号池状态 <span class="meta" id="ts"></span></h1>
-<table id="pool"><thead><tr><th>ID</th><th>别名</th><th>状态</th><th>说明</th><th>进行中</th><th>上次使用</th><th>冷却</th><th>操作</th></tr></thead><tbody></tbody></table>
-<h2>用量统计（按天 × 按 key）</h2>
-<table id="usage"><thead><tr><th>日期</th><th>Key</th><th>通道</th><th>请求数</th><th>输入 tokens</th><th>输出 tokens</th></tr></thead><tbody></tbody></table>
-<div class="meta">每 10 秒自动刷新 · v77</div>
-<script>
-async function refresh(){
-  const [pool, usage] = await Promise.all([
-    fetch('/v1/pool').then(r=>r.json()).catch(()=>null),
-    fetch('/v1/usage').then(r=>r.json()).catch(()=>null),
-  ]);
-  if (pool && pool.pool){
-    const tb = document.querySelector('#pool tbody'); tb.innerHTML='';
-    for (const t of pool.pool){
-      const tr = document.createElement('tr');
-      tr.innerHTML = `<td>${t.id}</td><td>${t.label}</td>`
-        + `<td class="${t.state_class}">${t.status}</td><td>${t.state_note}</td>`
-        + `<td>${t.in_flight}</td><td>${t.last_used}</td><td>${t.cooldown}</td>`
-        + `<td>${t.can_restore ? `<button onclick="restore(${t.id})">恢复</button>` : ''}</td>`;
-      tb.appendChild(tr);
-    }
-  }
-  if (usage && usage.usage){
-    const tb = document.querySelector('#usage tbody'); tb.innerHTML='';
-    for (const u of usage.usage){
-      const tr = document.createElement('tr');
-      tr.innerHTML = `<td>${u.day}</td><td>${u.key}</td><td>${u.surfaces}</td>`
-        + `<td>${u.requests}</td><td>${u.input_tokens}</td><td>${u.output_tokens}</td>`;
-      tb.appendChild(tr);
-    }
-  }
-  document.getElementById('ts').textContent = new Date().toLocaleTimeString();
-}
-async function restore(id){
-  await fetch('/v1/pool/restore', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({token_id:id})});
-  refresh();
-}
-refresh(); setInterval(refresh, 10000);
-</script></body></html>""")
+    return RedirectResponse("/dashboard", status_code=307)
 
 
 @app.get("/v1/usage")
@@ -2837,15 +2842,67 @@ async def v1_pool(request: Request):
     return JSONResponse({"pool": await _db(get_pool_view)})
 
 
+def _count_sessions():
+    conn = get_db()
+    try:
+        return conn.execute("SELECT COUNT(*) FROM sessions").fetchone()[0]
+    finally:
+        conn.close()
+
+
+@app.get("/v1/admin/stats")
+async def v1_admin_stats(request: Request):
+    """[v86] 仪表盘聚合统计（管理员）：令牌概览 + 会话数 + 今日用量
+    + 深度健康探针。深检与 /health?deep=1 相同路径（pick_token 状态感知
+    选号、空会话探测、绝不上游发消息），仅多一层管理员鉴权。"""
+    try:
+        get_current_admin(request)
+    except HTTPException:
+        return HTMLResponse("<meta http-equiv='refresh' content='0;url=/login'>")
+    tokens = await _db(get_tokens)
+    active = sum(1 for t in tokens if t["status"] == "ACTIVE")
+    sessions = await _db(_count_sessions)
+    # 今日（UTC 日界，与 usage 表 day 字段同口径）
+    today_day = time.strftime("%Y-%m-%d", time.gmtime())
+    midnight = calendar.timegm(time.strptime(today_day, "%Y-%m-%d"))
+    rows = await _db(usage_by_day_key, midnight)
+    today = {k: sum(r[k] or 0 for r in rows) for k in ("requests", "input_tokens", "output_tokens")}
+    cookies_valid = False
+    try:
+        with open(cookie_file_path()) as f:
+            c = json.load(f)
+        exp = c.get("expiry")
+        cookies_valid = bool(exp and exp > time.time())
+    except Exception:
+        cookies_valid = False
+    probe = await _deep_health_probe()
+    return JSONResponse({
+        "version": "v86",
+        "active_tokens": active,
+        "total_tokens": len(tokens),
+        "sessions": sessions,
+        "today": today,
+        "cookies_valid": cookies_valid,
+        "deep": probe,
+    })
+
+
 @app.post("/tokens/add")
 async def tokens_add(request: Request):
     try:
         get_current_admin(request)
     except HTTPException:
         return HTMLResponse("<meta http-equiv='refresh' content='0;url=/login'>")
-    form = await request.form()
-    auth_token = form.get("auth_token", "").strip().strip("'\"")
-    alias = form.get("alias", "").strip() or None
+    # [v86.1] urlencoded 表单走标准库解析（运行时无 python-multipart）
+    ctype = request.headers.get("content-type", "")
+    if ctype.startswith("application/x-www-form-urlencoded"):
+        form = _parse_urlencoded_form(await request.body())
+        auth_token = form.get("auth_token", "").strip().strip("'\"")
+        alias = form.get("alias", "").strip() or None
+    else:
+        form = await request.form()
+        auth_token = form.get("auth_token", "").strip().strip("'\"")
+        alias = form.get("alias", "").strip() or None
     if auth_token:
         await _db(add_token, auth_token, alias)
     return HTMLResponse("<meta http-equiv='refresh' content='0;url=/dashboard'>")

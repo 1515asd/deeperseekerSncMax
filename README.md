@@ -50,6 +50,8 @@ If this fork saved you a broken setup, a star helps others find it.
 
 If you want to use deeperseeker with claude desktop app see [Claude Desktop Setup Guide](CLAUDE_DESKTOP_SETUP.md)
 
+**New here?** Read the **[User Guide](docs/GUIDE.md)** — a plain-language walkthrough covering setup, the dashboard, how it works internally, and the FAQ. Also available in [简体中文](docs/GUIDE.zh-CN.md).
+
 For solving deepseek pow challenge the wasm file included is from my other repo: https://github.com/AmanCode22/deepseek_pow_solver/
 
 If you liked this repo please star it and star the solver also.
