@@ -205,6 +205,7 @@ from functions import (
     set_rolling_state,
     get_token,
     get_tokens,
+    get_db,
     init_db,
     mark_limited,
     mark_active,
