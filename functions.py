@@ -1151,6 +1151,24 @@ def next_parent(parent_message_id):
     return parent_message_id + 2
 
 
+# [v84] 新协议直接对接：上游 2026-10-31 起在流开头广播真实消息编号
+# （event ready -> {"request_message_id": N, "response_message_id": M}）。
+# 我们在 _send_message_once 里捕获它，_send_message_locked 收尾时存入本表；
+# app 层 save_session 改用 saved_parent() 优先取真实编号，取不到才回退
+# next_parent 猜测。至此 parent 链不再依赖任何猜测——中断场景的编号
+# 错位风险归零（实测 R1/R2/R3 真实编号与 +2 猜测吻合，本改动是兜底
+# 上游未来改变编号规则时的确定性保障）。
+_LAST_REAL_PARENT = {}
+
+
+def saved_parent(chat_id, prev_parent):
+    """save_session 专用：优先上游广播的真实编号，回退 +2 猜测。"""
+    real = _LAST_REAL_PARENT.get(chat_id)
+    if real:
+        return real
+    return next_parent(prev_parent)
+
+
 def delete_sessions_for_chat(token_id, session_id):
     conn = get_db()
     conn.execute("DELETE FROM sessions WHERE token_id = ? AND deepseek_session_id = ?", (token_id, session_id))
@@ -3203,9 +3221,11 @@ def _body_has_real_content(text: str) -> bool:
     return bool(tools)
 
 
-async def _send_message_once(chat_id, auth_token, message, parent_message_id, thinking=False, search=False, file_ids_=None):
+async def _send_message_once(chat_id, auth_token, message, parent_message_id, thinking=False, search=False, file_ids_=None, meta=None):
     # Backup: WAF cookies not required with Android headers. Kept as fallback:
     # cookie = await get_cookies()
+    if meta is None:
+        meta = {}
     if parent_message_id == 0:
         parent_message_id = None
     file_ids = file_ids_ or []
@@ -3414,6 +3434,9 @@ async def _send_message_once(chat_id, auth_token, message, parent_message_id, th
             except Exception:
                 return
             if isinstance(data, dict):
+                # [v84] 新协议：流开头广播真实消息编号（request/response）
+                if "response_message_id" in data:
+                    meta["response_message_id"] = data["response_message_id"]
                 parsed_events.append(data)
                 if len(parsed_events) > _SSE_RECENT_LINES:
                     del parsed_events[0]
@@ -3797,6 +3820,7 @@ async def _send_message_locked(chat_id, auth_token, message, parent_message_id, 
     parent = parent_message_id
     msg = message
     files = file_ids_
+    _LAST_REAL_PARENT.pop(chat_id, None)  # [v84] 本轮尚未产生新编号
     emitted = ""
     # [v64] 客户端可见正文跟踪（跨 attempt 累积）；喂入的均为过滤后
     # 真正 yield 给客户端的内容。
@@ -3812,7 +3836,8 @@ async def _send_message_locked(chat_id, auth_token, message, parent_message_id, 
         interrupt_reason = "interrupted"
         interrupt_detail = ""
         try:
-            async for chunk in _send_message_once(chat_id, auth_token, msg, parent, _thinking, search, files):
+            _meta = {}
+            async for chunk in _send_message_once(chat_id, auth_token, msg, parent, _thinking, search, files, meta=_meta):
                 for out in flt.feed(chunk):
                     emitted = (emitted + out)[-400:]
                     visible.feed(out)
@@ -3856,6 +3881,13 @@ async def _send_message_locked(chat_id, auth_token, message, parent_message_id, 
             else:
                 raise
         if clean_end:
+            # [v84] 上游广播了真实编号 -> 直接对接（含本轮可能产生的续写，
+            # meta 只保留最后一次广播，即本 exchange 最终 response id）。
+            # 同时写入全局表供 app 层 save_session 读取。取不到真实编号
+            # 时维持 v83 语义：空流不推进、真中断 +2 猜测。
+            if _meta.get("response_message_id"):
+                parent = _meta["response_message_id"]
+                _LAST_REAL_PARENT[chat_id] = parent
             asyncio.create_task(_prefetch_pow(auth_token, "/api/v0/chat/completion"))
             if visible.seen:
                 # [v78] 干净收尾（FINISHED 且有可见正文）：畸形续写计数清零，
@@ -3887,7 +3919,13 @@ async def _send_message_locked(chat_id, auth_token, message, parent_message_id, 
         # 瞎猜——还会把原本可能有效的 parent 弄成确定无效（2026-10-31
         # 23:57 线上实锤：PoW 拒 -> +2 续写 -> biz_code 26 连环失败）。
         # 真中断场景上游可能已入库消息，维持 +2 既有语义。
-        if interrupt_reason != "empty_stream":
+        # [v84] 中断场景优先用 ready 广播的真实编号（广播到达 = 该 exchange
+        # 已入库，最终 response id 是确定的）；广播没到（如 PoW 拒/空流，
+        # 上游零入库）才回退：空流不推进（v83），真中断 +2 猜测。
+        if _meta.get("response_message_id"):
+            parent = _meta["response_message_id"]
+            _LAST_REAL_PARENT[chat_id] = parent
+        elif interrupt_reason != "empty_stream":
             parent = parent + 2  # next_parent 语义：本次 exchange 上游产生 user+assistant 两条消息
         # [v62] 畸形工具调用场景换用诊断提示词：告诉模型错在哪、附原始调用、
         # 给正确格式、给两条出路（重写调用 or 直接作答）——模型知道病因才会

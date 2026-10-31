@@ -215,6 +215,7 @@ from functions import (
     acquire_token_slot,
     record_file,
     get_file_token,
+    saved_parent,
     save_session,
     set_chat_baseline,
     send_message,
@@ -919,10 +920,10 @@ async def handle_chat(
                         next_messages.append(ast_msg)
                         next_sig = await generate_signature(next_messages, model, scope)
 
-                        await _db(save_session, sig, new_token_id, new_session_id, next_parent(0))
+                        await _db(save_session, sig, new_token_id, new_session_id, saved_parent(new_session_id, 0))
                         await _db(set_chat_baseline, new_session_id, _packed_first_message_tokens(messages),
                                   estimate_conversation_tokens_cached(messages))
-                        await _db(save_session, next_sig, new_token_id, new_session_id, next_parent(0))
+                        await _db(save_session, next_sig, new_token_id, new_session_id, saved_parent(new_session_id, 0))
                         if rot_owner is not None:
                             rot_owner.release()
                         return format_response(resp_text, model, messages, tools)
@@ -1291,8 +1292,8 @@ async def handle_chat(
             next_messages.append(ast_msg)
             next_sig = await generate_signature(next_messages, model, scope)
 
-            await _db(save_session, sig, token_id, session_id, next_parent(parent_message_id))
-            await _db(save_session, next_sig, token_id, session_id, next_parent(parent_message_id))
+            await _db(save_session, sig, token_id, session_id, saved_parent(session_id, parent_message_id))
+            await _db(save_session, next_sig, token_id, session_id, saved_parent(session_id, parent_message_id))
             _resp = format_response(resp_text, model, messages, tools)
             # [v77 P0-6 审计补漏] OpenAI 非流式完成轮的用量落库——此前只在
             # 流式（stream_response）与 Anthropic 非流式路径落库，OpenAI
@@ -1760,8 +1761,8 @@ async def stream_response(gen, model, messages, token_id, session_id, sig, tools
                 ast_msg["content"] = clean_text
             next_messages.append(ast_msg)
             next_sig = generate_signature_sync(next_messages, model, scope)
-            await _db(save_session, sig, token_id, session_id, next_parent(parent_message_id))
-            await _db(save_session, next_sig, token_id, session_id, next_parent(parent_message_id))
+            await _db(save_session, sig, token_id, session_id, saved_parent(session_id, parent_message_id))
+            await _db(save_session, next_sig, token_id, session_id, saved_parent(session_id, parent_message_id))
 
         if not aborted and not failed:
             # [v74] 记录完成结果：窗口内同签名重试直接回放，不重复执行
@@ -1936,8 +1937,8 @@ async def stream_anthropic_response(gen, model, messages, token_id, session_id, 
                 ast_msg["content"] = clean_text
             next_messages.append(ast_msg)
             next_sig = generate_signature_sync(next_messages, model, scope)
-            await _db(save_session, sig, token_id, session_id, next_parent(parent_message_id))
-            await _db(save_session, next_sig, token_id, session_id, next_parent(parent_message_id))
+            await _db(save_session, sig, token_id, session_id, saved_parent(session_id, parent_message_id))
+            await _db(save_session, next_sig, token_id, session_id, saved_parent(session_id, parent_message_id))
 
         # Declared BEFORE _tb so the helper's closure reads top-down — it used
         # to be defined after _tb and worked only by late binding (Stage 1
