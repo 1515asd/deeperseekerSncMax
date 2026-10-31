@@ -1,6 +1,31 @@
 # DeeperSeeker
 
-DeepSeek website reverse-proxy server with FastAPI, supporting OpenAI & Anthropic API standards.
+**Self-hosted DeepSeek gateway that speaks the OpenAI & Anthropic API standards.**
+Point any OpenAI/Anthropic-compatible client — Claude Code, Cline, LibreChat,
+Open WebUI, LobeChat, Cherry Studio, anything — at this server and it just works,
+with streaming, tool calling, and long-context session management.
+
+## Why this fork
+
+Upstream [`AmanCode22/deeperseeker`](https://github.com/AmanCode22/deeperseeker)
+(MIT) is a solid base, but it has been dormant since 2026-10-26. This fork is
+maintained for **long-running, self-hosted deployments on free-tier platforms**:
+
+- **Actively maintained** — 110+ commits in the last three weeks. When DeepSeek
+  changed their web protocol on 2026-10-31 and broke every proxy built on this
+  reverse API, this fork shipped the **first working fix in 25 minutes** and a
+  hardened stable release within 3 hours.
+- **Production-hardened** — stream-interrupt auto-continue, context rollover
+  with summary handoff (no more "long chat stops responding"), tool-call leak
+  gate, empty-stream auto-retry, token-pool disaster recovery, stale-session
+  self-healing.
+- **Two branches**: `main` is the dev line (fast hotfixes, Chinese comments);
+  **[`english`](https://github.com/1515asd/rh-deeperseeker/tree/english)** is
+  the **full-English stable line** — identical code with all comments, logs,
+  in-chat notices and dashboard UI in English. Newly added; pick it if you
+  want a 100% English experience.
+
+If this fork saved you a broken setup, a star helps others find it.
 
 If you want to use deeperseeker with claude desktop app see [Claude Desktop Setup Guide](CLAUDE_DESKTOP_SETUP.md)
 
@@ -15,16 +40,6 @@ Use at your own risk.
 
 A kind request: do not spam the server, respect DeepSeek's limits, and use it for personal purposes only.
 
-
-## Branches
-
-- **`main`** — the development line: fast hotfixes, code comments and server
-  logs in Chinese. Every stable release lands here first.
-- **`english`** (this branch) — the **full-English stable release line**:
-  identical code with all comments, docstrings, log messages, in-chat notices
-  and dashboard UI translated to English. Synced from `main` on every stable
-  release. If you prefer a 100% English codebase and dashboard, install from
-  this branch.
 
 ## v85 — Fixed stable release (please install this one)
 
