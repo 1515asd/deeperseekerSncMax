@@ -3500,6 +3500,58 @@ def _has_unswallowed_tool_markup(text: str) -> bool:
     return not tools
 
 
+def _is_bare_tool_call_attempt(text: str) -> bool:
+    """[v89.4] Whether the ENTIRE body is a tool call that lost its wrapper
+    tags.
+
+    Production case 2026-11-05 00:23: the model emitted a tool call as a
+    bare JSON object (no <tool_call> wrapper, no code fence, plus a
+    client-schema tool_title field inside arguments). Every rung of the
+    parse ladder requires a tag or a fence, so the JSON stayed in the body
+    as plain text; the model ended its turn believing it had called, and
+    the client was left with a visible leak and no executable call - a
+    stalled session. On hit we raise malformed_tool_call and ride the v62
+    diagnostic continuation: the bridge executes nothing itself, it just
+    hands the botched call back to the model, which either re-emits it
+    properly or gives a final answer per the diagnostic prompt.
+
+    Strictest possible shape, zero impact on normal paths:
+    * after stripping think blocks, the whole body is exactly one JSON
+      object (one extra character fails the check);
+    * top-level "name" is a non-empty string matching a tool in the
+      current request's tool table (request_tools, same extraction as the
+      salvage layer: function.name first, bare name fallback); underscore
+      residue names rejected (v66 rule);
+    * top-level "arguments" must be a dict (the taught format always has
+      it; absence is ambiguous - keep the status quo, no trigger);
+    * no tool table on this request -> always False; any JSON output in a
+      tool-less conversation is untouched.
+    """
+    if not text or not text.strip():
+        return False
+    stripped = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
+    if not (stripped.startswith("{") and stripped.endswith("}")):
+        return False
+    try:
+        data = json.loads(stripped)
+    except Exception:
+        return False
+    if not isinstance(data, dict):
+        return False
+    name = data.get("name")
+    if not isinstance(name, str) or not name.strip() or name.lstrip().startswith("_"):
+        return False
+    if not isinstance(data.get("arguments"), dict):
+        return False
+    for t in request_tools.get() or []:
+        if not isinstance(t, dict):
+            continue
+        fn = t.get("function") or t
+        if isinstance(fn, dict) and fn.get("name") == name:
+            return True
+    return False
+
+
 def _body_has_real_content(text: str) -> bool:
     """At FINISHED, whether the prose still has readable content after tool-call
     markup is stripped.
@@ -3712,6 +3764,16 @@ async def _send_message_once(chat_id, auth_token, message, parent_message_id, th
                         raise _SseStreamInterrupted(
                             "malformed_tool_call", _extract_malformed_call(body_text))
                     raise _SseStreamInterrupted("no_body", "")
+                elif _is_bare_tool_call_attempt(body_text):
+                    # [v89.4] Bare-JSON tool call (lost its <tool_call>
+                    # wrapper): the body "has content" (the JSON itself), so
+                    # the markup-only branch above never fires and the turn
+                    # used to end normally, leaving the client stalled. Ride
+                    # the v62 diagnostic continuation and let the model
+                    # rewrite it.
+                    logger.warning("[v89.4] FINISHED with bare-JSON tool-call attempt -> malformed continue")
+                    raise _SseStreamInterrupted(
+                        "malformed_tool_call", _extract_malformed_call(body_text))
                 raise _SseStreamFinished()
 
             if "v" in data and isinstance(data["v"], dict) and "response" in data["v"]:
