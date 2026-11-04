@@ -702,20 +702,6 @@ def _pseudo_tool_result_info(msg):
     return None
 
 
-# [v89] 报错特征识别（保守）：仅匹配明确的错误标记，不碰普通文本。
-# 背景（2026-11-01 会话 b3923745 生产实证）：flash 模型把命令执行失败的裸
-# traceback 误读为"调用因闭合标签畸形被拒"，原样重发同一命令 4 次。根因是
-# 我们把报错文本原样透传、不加任何框架，弱模型对号入座了工具规范里
-# "畸形调用会被系统拒绝"的话术。
-_V89_ERROR_RE = re.compile(
-    r"Traceback \(most recent call last\)"
-    r"|\b(?:ValueError|TypeError|KeyError|NameError|IndexError|AttributeError|OSError|RuntimeError|MemoryError|FileNotFoundError|PermissionError|ConnectionError|TimeoutError|ZeroDivisionError|ImportError|SyntaxError|CalledProcessError)\b"
-    r"|^\s*Error:"
-    r"|\b(?:Permission denied|No such file or directory|command not found|Segmentation fault)\b",
-    re.MULTILINE,
-)
-
-
 def _tool_call_repeat_counts(messages):
     """[v89] 统计全历史中同一调用签名（与 Command 回显同款 sort_keys JSON）
     的出现次数，供重复调用闸门使用。签名必须与 extract_tool_results 里
@@ -786,9 +772,6 @@ async def extract_tool_results(messages, latest_only=False):
         title = ""
         if hit:
             cmd_name, cmd_args = hit
-            # [v89] 结果块显示真实工具名：伪结果兜底名 "tool" 会让模型怀疑
-            # 结果来源；索引里明明有真实命令名，直接取用。
-            block = f"Tool: {cmd_name} (Call ID: {call_id})"
             # [v70] 回显模型自己起的调用标题（tool_title）：自己起的名字
             # 是最强的认领锚点——比 JSON 更不容易认错自己的调用。
             if isinstance(cmd_args, dict):
@@ -800,16 +783,7 @@ async def extract_tool_results(messages, latest_only=False):
             sig = cmd_json
         if title:
             block += f"\nTitle: 你将这次调用命名为「{title}」"
-        # [v89] 结果状态框架：有结果 = 调用已被执行。消灭"结果到底送没送达"
-        # 的怀疑空间（11-1 事故里模型收到成功结果后仍判定"没送达"而重发）。
-        block += "\nStatus: 已送达并执行（下方为本命令的真实输出；结果在，即调用已被执行）"
         block += f"\nResult: {content}"
-        if _V89_ERROR_RE.search(content):
-            # [v89] 报错翻译：裸 traceback 常被弱模型误读为"调用被拒"。
-            block += (
-                "\nNote: 以上报错文本是命令自身执行时产生的输出——能产生输出恰恰证明调用已被执行。"
-                "这不是调用被拒；原样重发只会得到同样的错误，请读取报错内容并修正命令"
-            )
         if sig:
             n_seen = repeat_counts.get(sig, 0)
             if n_seen >= 2:
