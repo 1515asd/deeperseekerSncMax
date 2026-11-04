@@ -2685,18 +2685,29 @@ async def _prefetch_pow(auth_token, target_path="/api/v0/chat/completion"):
         key = (auth_token, target_path)
         if len(_POW_PREFETCH) >= _POW_PREFETCH_MAX:
             _POW_PREFETCH.pop(next(iter(_POW_PREFETCH)), None)
-        _POW_PREFETCH[key] = (p, expire_at)
+        # [v87] 上游 PoW 负载已不带 expire_at（2026-11-04 实测键只剩
+        # algorithm/answer/challenge/salt/signature/target_path），过期检查
+        # 对 0 永远不触发 -> 预取池里的陈年凭证被照常使用 -> 40301
+        # INVALID_POW_RESPONSE。补记 solved_at，取用时按硬 TTL 丢弃。
+        _POW_PREFETCH[key] = (p, expire_at, time.time())
     except Exception:
         pass
+
+
+_POW_PREFETCH_TTL = 600  # [v87] 挑战有效期未知（负载无 expire_at），10 分钟硬上限
 
 
 def _take_prefetched_pow(auth_token, target_path="/api/v0/chat/completion"):
     entry = _POW_PREFETCH.pop((auth_token, target_path), None)
     if not entry:
         return None
-    p, expire_at = entry
+    if len(entry) == 2:
+        entry = (entry[0], entry[1], time.time())
+    p, expire_at, solved_at = entry
     if expire_at and expire_at < time.time() + 30:
         return None  # too close to expiry — solve fresh
+    if time.time() - solved_at > _POW_PREFETCH_TTL:
+        return None  # [v87] 无 expire_at 的条目超硬 TTL —— 现场新解，绝不发陈年 PoW
     return p
 
 
@@ -2858,6 +2869,27 @@ def _raise_empty_sse_response(recent_lines, parsed_events, resp_ct="", non_sse_t
             recent_lines[-_SSE_RECENT_LINES:],
         )
         raise UpstreamError(code, f"{msg} [rid:{_rid}]")
+    # [v87] 非 SSE 尾巴里的业务 JSON 错误（实锤 2026-11-04：
+    # {"code":40301,"msg":"INVALID_POW_RESPONSE"} —— 陈旧预取 PoW 被上游
+    # 拒收）。这不是空流：按真实上游错误上抛。此前落进空流默认分支 ->
+    # v81 续写兜底把"系统通知"孤立文本发成全新会话，毒化会话映射 ->
+    # 全线失忆。注意错误信息不得包含 "no assistant fragments"
+    #（v81b 空流续写靠它匹配）。
+    for _tail in reversed(non_sse_tail or []):
+        _t = (_tail or "").strip()
+        if not _t.startswith("{"):
+            continue
+        try:
+            _bj = json.loads(_t)
+        except Exception:
+            continue
+        if isinstance(_bj, dict) and _bj.get("code") is not None:
+            _bcode = _bj.get("code")
+            _bmsg = _bj.get("msg") or _bj.get("message") or "biz error"
+            if str(_bcode) == "40301" or "POW" in str(_bmsg).upper():
+                _POW_PREFETCH.clear()  # 陈旧预取凭证整体作废，重试现场新解
+            logger.warning("DeepSeek biz error in non-SSE body: %s", _t[:200])
+            raise UpstreamError(502, f"DeepSeek biz error {_bcode}: {_bmsg} [rid:{_rid}]")
     if _sse_context_limit_hint(recent_lines, parsed_events):
         msg = _EMPTY_SSE_CONTEXT
     else:
@@ -3868,6 +3900,14 @@ async def _send_message_locked(chat_id, auth_token, message, parent_message_id, 
             # 超限；其余错误码（401/403/429/400、上游报错事件）语义明确，
             # 照旧上抛。
             if getattr(e, "status", None) == 502 and "no assistant fragments" in str(e):
+                # [v87] 续写兜底前置守卫：只有"消息确实已入库"（本轮拿到过
+                # 上游广播编号，或本就带着有效 parent 续聊）才允许发续写
+                # 提示词。广播都没有 = 上游根本没收到消息，此时把孤立的
+                # "系统通知"文本发出去 = 造出只含一句话的会话并毒化映射
+                # （2026-11-04 全线失忆根因）。改为原样上抛走正常错误重试。
+                if not (_meta.get("response_message_id") or parent or _LAST_REAL_PARENT.get(chat_id)):
+                    logger.warning("[v87] 上游未入库（无广播且无 parent），不做续写兜底，直接上抛")
+                    raise
                 for out in flt.flush():
                     emitted = (emitted + out)[-400:]
                     visible.feed(out)
