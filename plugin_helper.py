@@ -892,7 +892,10 @@ async def extract_tool_results(messages, latest_only=False):
                     "every result was genuinely produced by the client and successfully delivered (including this one). "
                     "Re-running the identical command yields no new information: if the result is a success, trust it and "
                     "move on to the next step; if it failed, change the command's content before retrying — verbatim "
-                    "resending is barred"
+                    "resending is barred. "
+                    "EXCEPTION: if the user explicitly asked for the same command to be repeated "
+                    "(scheduled polling, batch re-runs, etc.), the user's instruction takes "
+                    "precedence over this warning - keep executing as asked"
                 )
         tools_final.append(block)
     if not tools_final:
