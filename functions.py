@@ -641,6 +641,21 @@ def delete_token(token_id):
 # cooldown-only behavior); 401 quarantines unconditionally.
 QUARANTINE_AFTER_403 = max(0, int(os.getenv("DEEPSEEKER_QUARANTINE_AFTER_403", "3")))
 
+# [v89.3] Auth-shaped "business" errors (a 401 mapped from HTTP 200 + msg
+# wording heuristic) are soft evidence: any English business wording that
+# merely contains auth/token/session/login/expire matches. A single hit must
+# never put an account into any penalty state — that is the zero-cost-on-
+# false-positive guarantee. Only BIZ_AUTH_QUARANTINE_AFTER consecutive hits
+# (no successful turn in between) reproduce the hard-401 conclusion and
+# quarantine; a real HTTP 401 (a status code upstream actually returned)
+# keeps its immediate quarantine. The counter is in-memory, per process: a
+# restart just makes a genuinely dead account re-earn its quarantine; it can
+# never un-quarantine a row.
+BIZ_AUTH_QUARANTINE_AFTER = max(
+    1, int(os.getenv("DEEPSEEKER_BIZ_AUTH_QUARANTINE_AFTER", "3"))
+)
+_biz_auth_streaks = {}
+
 TOKEN_COOLDOWN_SECONDS = max(1, int(os.getenv("DEEPSEEKER_RATE_LIMIT_COOLDOWN", "60")))
 TOKEN_CONCURRENCY_CAP = max(1, int(os.getenv("DEEPSEEKER_TOKEN_CONCURRENCY", "8")))
 
@@ -801,7 +816,15 @@ def _bump_403_streak(token_id):
     return row[0] if row else 0
 
 
-def mark_limited(token_id, code=None):
+def _bump_biz_auth_streak(token_id):
+    """[v89.3] Increment and return the account's consecutive auth-shaped
+    business-error count (in-memory, per process)."""
+    n = _biz_auth_streaks.get(token_id, 0) + 1
+    _biz_auth_streaks[token_id] = n
+    return n
+
+
+def mark_limited(token_id, code=None, biz_auth=False):
     """[v77 P0-3 port] Record one upstream failure against an account — the
     single gateway into the pool.
 
@@ -811,11 +834,31 @@ def mark_limited(token_id, code=None):
       * 401 -> QUARANTINED immediately. Rejected credentials are not
         transient; a 60-second cooldown would just re-arm the same dead
         account.
+        [v89.3] Exception: biz_auth=True means this 401 was mapped from an
+        HTTP 200 business envelope via the wording heuristic (soft evidence).
+        A single hit applies no penalty at all (zero cost on a false
+        positive); it only bumps a consecutive counter, and quarantine fires
+        after BIZ_AUTH_QUARANTINE_AFTER hits.
       * 403 -> cooldown as before; if consecutive 403s (with no successful
         turn in between) reach QUARANTINE_AFTER_403, QUARANTINED.
       * Anything else (429) -> cooldown, as before.
     """
     if code == 401:
+        if biz_auth:
+            n = _bump_biz_auth_streak(token_id)
+            if n >= BIZ_AUTH_QUARANTINE_AFTER:
+                mark_quarantined(
+                    token_id,
+                    f"{n} consecutive auth-shaped business errors "
+                    f"(threshold {BIZ_AUTH_QUARANTINE_AFTER})",
+                )
+            else:
+                logger.warning(
+                    "Token #%d: auth-shaped business error %d/%d — no "
+                    "penalty (soft evidence, auto-zero on next success)",
+                    token_id, n, BIZ_AUTH_QUARANTINE_AFTER,
+                )
+            return
         mark_quarantined(token_id, "upstream 401 (auth rejected)")
         return
     if code == 403:
@@ -851,6 +894,9 @@ def mark_active(token_id):
     through would pollute an admin-controlled state; only restore_token() can
     end a quarantine.
     """
+    # [v89.3] One successful turn refutes the "auth is dead" soft evidence:
+    # the consecutive counter resets, so a single wording fluke auto-clears.
+    _biz_auth_streaks.pop(token_id, None)
     conn = get_db()
     conn.execute(
         "UPDATE tokens SET status = ?, rate_limited_until = NULL, last_used = ?, "

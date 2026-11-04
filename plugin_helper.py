@@ -848,20 +848,20 @@ async def extract_tool_results(messages, latest_only=False):
         if sig:
             n_seen = repeat_counts.get(sig, 0)
             if n_seen >= 2:
-                # [v89] Duplicate-call gate (2026-11-01 session b3923745: the
+                # [v89.2] Duplicate-call gate (2026-11-01 session b3923745: the
                 # same render command resent verbatim 4 times at ~7 min each).
                 # Fires only on a byte-identical signature WITH a result
                 # already returned; retrying with changed arguments (legit
                 # behavior) never matches. Prompt-layer injection, no blocking.
+                # v89.2: the note is purely factual — only two count-provable
+                # statements (this command appeared verbatim N-1 times before;
+                # the Result above is the genuine output of this call). Zero
+                # instructions, zero inference: it can never conflict with a
+                # user-mandated repeat, and it never vouches for results it
+                # cannot verify.
                 block += (
-                    f"\n⚠️ [DUPLICATE CALL WARNING] This exact command has been issued {n_seen} times in this session; "
-                    "every result was genuinely produced by the client and successfully delivered (including this one). "
-                    "Re-running the identical command yields no new information: if the result is a success, trust it and "
-                    "move on to the next step; if it failed, change the command's content before retrying — verbatim "
-                    "resending is barred. "
-                    "EXCEPTION: if the user explicitly asked for the same command to be repeated "
-                    "(scheduled polling, batch re-runs, etc.), the user's instruction takes "
-                    "precedence over this warning - keep executing as asked"
+                    f"\nℹ️ [System note] This exact command has already appeared verbatim {n_seen - 1} time(s) in this session "
+                    f"(this is occurrence #{n_seen}). The Result above is the genuine output of this call."
                 )
         tools_final.append(block)
     if not tools_final:

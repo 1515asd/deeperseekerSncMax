@@ -190,6 +190,7 @@ security = HTTPBasic()
 import official_api
 from functions import (
     CookieGenerationError,
+    UpstreamBizError,
     UpstreamError,
     cookie_file_path,
     data_dir,
@@ -693,6 +694,19 @@ def _upstream_http_code(exc):
     return None
 
 
+def _is_biz_auth_error(exc):
+    """[v89.3] True when the failure is a business-envelope error whose
+    auth-shaped wording mapped it to 401 — soft evidence only (HTTP 200 +
+    a text heuristic on msg wording). A real upstream HTTP 401 (plain
+    UpstreamError) is hard evidence and keeps its immediate quarantine.
+
+    Soft evidence never sidelines an account by itself: mark_limited()
+    counts consecutive auth-shaped business failures and quarantines only
+    after BIZ_AUTH_QUARANTINE_AFTER in a row, so a single English-wording
+    fluke costs the account nothing."""
+    return isinstance(exc, UpstreamBizError) and _upstream_http_code(exc) == 401
+
+
 def _api_error_response(e, is_anthropic=False):
     code = _upstream_http_code(e) or 502
     if isinstance(e, CookieGenerationError):
@@ -827,7 +841,7 @@ async def _setup_failure_outcome(e, token_id, is_anthropic=False, _attempt=0):
     code = _upstream_http_code(e)
     auth_class = code in (401, 403, 429)
     if token_id is not None and auth_class:
-        await _db(mark_limited, token_id, code)
+        await _db(mark_limited, token_id, code, _is_biz_auth_error(e))
         logger.warning(
             "Upstream HTTP %s while preparing the turn (token #%s): %s",
             code, token_id, str(e)[:200],
@@ -1445,7 +1459,7 @@ async def handle_chat(
     except Exception as e:
         code = _upstream_http_code(e)
         if code in (401, 403, 429):
-            await _db(mark_limited, token_id, code)
+            await _db(mark_limited, token_id, code, _is_biz_auth_error(e))
             await _db(delete_sessions_for_chat, token_id, session_id)
             if not _auth_rotated:
                 new_token_id = await _db(pick_token)
@@ -1892,7 +1906,7 @@ async def stream_response(gen, model, messages, token_id, session_id, sig, tools
         failed = True
         code = _upstream_http_code(e)
         if code in (401, 403, 429):
-            await _db(mark_limited, token_id, code)
+            await _db(mark_limited, token_id, code, _is_biz_auth_error(e))
             await _db(delete_sessions_for_chat, token_id, session_id)
             logger.warning("stream_response upstream HTTP %s: %s", code, e)
         else:
@@ -2064,7 +2078,7 @@ async def stream_anthropic_response(gen, model, messages, token_id, session_id, 
         failed = True
         code = _upstream_http_code(e)
         if code in (401, 403, 429):
-            await _db(mark_limited, token_id, code)
+            await _db(mark_limited, token_id, code, _is_biz_auth_error(e))
             await _db(delete_sessions_for_chat, token_id, session_id)
             logger.warning("stream_anthropic_response upstream HTTP %s: %s", code, e)
         else:
