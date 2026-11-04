@@ -7,283 +7,148 @@
 [![License: MIT](https://img.shields.io/github/license/1515asd/rh-deeperseeker.svg)](LICENSE)
 [![Last Commit](https://img.shields.io/github/last-commit/1515asd/rh-deeperseeker/main.svg)](https://github.com/1515asd/rh-deeperseeker/commits/main)
 [![Stars](https://img.shields.io/github/stars/1515asd/rh-deeperseeker.svg)](https://github.com/1515asd/rh-deeperseeker/stargazers)
-[![Forks](https://img.shields.io/github/forks/1515asd/rh-deeperseeker.svg)](https://github.com/1515asd/rh-deeperseeker/network/members)
-![Release](https://img.shields.io/badge/release-v85_stable-2ea44f.svg)
-![Branch](https://img.shields.io/badge/branch-english__available-blueviolet.svg)
+![Release](https://img.shields.io/badge/release-v88-2ea44f.svg)
 
-Point any OpenAI/Anthropic-compatible client at this server and it just works,
-with streaming, tool calling, and long-context session management.
+Point any OpenAI/Anthropic-compatible client at this server and it just works —
+streaming, tool calling, and long-context session management out of the box.
 
 **Works with** · Claude Code · Cline · LibreChat · Open WebUI · LobeChat · Cherry Studio · Dify · anything OpenAI/Anthropic-compatible
 
-[English](README.md) | [简体中文](README.zh-CN.md)
-
 </div>
+
+## What is this
+
+This project is based on upstream [`AmanCode22/deeperseeker`](https://github.com/AmanCode22/deeperseeker)
+(MIT): it wraps the free DeepSeek web tier into a standard API — no official API
+key needed — and exposes both OpenAI Chat Completions and Anthropic Messages
+endpoints. This fork maintains long-running, self-hosted deployments on
+free-tier platforms, keeping up with protocol changes and stability fixes.
+
+## Where to see updates
+
+- **Dev line (main)**: [commit history](https://github.com/1515asd/rh-deeperseeker/commits/main)
+- **English stable line (english)**: [commit history](https://github.com/1515asd/rh-deeperseeker/commits/english)
+
+`main` is the dev line; once a fix lands there, the `english` line follows
+within days (syncs keep every piece of content in English). What each version
+did:
+
+| Version | Date | What changed |
+|---|---|---|
+| v88 | Nov 04 | Ported the upstream PR #94 hardening: business-level errors delivered as HTTP 200 (flagged account, killed web session, rate-limit wall) are now classified and trigger token rotation instead of pinning dead accounts; failures during new-chat creation / PoW setup are retried — outside the signature lock, so requests no longer hang |
+| v87 | Nov 04 | Fixed the memory-loss chain: prefetched PoW credentials never expired → after idle periods a stale credential got rejected (40301) → misread as an empty stream → auto-continue fired as an orphan new message → the session map got poisoned. PoW credentials now carry a hard 10-minute TTL, business errors are classified correctly, and auto-continue only fires after upstream acceptance. Invisible to clients (HTTP 200) |
+| v86 | Nov 01 | Redesigned admin dashboard with deep-health integration; Docker deployment files added (PR #1, thanks @anch665) |
+| v85 | Nov 01 | Stable release for the Oct 31 protocol change: native message-ID protocol (first message omits `parent_message_id`, follow-ups use real server-broadcast IDs), empty-stream auto-retry, tool-markup leak gate, old-chat self-healing. **Everyone should run v85 or newer** |
+| v82–v84 | Oct 31 – Nov 01 | Emergency protocol fixes (test releases) |
+
+> **Tracking upstream issue reports**: we watch the upstream project's
+> [issues](https://github.com/AmanCode22/deeperseeker/issues) and PRs for
+> problem reports and protocol changes, and port any relevant fixes here
+> promptly — v88 was ported from upstream PR #94.
 
 ## Highlights
 
-- **Zero-cost DeepSeek API** — runs on the free DeepSeek web tier, no official API key needed; exposes standard OpenAI Chat Completions and Anthropic Messages endpoints
-- **First & fastest protocol fix** — when DeepSeek changed their web protocol on 2026-10-31 and broke every proxy on this reverse API, this fork shipped the **first working fix in 25 minutes** and a hardened stable release within 3 hours
-- **Native real-message-ID protocol** — fully adapted to DeepSeek's server-broadcast message IDs; zero guessing anywhere in the chain
-- **Tool-calling leak gate** — malformed tool-call markup is intercepted across 16 known shapes before it can leak into model output
-- **Empty-stream auto-retry** — upstream 502s / silent model stops trigger automatic continuation (≤2 retries), no more "the model just stopped mid-answer"
-- **Long-context rollover** — automatic summary handoff keeps 100+ turn conversations alive; no more "long chat stops responding"
-- **Token-pool disaster recovery** — multi-account rotation with stale-session self-healing and poisoned-session rebuild
-- **Built-in dashboard** — usage, token pool and request monitoring UI out of the box
+- **Runs free** — built on the free DeepSeek web tier, no official API key, dual standard endpoints
+- **Same-day protocol fix** — when DeepSeek changed their web protocol on 2026-10-31 and broke this class of reverse API, this repo shipped a working fix the same day (v82–v85)
+- **Real message-ID protocol** — the message chain is driven by the real IDs DeepSeek broadcasts per stream; no guessing anywhere
+- **Tool-call leak gate** — 16 known shapes of malformed tool-call markup intercepted before they reach model output
+- **Empty-stream auto-retry** — upstream 502s / silent model stops trigger automatic continuation (≤2 retries)
+- **Long-context rollover** — automatic summary handoff near the memory limit keeps 100+ turn conversations alive
+- **Token-pool rotation & disaster recovery** — multi-account rotation, stale-session self-healing, scheduled encrypted token-table backups
+- **Built-in dashboard** — usage, token pool and request monitoring out of the box (redesigned in v86)
 
-## Why this fork
+## Branches
 
-Upstream [`AmanCode22/deeperseeker`](https://github.com/AmanCode22/deeperseeker)
-(MIT) is a solid base, but it has been **dormant since 2026-10-26** — and when
-the 2026-10-31 protocol change landed, it left every deployment on the old code
-broken. This fork keeps long-running, self-hosted deployments on free-tier
-platforms alive, with 110+ commits in the last three weeks and sub-hour
-emergency response times.
+This `english` branch is the **full-English stable line** of the fork: same
+code as `main`, with comments, logs, in-chat notices, dashboard UI and docs
+entirely in English — no other languages anywhere in the project. Fixes land
+on `main` (the dev line) first and are synced here within days.
 
-**Branches**: `main` is the dev line (fast hotfixes); 
-**[`english`](https://github.com/1515asd/rh-deeperseeker/tree/english)** is
-the **full-English stable line** — identical code, all comments, logs,
-in-chat notices and dashboard UI in English. Newly added; pick it if you
-want a 100% English experience.
+## Recovering old conversations (started before the protocol change)
 
-If this fork saved you a broken setup, a star helps others find it.
+Server-side chat state created before 2026-10-31 was invalidated by the
+protocol change. Your history is **not lost** — two ways to recover:
 
-If you want to use deeperseeker with claude desktop app see [Claude Desktop Setup Guide](CLAUDE_DESKTOP_SETUP.md)
-
-**New here?** Read the **[User Guide](docs/GUIDE.md)** — a plain-language walkthrough covering setup, the dashboard, how it works internally, and the FAQ. Also available in [简体中文](docs/GUIDE.zh-CN.md).
-
-For solving deepseek pow challenge the wasm file included is from my other repo: https://github.com/AmanCode22/deepseek_pow_solver/
-
-If you liked this repo please star it and star the solver also.
-
-⚠️ Warning: Automated use violates DeepSeek's Terms of Use.
-Use a dedicated throwaway account, never your personal one.
-Accounts may be banned at any time. 
-Use at your own risk.
-
-A kind request: do not spam the server, respect DeepSeek's limits, and use it for personal purposes only.
-
-
-## v85 — Fixed stable release (please install this one)
-
-> **DeepSeek changed their web protocol on 2026-10-31**: the traditional
-> `parent_message_id: 0` on a brand-new chat is now rejected by the server
-> (`biz_code 26 "invalid message id"`), and the error arrives as plain JSON,
-> which the old parser mistook for an empty stream. Every proxy built on this
-> reverse API was affected.
-
-The interim protocol-fix commits (`v82`–`v84`) were **emergency test
-releases** — if you hit issues with them, that was expected. **This v85 is the
-fixed stable release, and we recommend everyone install this one.**
-
-### What was fixed in v85
-
-- **Full native protocol adaptation** — the first message of every chat now
-  omits `parent_message_id` entirely (the only server-side-safe form across
-  all access points), and every follow-up turn uses the **real message IDs
-  that DeepSeek now broadcasts at the start of each stream**. The legacy
-  "+2 guessing" fallback has been removed from the codebase completely:
-  the message chain is 100% driven by server-provided IDs.
-- **"Model goes silent after a tool call"** — upstream occasionally returns
-  a completely empty 502 stream; these are now detected and auto-retried
-  instead of silently ending the turn.
-- **Tool-call markup leaking into visible chat text** — malformed tool-call
-  fragments are now intercepted before they reach the client.
-- **Old conversations failing in a loop** — conversations whose server-side
-  state was invalidated by the protocol change now self-heal automatically.
-
-### Important note if you used earlier versions
-
-Conversations started **before** the protocol change may fail on their next
-message (the old server-side chat session is gone). Your history is **not
-lost** — the client resends it automatically. Two ways to recover:
-
-1. **Wait a while** for the old server-side chat to expire, then simply send
-   a message in that conversation again — the full history is resent and the
-   conversation's memory is rebuilt automatically.
-2. **Or delete it right away**: go to the DeepSeek website, open your account,
-   find that conversation, and **delete it** — then start a new chat. A fresh
-   server-side chat is created and the full history is resent just the same.
-
-If you tried this project before and it seemed broken after 2026-10-31,
-please **retry with this version**.
-
-## Fork Improvements (this fork)
-
-This fork is maintained for **long-running, self-hosted deployments on free-tier
-platforms**. On top of upstream [`AmanCode22/deeperseeker`](https://github.com/AmanCode22/deeperseeker)
-(MIT licensed), the following work has been done:
-
-| # | Improvement | Commit |
-|---|---|---|
-| 1 | **Belmo platform adaptation** — bind `HOST=0.0.0.0`, drop the Playwright/Chromium dependency (saves RAM, removes the cookie-harvesting code path) | `a658b98` |
-| 2 | **Stream-interrupt auto-continue** — detect an abnormal SSE stream end mid-generation and transparently resume, so long answers no longer truncate | `43396bc`, `9ca7ebe` |
-| 3 | **Tool-call format reminder re-injection** — keep multi-step tool workflows from drifting off-format on very long contexts | `43396bc` |
-| 4 | **Anti-"memory-loss" tuning** — handoff summary budget x4 and a proactive handoff 58k tokens before the context window closes | `a658b98` |
-| 5 | **Chinese localisation** of the dashboard / login / base templates | `08985fe`, `15b98c4`, `70cf4ef` |
-| 6 | **Token-pool disaster recovery (`ds_backup.py`)** — encrypted off-site backup of the `tokens` table every 6 hours, with automatic restore at startup when the pool is empty (free-tier containers do not guarantee disk persistence) | `3b813db` |
-
-### Multi-platform deployment notes
-
-- **Pterodactyl-based free hosts** (Wispbyte, HeavenCloud, and similar): the panel
-  injects `SERVER_PORT` while deeperseeker reads `PORT`, so use the start command
-  `PORT=$SERVER_PORT python app.py`.
-- The entire `wasm/` directory must be deployed — `deepseek_pow_solver.wasm` is
-  required for the PoW challenge and lives outside `requirements.txt`.
-- **`DB_PATH`** is honoured: point it at a persistent volume to keep the SQLite
-  token pool across container rebuilds.
-- The server reads `PORT` from the environment, so any platform that injects a
-  port works unchanged.
+1. **Wait**: once the old server-side chat expires (usually a few hours), send
+   a message again — the client resends the full history and memory rebuilds.
+2. **Or delete it now**: on the DeepSeek website, find that conversation,
+   delete it, then message again — a fresh server-side chat is created and the
+   full history is resent.
 
 ## Quickstart
 
-### Local Python
+**New here?** Read the **[User Guide](docs/GUIDE.md)** — a plain-language
+walkthrough covering setup, the dashboard, how it works, and the FAQ.
+
+Local:
+
 ```bash
-python3 -m venv deeperseeker_env
-source deeperseeker_env/bin/activate
+git clone https://github.com/1515asd/rh-deeperseeker.git
+cd rh-deeperseeker
+python3 -m venv env && source env/bin/activate
 pip install -r requirements.txt
-cp .env.example .env
+cp .env.example .env   # fill in your values first
 python3 app.py
 ```
 
-> **Note:** Thanks to PR https://github.com/AmanCode22/deeperseeker/pull/16 by [@alan7383](https://github.com/alan7383), Playwright and Chromium are deprecated and kept as backup (DeepSeek does not enforce AWS WAF on requests using Android client headers). You no longer need to run `playwright install chromium` or `xvfb-run` unless reverting to the backup cookie mechanism. And it now saves ram also and is much stable than cookie harvesting.
-
-### Docker / Podman (Podman recommended for rootless execution)
-
-Suggested in issue [#3](https://github.com/AmanCode22/deeperseeker/issues/3)
+Docker / Podman:
 
 ```bash
 cp .env.example .env
-
-# Using Podman (Recommended - Rootless)
-podman build -t deeperseeker .
-podman run -d --name deeperseeker -p 4000:4000 --env-file .env deeperseeker
-
-# Using Docker
-docker build -t deeperseeker .
-docker run -d --name deeperseeker -p 4000:4000 --env-file .env deeperseeker
-
-# Or using Podman Compose / Docker Compose
-podman-compose up -d
-# docker compose up -d
+docker compose up -d          # or podman-compose up -d
 ```
-
-Note: `docker-compose.yml` binds to `127.0.0.1:4000` only (local access) — change the ports mapping if you need to expose it.
 
 Dashboard: `http://localhost:4000/`
 
+> Free Pterodactyl-style hosts: the panel injects `SERVER_PORT` while this app
+> reads `PORT`, so start with `PORT=$SERVER_PORT python app.py`. The `wasm/`
+> directory must be deployed in full; point `DB_PATH` at a persistent volume to
+> keep the token pool across container rebuilds.
+
 ## Configuration (`.env`)
-
-Copy `.env.example` to `.env` and edit your secret values:
-
-```bash
-cp .env.example .env
-```
 
 | Variable | Description | Default |
 |---|---|---|
 | `DEEPSEEKER_API_KEY` | Bearer API key required to access endpoints | `dseeker` |
 | `DEEPSEEKER_ADMIN_USER` | Dashboard login username | `admin` |
 | `DEEPSEEKER_ADMIN_PASSWORD` | Dashboard login password | `admin` |
-| `HOST` | Bind address for bare-metal runs (`127.0.0.1` = local only, `0.0.0.0` = expose) | `127.0.0.1` |
+| `HOST` | Bind address (`127.0.0.1` local only, `0.0.0.0` expose) | `127.0.0.1` |
 | `PORT` | Server port | `4000` |
-| `DEEPSEEKER_MAX_HISTORY_TOKENS` | Token cap for injected history on first-message prompt builds | `24000` |
-| `DEEPSEEKER_MAX_TOOL_RESULT_TOKENS` | Token cap for injected tool results | `12000` |
-| `DEEPSEEKER_MEMORY_LIMIT_TOKENS` | Observed remembered-context limit that triggers rollover | `393228` |
-| `DEEPSEEKER_FIRST_MESSAGE_TOKENS` | Observed single-first-message acceptance (informational) | `974848` |
-| `DEEPSEEKER_MAX_OUTPUT_TOKENS` | Observed per-response output cap (reported by `/v1/models`) | `8192` |
-| `DEEPSEEKER_ROLLOVER_SAFETY_TOKENS` | Headroom reserved below the memory limit before summarizing | `24000` |
-| `DEEPSEEKER_MAX_SUMMARY_TOKENS` | Budget for the model-generated handoff summary | `4096` |
-| `DEEPSEEKER_PER_TOOL_RESULT_TOKENS` | Per-result tool-output cap (so one giant output can't eat the budget) | `2000` |
+| `DEEPSEEKER_MAX_HISTORY_TOKENS` | History-injection cap on first-message prompt builds | `24000` |
+| `DEEPSEEKER_MAX_TOOL_RESULT_TOKENS` | Tool-result injection cap | `12000` |
+| `DEEPSEEKER_MEMORY_LIMIT_TOKENS` | Remembered-context limit that triggers rollover | `393228` |
+| `DEEPSEEKER_MAX_OUTPUT_TOKENS` | Per-response output cap | `8192` |
+| `DEEPSEEKER_MAX_SUMMARY_TOKENS` | Handoff-summary budget | `4096` |
 
-## Auth Token Setup
+## Auth token setup
 
-1. Open a private/incognito window -> `chat.deepseek.com` -> Login
-2. Extract the token — **pick the method matching your device** (both are kept, either works):
-
-   **A. Desktop / Android (has devtools)**: Console (F12) ->
-   `JSON.parse(localStorage.getItem("userToken")).value`
-
-   **B. iPhone / iPad (Safari bookmarklet)**: iOS has no F12 console, and Safari refuses
-   to run `javascript:` typed into the address bar — so use a saved bookmark:
-
-   1. Safari: open any page -> Share -> **Add Bookmark** -> Save
-   2. Open the bookmarks list -> **Edit** that entry -> replace its address with the code
-      below (name it something recognisable, e.g. `DS token`) -> Save
-   3. On `chat.deepseek.com` (logged in, page fully loaded) -> tap the bookmarks icon ->
-      tap `DS token`. The token is copied to your clipboard and shown in an alert.
+1. Open a private window and log in at `chat.deepseek.com`.
+2. Extract the token — pick the method for your device:
+   - **Desktop / Android (devtools)**: console (F12) →
+     `JSON.parse(localStorage.getItem("userToken")).value`
+   - **iPhone / iPad (Safari bookmarklet)**: Safari won't run `javascript:`
+     typed into the address bar — bookmark any page, edit the bookmark, replace
+     its address with the code below, then tap it on a logged-in
+     `chat.deepseek.com` page to copy the token:
 
    ```javascript
-   javascript:(function(){var t='';try{var r=localStorage.getItem('userToken');if(r){try{t=JSON.parse(r).value||r;}catch(e){t=r;}}}catch(e){alert('Read failed: '+e.message);return;}if(!t||t.length<20){alert('No userToken found. Make sure you are logged in to chat.deepseek.com and the page finished loading.');return;}var a=document.createElement('textarea');a.value=t;a.style.cssText='position:fixed;left:-9999px';document.body.appendChild(a);a.select();a.setSelectionRange(0,999999);var ok=document.execCommand('copy');a.remove();alert((ok?'Copied to clipboard\n\n':'Copy failed — long-press to copy manually\n\n')+'length '+t.length+'\n'+t.substring(0,12)+'...');})();
+   javascript:(function(){var t='';try{var r=localStorage.getItem('userToken');if(r){try{t=JSON.parse(r).value||r;}catch(e){t=r;}}}catch(e){alert('Read failed: '+e.message);return;}if(!t||t.length<20){alert('No userToken found.');return;}var a=document.createElement('textarea');a.value=t;a.style.cssText='position:fixed;left:-9999px';document.body.appendChild(a);a.select();a.setSelectionRange(0,999999);document.execCommand('copy');a.remove();alert('Copied. length '+t.length+'\n'+t.substring(0,12)+'...');})();
    ```
 
-   > Android users can also use this bookmarklet (recent Chrome versions block pasting
-   > `javascript:` into the address bar), or keep using the F12 console above.
+3. Paste the token into the dashboard (`/dashboard`), close the private window.
 
-3. Paste the raw token string into the Dashboard (`/dashboard`). Close the private window.
+## API endpoints
 
-## API Endpoints & Usage
+- **OpenAI-compatible**: `http://localhost:4000/v1` — `/v1/chat/completions` (streaming & non-streaming), `/v1/responses`, `/v1/models`, `/v1/files`
+- **Anthropic-compatible**: `http://localhost:4000` — `/v1/messages`, `/v1/files/upload`
+- **Model**: `v4.1flash` — the single default model (vision-capable). Whatever `model` value the client sends is normalized to it; `/v1/models` also lists `anthropic/claude-v4.1flash` for Claude Desktop auto-discovery.
 
-- **OpenAI Base**: `http://localhost:4000/v1`
-  - `POST /v1/chat/completions` (streaming & non-streaming)
-  - `POST /v1/responses` (Responses API)
-  - `GET /v1/models`
-  - `POST /v1/files`
-  - `GET /v1/files/{file_id}`
-  - `GET /v1/files/{file_id}/content`
-- **Anthropic Base**: `http://localhost:4000`
-  - `POST /v1/messages` (also at `/messages`)
-  - `POST /v1/files/upload`
-- **Auth Key**: Configured in `.env` (`DEEPSEEKER_API_KEY`)
-- **Model**: `v4.1flash` — the single default DeepSeek model (vision-capable: `vision` no longer needs a separate model tier). Every request is served by it, whatever `model` value the client sends (legacy aliases such as `instant`, `expert`, `vision`, and `anthropic/claude-*` are accepted and normalized to `v4.1flash`). Also listed as `anthropic/claude-v4.1flash` for Claude Desktop auto-discovery. If no `model` is sent, requests default to `v4.1flash`.
-
-## Features
-
-- **Multi-Token Pooling**: Random active token rotation.
-- **Context-Based Session Selector**: Computes a SHA-256 signature over the canonicalized message history (up to the last assistant turn), the model, and the API key scope, to match and resume existing web chat sessions. Session creation is lock-protected to avoid duplicates.
-- **Summarize-and-Rollover Context Policy**: When accumulated session context nears the observed remembered-context limit (~393K input tokens), the bridge asks the model for a compact handoff summary in a scratch chat, starts a fresh web chat, and seeds it with that summary plus the newest user message. Relevant newest tool calls/results are preserved (capped by `DEEPSEEKER_MAX_TOOL_RESULT_TOKENS`, with a tighter per-result cap via `DEEPSEEKER_PER_TOOL_RESULT_TOKENS`); attachments are described in words inside the summary rather than forwarded. The first exchange — however large — is never rolled over (the first-message path accepts ~1M tokens). Declared limits in `/v1/models` (`context_window`, `max_output_tokens`) reflect this observed behavior, not guaranteed upstream limits. The summary prompt instructs the model to treat conversation content as data, never as instructions.
-- **Full History Injection**: Inject full conversation history into new sessions when session signature is not in DB or when account fails over.
-- **Automatic Rate-Limit Recovery**: Auto-marks tokens `RATE_LIMITED` on HTTP 401/403/429, provisions a new token, transfers full context (including files), and continues seamless chat with a single retry.
-- **Long-Context Resilience**: If the upstream web session fails or returns an empty response (e.g. context overflow), the broken session is discarded and the request is retried once on a fresh session with a compacted, token-capped history injection; unrecoverable upstream errors are returned as proper JSON API errors instead of raw 500s.
-- **Tool Calling & Streaming**: Server-sent events (SSE) streaming with think-tag reassembly across chunk boundaries (no truncation) and multi-format tool-call parsing — DSML XML, `<tool_call>` XML, `<function_call>` blocks, and JSON — into OpenAI/Anthropic tool schemas.
-- **File & Vision Support**: Base64/URL image extraction (with SSRF protection) and document upload streaming. Images and documents are referenced directly via `ref_file_ids` — the vision file-forking step (`fork_file_task`) was removed because `v4.1flash` handles vision natively.
-- **Claude Desktop Compatible**: Rich `/v1/models` capability metadata + the `anthropic/claude-v4.1flash` alias for automatic client discovery.
-- **Hardened Dashboard**: Session TTL, brute-force login lockout (5 attempts → 5 min), CSRF origin check.
-
-## Pricing (per 1M tokens, as of 2026-09-06)
-
-Flat peak-hour rates for the single default model:
-
-| Model Tier | Input Cost (Cache Miss) | Output Cost |
-|---|---|---|
-| **DeepSeek V4.1 Flash** (`v4.1flash`) | $0.44 | $1.32 |
-
-The `cost` reported in API responses uses these flat rates.
-## Star History
-
-<a href="https://www.star-history.com/?repos=amancode22%2Fdeeperseeker&type=date&legend=top-left">
- <picture>
-   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=amancode22/deeperseeker&type=date&theme=dark&legend=top-left" />
-   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=amancode22/deeperseeker&type=date&legend=top-left" />
-   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=amancode22/deeperseeker&type=date&legend=top-left" />
- </picture>
-</a>
 ## Disclaimer
 
-Educational purpose only. This project is not affiliated with, endorsed by, or sponsored by DeepSeek. Use responsibly and in accordance with DeepSeek's terms of service.
-
-## Contributors
-
-[![Contributors](https://contrib.rocks/image?repo=amancode22/deeperseeker)](https://github.com/amancode22/deeperseeker/graphs/contributors)
-
-## Additional Terms
-
-(These terms were part of the upstream LICENSE file and are reproduced here in
-full — nothing has been removed.)
-
-This software is not affiliated with, endorsed by, or sponsored by DeepSeek.
-Users must not use this software to violate any platform's terms of service, to
-resell or share access, or on accounts they do not own.
+⚠️ Automated use violates DeepSeek's Terms of Use. This project is not
+affiliated with DeepSeek. Use a dedicated throwaway account, never your
+personal one; accounts may be banned at any time. Use responsibly, personal
+purposes only.
 
 ## License
 

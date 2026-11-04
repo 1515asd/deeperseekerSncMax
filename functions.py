@@ -427,6 +427,36 @@ class UpstreamError(Exception):
         super().__init__(f"HTTP {self.status}: {self.body}")
 
 
+class UpstreamBizError(UpstreamError):
+    """[v88] HTTP 200 whose envelope carries a business-level error.
+
+    DeepSeek answers several endpoints with 200 + {"code": N, "data": null}
+    (or data.biz_data: null) when the account is flagged, its web session was
+    killed, or the per-account "messages too frequent" wall is hit. The old
+    code indexed straight into biz_data and died with TypeError, which is not
+    an UpstreamError — so the token never rotated and the dead account stayed
+    pinned forever. Subclassing UpstreamError lets _upstream_http_code() and
+    handle_chat's 401/403/429 rotation pick it up unchanged.
+    (Adapted from upstream PR #94 by Rrainich.)"""
+
+
+def _biz_data(payload, what="response"):
+    """Return payload["data"]["biz_data"] or raise UpstreamBizError.
+
+    Auth-shaped business messages map to 401 (quarantine/rotate); everything
+    else maps to 429 (cool down and rotate). Both are statuses handle_chat
+    already understands."""
+    data = payload.get("data") if isinstance(payload, dict) else None
+    biz = data.get("biz_data") if isinstance(data, dict) else None
+    if biz:
+        return biz
+    payload = payload if isinstance(payload, dict) else {}
+    code = payload.get("code")
+    msg = payload.get("msg") or payload.get("message") or "empty biz_data"
+    status = 401 if re.search(r"login|auth|token|session|expire", str(msg), re.I) else 429
+    raise UpstreamBizError(status, f"{what}: code={code} msg={msg}")
+
+
 def _read_cookie_file():
     """Return valid (unexpired) cookies, or None."""
     try:
@@ -2790,7 +2820,7 @@ async def create_challange_pow(target_path, auth_token):
     )
     async with response:
         data = await response.json()
-    return data["data"]["biz_data"]["challenge"]
+    return _biz_data(data, "chat/create_pow_challenge")["challenge"]
 
 
 def write_string_pow(text, alloc_func, memory, store):
@@ -2844,18 +2874,31 @@ async def _prefetch_pow(auth_token, target_path="/api/v0/chat/completion"):
         key = (auth_token, target_path)
         if len(_POW_PREFETCH) >= _POW_PREFETCH_MAX:
             _POW_PREFETCH.pop(next(iter(_POW_PREFETCH)), None)
-        _POW_PREFETCH[key] = (p, expire_at)
+        # [v87] Upstream PoW payloads no longer carry expire_at (as measured
+        # 2026-11-04 the key set is only algorithm/answer/challenge/salt/
+        # signature/target_path), so the expiry check never fires on 0 ->
+        # stale credentials in the prefetch pool get used as usual -> 40301
+        # INVALID_POW_RESPONSE. Record solved_at and drop entries past a hard
+        # TTL at take time.
+        _POW_PREFETCH[key] = (p, expire_at, time.time())
     except Exception:
         pass
+
+
+_POW_PREFETCH_TTL = 600  # [v87] challenge lifetime unknown (no expire_at in payload), 10-minute hard cap
 
 
 def _take_prefetched_pow(auth_token, target_path="/api/v0/chat/completion"):
     entry = _POW_PREFETCH.pop((auth_token, target_path), None)
     if not entry:
         return None
-    p, expire_at = entry
+    if len(entry) == 2:
+        entry = (entry[0], entry[1], time.time())
+    p, expire_at, solved_at = entry
     if expire_at and expire_at < time.time() + 30:
         return None  # too close to expiry — solve fresh
+    if time.time() - solved_at > _POW_PREFETCH_TTL:
+        return None  # [v87] entry without expire_at past the hard TTL — solve fresh, never send stale PoW
     return p
 
 
@@ -2905,7 +2948,7 @@ async def create_new_chat(auth_token):
     )
     async with response:
         data = await response.json()
-    return data["data"]["biz_data"]["chat_session"]["id"]
+    return _biz_data(data, "chat_session/create")["chat_session"]["id"]
 
 
 _EMPTY_SSE_DEFAULT = (
@@ -3030,6 +3073,29 @@ def _raise_empty_sse_response(recent_lines, parsed_events, resp_ct="", non_sse_t
             recent_lines[-_SSE_RECENT_LINES:],
         )
         raise UpstreamError(code, f"{msg} [rid:{_rid}]")
+    # [v87] Business JSON errors in the non-SSE tail (confirmed 2026-11-04:
+    # {"code":40301,"msg":"INVALID_POW_RESPONSE"} — a stale prefetched PoW
+    # rejected upstream). This is NOT an empty stream: raise it as a real
+    # upstream error. It used to fall into the empty-stream default branch ->
+    # the v81 auto-continue fallback sent the orphan "system notice" text as
+    # a brand-new chat, poisoning the session map -> memory loss everywhere.
+    # Note: the error message must NOT contain "no assistant fragments"
+    # (the v81b empty-stream retry matches on it).
+    for _tail in reversed(non_sse_tail or []):
+        _t = (_tail or "").strip()
+        if not _t.startswith("{"):
+            continue
+        try:
+            _bj = json.loads(_t)
+        except Exception:
+            continue
+        if isinstance(_bj, dict) and _bj.get("code") is not None:
+            _bcode = _bj.get("code")
+            _bmsg = _bj.get("msg") or _bj.get("message") or "biz error"
+            if str(_bcode) == "40301" or "POW" in str(_bmsg).upper():
+                _POW_PREFETCH.clear()  # invalidate all stale prefetched credentials; retry solves fresh
+            logger.warning("DeepSeek biz error in non-SSE body: %s", _t[:200])
+            raise UpstreamError(502, f"DeepSeek biz error {_bcode}: {_bmsg} [rid:{_rid}]")
     if _sse_context_limit_hint(recent_lines, parsed_events):
         msg = _EMPTY_SSE_CONTEXT
     else:
@@ -4193,6 +4259,17 @@ async def _send_message_locked(chat_id, auth_token, message, parent_message_id, 
             # again; other error codes (401/403/429/400, upstream error
             # events) have clear semantics and are raised as before.
             if getattr(e, "status", None) == 502 and "no assistant fragments" in str(e):
+                # [v87] Pre-condition for the auto-continue fallback: only fire
+                # when the message was actually accepted upstream (this turn
+                # got a broadcast id, or the chat had a valid parent to begin
+                # with). No broadcast = upstream never received the message;
+                # sending the orphan "system notice" text then would create a
+                # one-liner chat and poison the session map (root cause of the
+                # 2026-11-04 fleet-wide memory loss). Re-raise instead so the
+                # normal error-retry path handles it.
+                if not (_meta.get("response_message_id") or parent or _LAST_REAL_PARENT.get(chat_id)):
+                    logger.warning("[v87] message not accepted upstream (no broadcast, no parent); skipping auto-continue, re-raising")
+                    raise
                 for out in flt.flush():
                     emitted = (emitted + out)[-400:]
                     visible.feed(out)
@@ -4322,9 +4399,9 @@ async def upload_file(file_bytes, file_name, file_content_type, auth_token):
     )
     async with response:
         resp_json = await response.json()
-    file_id = resp_json["data"]["biz_data"]["id"]
+    js_data = _biz_data(resp_json, "file/upload_file")
+    file_id = js_data["id"]
     yield ("uploaded", file_id)
-    js_data = resp_json["data"]["biz_data"]
     status = js_data["status"]
     headers = get_headers(auth_token)
     deadline = time.time() + 300
@@ -4337,7 +4414,7 @@ async def upload_file(file_bytes, file_name, file_content_type, auth_token):
             # cookies=cookie,  # Backup WAF fallback
             timeout=aiohttp.ClientTimeout(total=30),
         ) as resp:
-            js_data = (await resp.json())["data"]["biz_data"]["files"][0]
+            js_data = _biz_data(await resp.json(), "file/fetch_files")["files"][0]
         status = js_data["status"]
     if status == "SUCCESS":
         tp_data = datetime.fromtimestamp(js_data["updated_at"], timezone.utc)
@@ -4363,7 +4440,7 @@ async def get_file_content(auth_token, file_id):
         timeout=aiohttp.ClientTimeout(total=30),
     ) as resp:
         resp_json = await resp.json()
-    js_data = resp_json["data"]["biz_data"]["files"][0]
+    js_data = _biz_data(resp_json, "file/fetch_files")["files"][0]
     yield mimetypes.guess_type(js_data["file_name"])[0]
     deadline = time.time() + 60
     while js_data.get("status") in ("PENDING", "PARSING") and time.time() < deadline and not js_data.get("signed_path"):
@@ -4374,7 +4451,7 @@ async def get_file_content(auth_token, file_id):
             # cookies=cookie,  # Backup WAF fallback
             timeout=aiohttp.ClientTimeout(total=30),
         ) as resp:
-            js_data = (await resp.json())["data"]["biz_data"]["files"][0]
+            js_data = _biz_data(await resp.json(), "file/fetch_files")["files"][0]
     if not js_data.get("signed_path"):
         return
     file_path = "https://files.deepseeksvc.com/api" + js_data["signed_path"] + "&ty=r"
