@@ -803,6 +803,34 @@ async def _preflight_stream(gen):
 MAX_UPSTREAM_ATTEMPTS = max(1, int(os.getenv("DEEPSEEKER_MAX_UPSTREAM_ATTEMPTS", "3")))
 
 
+async def _setup_failure_outcome(e, token_id, is_anthropic=False, _attempt=0):
+    """[v88] Classify a failure that happened while PREPARING a turn, not
+    sending it (create_new_chat / PoW / rollover scratch chat run outside the
+    try that owns token rotation; adapted from upstream PR #94 by Rrainich).
+
+    Returns the kwargs dict to re-enter handle_chat with, or the terminal
+    error response when the budget is spent. Callers MUST run the retry
+    OUTSIDE the per-signature asyncio.Lock — the lock is not reentrant, so
+    recursing inside it hung every request until the client gave up."""
+    code = _upstream_http_code(e)
+    auth_class = code in (401, 403, 429)
+    if token_id is not None and auth_class:
+        await _db(mark_limited, token_id, code)
+        logger.warning(
+            "Upstream HTTP %s while preparing the turn (token #%s): %s",
+            code, token_id, str(e)[:200],
+        )
+    else:
+        logger.error(
+            "Upstream failure while preparing the turn (token #%s): %s",
+            token_id, str(e)[:300], exc_info=e,
+        )
+    if _attempt + 1 >= MAX_UPSTREAM_ATTEMPTS:
+        return _api_error_response(e, is_anthropic)
+    return {"_attempt": _attempt + 1, "_auth_rotated": auth_class,
+            "_exclude_token": token_id}
+
+
 async def handle_chat(
     messages,
     model,
@@ -937,6 +965,7 @@ async def handle_chat(
     else:
 
         create_lock = _take_lock("sig", _sig_locks, sig, SIG_LOCKS_MAX)
+        setup_retry = None
         async with create_lock:
             sess = await _db(find_session, sig)
             if not sess:
@@ -979,27 +1008,47 @@ async def handle_chat(
                 # that summary via build_prompt(rollover_summary=...). A single large
                 # first exchange is untouched (the first-message path accepts ~1M
                 # tokens); this only fires for accumulated session context.
-                if needs_rollover(messages, tools=tools):
-                    scratch_chat = await create_new_chat(tok["token"])
-                    summary_gen = send_message(
-                        scratch_chat, tok["token"], build_summary_request_prompt(messages), 0, False, False, []
-                    )
-                    summary = strip_summary_tags(await collect_response(summary_gen))
-                    rollover_summary = summary[: MAX_SUMMARY_TOKENS * 4]  # ~4 chars/token cap
-                    logger.info(
-                        "Context rollover: handoff summary of ~%d tokens prepared in scratch chat %s",
-                        count_tok(rollover_summary), scratch_chat,
-                    )
+                # [v88] The upstream chat is created HERE, before the try
+                # that owns token rotation — an auth failure on this hop
+                # (HTTP 200 + biz error, e.g. code=40003 INVALID_TOKEN) used
+                # to escape as a bare 500 with the dead token never marked.
+                # Classify here; retry OUTSIDE the sig-lock (not reentrant).
+                try:
+                    if needs_rollover(messages, tools=tools):
+                        scratch_chat = await create_new_chat(tok["token"])
+                        summary_gen = send_message(
+                            scratch_chat, tok["token"], build_summary_request_prompt(messages), 0, False, False, []
+                        )
+                        summary = strip_summary_tags(await collect_response(summary_gen))
+                        rollover_summary = summary[: MAX_SUMMARY_TOKENS * 4]  # ~4 chars/token cap
+                        logger.info(
+                            "Context rollover: handoff summary of ~%d tokens prepared in scratch chat %s",
+                            count_tok(rollover_summary), scratch_chat,
+                        )
 
-                session_id = await create_new_chat(tok["token"])
-                await _db(save_session, sig, token_id, session_id, 0)
-                await _db(set_chat_baseline, session_id, _packed_first_message_tokens(messages),
-                          estimate_conversation_tokens_cached(messages))
-                parent_message_id = 0
+                    session_id = await create_new_chat(tok["token"])
+                    await _db(save_session, sig, token_id, session_id, 0)
+                    await _db(set_chat_baseline, session_id, _packed_first_message_tokens(messages),
+                              estimate_conversation_tokens_cached(messages))
+                    parent_message_id = 0
+                except Exception as e:
+                    setup_retry = await _setup_failure_outcome(
+                        e, token_id, is_anthropic=is_anthropic, _attempt=_attempt,
+                    )
             else:
                 token_id = sess["token_id"]
                 session_id = sess["session_id"]
                 parent_message_id = sess["parent_message_id"]
+
+    # [v88] setup-phase retry runs OUTSIDE the sig-lock (asyncio.Lock is
+    # not reentrant — recursing inside it deadlocked the request).
+    if setup_retry is not None:
+        if isinstance(setup_retry, dict):
+            return await handle_chat(
+                messages, model, thinking, search, stream, tools, is_anthropic,
+                req_model, scope, json_mode=json_mode, **setup_retry,
+            )
+        return setup_retry
 
     tok = await _db(get_token, token_id)
     if not tok:
