@@ -619,6 +619,17 @@ def delete_token(token_id):
 # 401 无条件隔离。
 QUARANTINE_AFTER_403 = max(0, int(os.getenv("DEEPSEEKER_QUARANTINE_AFTER_403", "3")))
 
+# [v89.3] 鉴权型"业务级"错误（HTTP 200 + msg 文本启发式映射出的 401）属于软
+# 证据：英文措辞里碰巧含 auth/token/session/login/expire 任一单词就会命中，
+# 单次命中绝不能让账号下任何惩罚状态——那是一次误判零代价的保证。连续
+# BIZ_AUTH_QUARANTINE_AFTER 次（中间无成功轮）才复现"硬 401"的结论并隔离；
+# 真 HTTP 401（上游真实返回的状态码）保持立即隔离不变。计数器在内存里、
+# 按进程计：重启清零只会让真死号重新攒够次数再隔离，不会误放行已隔离行。
+BIZ_AUTH_QUARANTINE_AFTER = max(
+    1, int(os.getenv("DEEPSEEKER_BIZ_AUTH_QUARANTINE_AFTER", "3"))
+)
+_biz_auth_streaks = {}
+
 TOKEN_COOLDOWN_SECONDS = max(1, int(os.getenv("DEEPSEEKER_RATE_LIMIT_COOLDOWN", "60")))
 TOKEN_CONCURRENCY_CAP = max(1, int(os.getenv("DEEPSEEKER_TOKEN_CONCURRENCY", "8")))
 
@@ -775,18 +786,43 @@ def _bump_403_streak(token_id):
     return row[0] if row else 0
 
 
-def mark_limited(token_id, code=None):
+def _bump_biz_auth_streak(token_id):
+    """[v89.3] 递增并返回该账号的连续鉴权型业务错误计数（内存态）。"""
+    n = _biz_auth_streaks.get(token_id, 0) + 1
+    _biz_auth_streaks[token_id] = n
+    return n
+
+
+def mark_limited(token_id, code=None, biz_auth=False):
     """[v77 P0-3 移植] 向账号记一次上游失败——池的唯一门户。
 
     不带 code：与既有行为完全一致（RATE_LIMITED 冷却自动恢复）。
     带上游状态码：
       * 401 -> 立即 QUARANTINED。被拒的凭据不是暂态，冷却 60 秒只会
         把同一个死账号重新武装。
+        [v89.3] 例外：biz_auth=True 表示这个 401 来自 HTTP 200 业务封套
+        的文本启发式（软证据）。单次命中不施加任何惩罚（误判零代价），
+        仅累加连续计数，连续 BIZ_AUTH_QUARANTINE_AFTER 次才隔离。
       * 403 -> 照旧冷却；连续 403 达到 QUARANTINE_AFTER_403（中间无
         成功轮）则 QUARANTINED。
       * 其他（429）-> 冷却，照旧。
     """
     if code == 401:
+        if biz_auth:
+            n = _bump_biz_auth_streak(token_id)
+            if n >= BIZ_AUTH_QUARANTINE_AFTER:
+                mark_quarantined(
+                    token_id,
+                    f"{n} consecutive auth-shaped business errors "
+                    f"(threshold {BIZ_AUTH_QUARANTINE_AFTER})",
+                )
+            else:
+                logger.warning(
+                    "Token #%d: auth-shaped business error %d/%d — no "
+                    "penalty (soft evidence, auto-zero on next success)",
+                    token_id, n, BIZ_AUTH_QUARANTINE_AFTER,
+                )
+            return
         mark_quarantined(token_id, "upstream 401 (auth rejected)")
         return
     if code == 403:
@@ -820,6 +856,9 @@ def mark_active(token_id):
     才落地成功；放行会污染管理员控制的状态，只有 restore_token()
     能结束隔离。
     """
+    # [v89.3] 成功一轮即推翻"鉴权已死"的软证据：连续计数归零，单次
+    # 误判（英文措辞巧合）的影响就此自动清空。
+    _biz_auth_streaks.pop(token_id, None)
     conn = get_db()
     conn.execute(
         "UPDATE tokens SET status = ?, rate_limited_until = NULL, last_used = ?, "
