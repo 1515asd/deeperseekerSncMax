@@ -36,7 +36,7 @@ did:
 | Version | Date | What changed |
 |---|---|---|
 | v88 | Nov 04 | Ported the upstream PR #94 hardening: business-level errors delivered as HTTP 200 (flagged account, killed web session, rate-limit wall) are now classified and trigger token rotation instead of pinning dead accounts; failures during new-chat creation / PoW setup are retried — outside the signature lock, so requests no longer hang |
-| v87 | Nov 04 | Fixed the memory-loss chain: prefetched PoW credentials never expired → after idle periods a stale credential got rejected (40301) → misread as an empty stream → auto-continue fired as an orphan new message → the session map got poisoned. PoW credentials now carry a hard 10-minute TTL, business errors are classified correctly, and auto-continue only fires after upstream acceptance. Invisible to clients (HTTP 200) |
+| v87 | Nov 04 | Fixed the memory-loss chain. Root cause: introduced by this fork's own earlier optimizations (PoW prefetch + auto-continue) — upstream has neither mechanism and never had this issue. Prefetched PoW credentials never expired → after idle periods a stale credential got rejected (40301) → misread as an empty stream → auto-continue fired as an orphan new message → the session map got poisoned. PoW credentials now carry a hard 10-minute TTL, business errors are classified correctly, and auto-continue only fires after upstream acceptance. Invisible to clients (HTTP 200) |
 | v86 | Nov 01 | Redesigned admin dashboard with deep-health integration; Docker deployment files added (PR #1, thanks @anch665) |
 | v85 | Nov 01 | Stable release for the Oct 31 protocol change: native message-ID protocol (first message omits `parent_message_id`, follow-ups use real server-broadcast IDs), empty-stream auto-retry, tool-markup leak gate, old-chat self-healing. **Everyone should run v85 or newer** |
 | v82–v84 | Oct 31 – Nov 01 | Emergency protocol fixes (test releases) |
@@ -46,23 +46,30 @@ did:
 > problem reports and protocol changes, and port any relevant fixes here
 > promptly — v88 was ported from upstream PR #94.
 
-## Highlights
+## What this fork adds
 
-- **Runs free** — built on the free DeepSeek web tier, no official API key, dual standard endpoints
-- **Same-day protocol fix** — when DeepSeek changed their web protocol on 2026-10-31 and broke this class of reverse API, this repo shipped a working fix the same day (v82–v85)
-- **Real message-ID protocol** — the message chain is driven by the real IDs DeepSeek broadcasts per stream; no guessing anywhere
-- **Tool-call leak gate** — 16 known shapes of malformed tool-call markup intercepted before they reach model output
-- **Empty-stream auto-retry** — upstream 502s / silent model stops trigger automatic continuation (≤2 retries)
-- **Long-context rollover** — automatic summary handoff near the memory limit keeps 100+ turn conversations alive
-- **Token-pool rotation & disaster recovery** — multi-account rotation, stale-session self-healing, scheduled encrypted token-table backups
-- **Built-in dashboard** — usage, token pool and request monitoring out of the box (redesigned in v86)
+The base capabilities — the free web tier wrapped as a standard API, multi-account
+rotation, long-context rollover, the built-in dashboard — are all inherited from
+upstream and won't be repeated here. Below is only what we added on top, each
+with a concrete scenario:
 
-## Branches
-
-This `english` branch is the **full-English stable line** of the fork: same
-code as `main`, with comments, logs, in-chat notices, dashboard UI and docs
-entirely in English — no other languages anywhere in the project. Fixes land
-on `main` (the dev line) first and are synced here within days.
+- **An answer that breaks mid-stream continues automatically** — e.g. you give
+  the model an unattended long task and go do something else; when the upstream
+  stream dies mid-answer, the server resumes writing in the SAME reply (≤2
+  retries, everything already generated is kept), and the task finishes —
+  instead of the answer silently stopping halfway and your whole task getting
+  delayed. Upstream can only resend the whole turn or surface an error.
+- **No tool-call garbage in the chat text** — e.g. the model occasionally
+  emits a truncated tool-call marker; all 16 known shapes are intercepted
+  before they reach the output, so fragments like `<tool_call>` never leak
+  into the visible reply.
+- **A token pool that survives container rebuilds** — e.g. free platforms
+  rebuild containers without warning; the token table is encrypted and backed
+  up off-site every 6 hours, and on startup an empty pool is restored
+  automatically — no re-harvesting tokens one by one.
+- **Two language lines** — `main` ships Chinese docs alongside English;
+  this `english` line keeps comments, logs, dashboard and docs entirely in
+  English (no other language anywhere), with code identical to `main`.
 
 ## Recovering old conversations (started before the protocol change)
 
