@@ -869,6 +869,12 @@ async def handle_chat(
 
     sig = await generate_signature(messages, model, scope)
     sess = await _db(find_session, sig)
+    # [v89] setup-phase retry state must be initialized before ALL branches:
+    # some resume-match paths (e.g. falling out after an all-rate-limited
+    # return) also reach the post-lock consumption point, and initializing
+    # only in the else-branch triggered UnboundLocalError (caught in
+    # production 2026-11-04).
+    setup_retry = None
     resume_recovered = False
     if not sess and os.getenv("DEEPSEEKER_RESUME_MATCH", "1") == "1":
         # Interrupted-turn recovery: when the client walks away mid-generation
@@ -979,7 +985,6 @@ async def handle_chat(
     else:
 
         create_lock = _take_lock("sig", _sig_locks, sig, SIG_LOCKS_MAX)
-        setup_retry = None
         async with create_lock:
             sess = await _db(find_session, sig)
             if not sess:
