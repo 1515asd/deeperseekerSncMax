@@ -702,6 +702,52 @@ def _pseudo_tool_result_info(msg):
     return None
 
 
+# [v89] 报错特征识别（保守）：仅匹配明确的错误标记，不碰普通文本。
+# 背景（2026-11-01 会话 b3923745 生产实证）：flash 模型把命令执行失败的裸
+# traceback 误读为"调用因闭合标签畸形被拒"，原样重发同一命令 4 次。根因是
+# 我们把报错文本原样透传、不加任何框架，弱模型对号入座了工具规范里
+# "畸形调用会被系统拒绝"的话术。
+_V89_ERROR_RE = re.compile(
+    r"Traceback \(most recent call last\)"
+    r"|\b(?:ValueError|TypeError|KeyError|NameError|IndexError|AttributeError|OSError|RuntimeError|MemoryError|FileNotFoundError|PermissionError|ConnectionError|TimeoutError|ZeroDivisionError|ImportError|SyntaxError|CalledProcessError)\b"
+    r"|^\s*Error:"
+    r"|\b(?:Permission denied|No such file or directory|command not found|Segmentation fault)\b",
+    re.MULTILINE,
+)
+
+
+def _tool_call_repeat_counts(messages):
+    """[v89] 统计全历史中同一调用签名（与 Command 回显同款 sort_keys JSON）
+    的出现次数，供重复调用闸门使用。签名必须与 extract_tool_results 里
+    cmd_json 的构造方式逐字节一致，否则计数对不上。"""
+    counts = {}
+    for m in messages:
+        if m.get("role") != "assistant":
+            continue
+        sigs = []
+        for tc in m.get("tool_calls") or []:
+            if not isinstance(tc, dict):
+                continue
+            fn = tc.get("function") or {}
+            name = fn.get("name") or tc.get("name")
+            args = fn.get("arguments")
+            if isinstance(args, str):
+                try:
+                    args = json.loads(args)
+                except Exception:
+                    pass
+            if name:
+                sigs.append(json.dumps({"arguments": args, "name": name}, sort_keys=True))
+        content = m.get("content")
+        if isinstance(content, list):
+            for c in content:
+                if isinstance(c, dict) and c.get("type") == "tool_use" and c.get("name"):
+                    sigs.append(json.dumps({"arguments": c.get("input", {}), "name": c["name"]}, sort_keys=True))
+        for s in sigs:
+            counts[s] = counts.get(s, 0) + 1
+    return counts
+
+
 async def extract_tool_results(messages, latest_only=False):
     target_messages = messages
     if latest_only:
@@ -715,6 +761,7 @@ async def extract_tool_results(messages, latest_only=False):
     # [v65] 索引建在全量 messages 上：latest_only 窗口之外的 assistant 也可能
     # 携带窗口内结果的命令。建全量零成本，且防漏。
     call_index = _index_tool_calls(messages)
+    repeat_counts = _tool_call_repeat_counts(messages)  # [v89] 重复调用闸门用
     tools_final = []
     for i in target_messages:
         if i.get("role") == "tool":
@@ -735,9 +782,13 @@ async def extract_tool_results(messages, latest_only=False):
         content = _trim_to_budget(str(content), PER_TOOL_RESULT_TOKENS)
         block = f"Tool: {name} (Call ID: {call_id})"
         hit = call_index.get(call_id)
+        sig = ""
         title = ""
         if hit:
             cmd_name, cmd_args = hit
+            # [v89] 结果块显示真实工具名：伪结果兜底名 "tool" 会让模型怀疑
+            # 结果来源；索引里明明有真实命令名，直接取用。
+            block = f"Tool: {cmd_name} (Call ID: {call_id})"
             # [v70] 回显模型自己起的调用标题（tool_title）：自己起的名字
             # 是最强的认领锚点——比 JSON 更不容易认错自己的调用。
             if isinstance(cmd_args, dict):
@@ -746,9 +797,30 @@ async def extract_tool_results(messages, latest_only=False):
                     title = t[:40]
             cmd_json = json.dumps({"arguments": cmd_args, "name": cmd_name}, sort_keys=True)
             block += f"\nCommand: <tool_call>{cmd_json}</tool_call>"
+            sig = cmd_json
         if title:
             block += f"\nTitle: 你将这次调用命名为「{title}」"
+        # [v89] 结果状态框架：有结果 = 调用已被执行。消灭"结果到底送没送达"
+        # 的怀疑空间（11-1 事故里模型收到成功结果后仍判定"没送达"而重发）。
+        block += "\nStatus: 已送达并执行（下方为本命令的真实输出；结果在，即调用已被执行）"
         block += f"\nResult: {content}"
+        if _V89_ERROR_RE.search(content):
+            # [v89] 报错翻译：裸 traceback 常被弱模型误读为"调用被拒"。
+            block += (
+                "\nNote: 以上报错文本是命令自身执行时产生的输出——能产生输出恰恰证明调用已被执行。"
+                "这不是调用被拒；原样重发只会得到同样的错误，请读取报错内容并修正命令"
+            )
+        if sig:
+            n_seen = repeat_counts.get(sig, 0)
+            if n_seen >= 2:
+                # [v89] 重复调用闸门（11-1 会话 b3923745：同一渲染命令原样
+                # 重发 4 次、每次耗时 7 分钟）。签名完全相同且已有结果回传
+                # 才触发；改参数重试（正当行为）不命中。纯提示词注入，不阻断。
+                block += (
+                    f"\n⚠️ [重复调用警告] 该命令在本会话中已被发出 {n_seen} 次，每次的执行结果均由客户端"
+                    "真实产生并成功送达（含本条）。重复执行同一命令不会产生新信息：若结果成功，请直接"
+                    "采信结果并继续下一步；若失败，请修改命令内容后重试，禁止原样重发"
+                )
         tools_final.append(block)
     if not tools_final:
         return None
