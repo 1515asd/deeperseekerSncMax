@@ -757,6 +757,56 @@ def _pseudo_tool_result_info(msg):
     return None
 
 
+# [v89] Conservative error-signature detection: matches only unambiguous
+# error markers, never plain prose.
+# Background (production forensics, 2026-11-01 session b3923745): a flash
+# model misread a bare traceback from a FAILED command execution as "my tool
+# call was rejected for malformed closing tags" and resent the identical
+# command 4 times. Root cause on our side: error text was forwarded verbatim
+# with no framing, letting a weak model pattern-match against the tool spec's
+# "malformed calls are rejected by the system" wording.
+_V89_ERROR_RE = re.compile(
+    r"Traceback \(most recent call last\)"
+    r"|\b(?:ValueError|TypeError|KeyError|NameError|IndexError|AttributeError|OSError|RuntimeError|MemoryError|FileNotFoundError|PermissionError|ConnectionError|TimeoutError|ZeroDivisionError|ImportError|SyntaxError|CalledProcessError)\b"
+    r"|^\s*Error:"
+    r"|\b(?:Permission denied|No such file or directory|command not found|Segmentation fault)\b",
+    re.MULTILINE,
+)
+
+
+def _tool_call_repeat_counts(messages):
+    """[v89] Count occurrences of each call signature across the full history
+    (same sort_keys JSON as the Command echo), for the duplicate-call gate.
+    The signature MUST be constructed byte-for-byte like cmd_json in
+    extract_tool_results, otherwise the counts never match."""
+    counts = {}
+    for m in messages:
+        if m.get("role") != "assistant":
+            continue
+        sigs = []
+        for tc in m.get("tool_calls") or []:
+            if not isinstance(tc, dict):
+                continue
+            fn = tc.get("function") or {}
+            name = fn.get("name") or tc.get("name")
+            args = fn.get("arguments")
+            if isinstance(args, str):
+                try:
+                    args = json.loads(args)
+                except Exception:
+                    pass
+            if name:
+                sigs.append(json.dumps({"arguments": args, "name": name}, sort_keys=True))
+        content = m.get("content")
+        if isinstance(content, list):
+            for c in content:
+                if isinstance(c, dict) and c.get("type") == "tool_use" and c.get("name"):
+                    sigs.append(json.dumps({"arguments": c.get("input", {}), "name": c["name"]}, sort_keys=True))
+        for s in sigs:
+            counts[s] = counts.get(s, 0) + 1
+    return counts
+
+
 async def extract_tool_results(messages, latest_only=False):
     target_messages = messages
     if latest_only:
@@ -771,6 +821,7 @@ async def extract_tool_results(messages, latest_only=False):
     # latest_only window may still carry the commands for results inside it.
     # Building over everything costs nothing and prevents misses.
     call_index = _index_tool_calls(messages)
+    repeat_counts = _tool_call_repeat_counts(messages)  # [v89] for the duplicate-call gate
     tools_final = []
     for i in target_messages:
         if i.get("role") == "tool":
@@ -794,9 +845,14 @@ async def extract_tool_results(messages, latest_only=False):
         content = _trim_to_budget(str(content), PER_TOOL_RESULT_TOKENS)
         block = f"Tool: {name} (Call ID: {call_id})"
         hit = call_index.get(call_id)
+        sig = ""
         title = ""
         if hit:
             cmd_name, cmd_args = hit
+            # [v89] Show the real tool name in the result block: the pseudo-
+            # result fallback "tool" makes the model doubt the result's
+            # origin; the index already holds the real command name.
+            block = f"Tool: {cmd_name} (Call ID: {call_id})"
             # [v70] Echo the model's own call title (tool_title): a self-chosen
             # name is the strongest ownership anchor — harder to misattribute
             # one's own call than the JSON.
@@ -806,9 +862,38 @@ async def extract_tool_results(messages, latest_only=False):
                     title = t[:40]
             cmd_json = json.dumps({"arguments": cmd_args, "name": cmd_name}, sort_keys=True)
             block += f"\nCommand: <tool_call>{cmd_json}</tool_call>"
+            sig = cmd_json
         if title:
             block += f"\nTitle: You named this call '{title}'"
+        # [v89] Result status framing: a result present = the call WAS
+        # executed. Eliminates the "was my result lost?" doubt space (in the
+        # 11-01 incident the model re-sent after receiving a SUCCESS result,
+        # claiming non-delivery).
+        block += "\nStatus: delivered and executed (the text below is this command's real output; its presence proves the call was executed)"
         block += f"\nResult: {content}"
+        if _V89_ERROR_RE.search(content):
+            # [v89] Error translation: bare tracebacks are routinely misread
+            # by weak models as "the call was rejected".
+            block += (
+                "\nNote: the error text above is output produced by the command's OWN execution — "
+                "producing output proves the call was executed. This is NOT a rejected call; "
+                "resending verbatim will reproduce the same error. Read the error and fix the command"
+            )
+        if sig:
+            n_seen = repeat_counts.get(sig, 0)
+            if n_seen >= 2:
+                # [v89] Duplicate-call gate (2026-11-01 session b3923745: the
+                # same render command resent verbatim 4 times at ~7 min each).
+                # Fires only on a byte-identical signature WITH a result
+                # already returned; retrying with changed arguments (legit
+                # behavior) never matches. Prompt-layer injection, no blocking.
+                block += (
+                    f"\n⚠️ [DUPLICATE CALL WARNING] This exact command has been issued {n_seen} times in this session; "
+                    "every result was genuinely produced by the client and successfully delivered (including this one). "
+                    "Re-running the identical command yields no new information: if the result is a success, trust it and "
+                    "move on to the next step; if it failed, change the command's content before retrying — verbatim "
+                    "resending is barred"
+                )
         tools_final.append(block)
     if not tools_final:
         return None

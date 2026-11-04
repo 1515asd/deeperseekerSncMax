@@ -7,7 +7,7 @@
 [![License: MIT](https://img.shields.io/github/license/1515asd/rh-deeperseeker.svg)](LICENSE)
 [![Last Commit](https://img.shields.io/github/last-commit/1515asd/rh-deeperseeker/main.svg)](https://github.com/1515asd/rh-deeperseeker/commits/main)
 [![Stars](https://img.shields.io/github/stars/1515asd/rh-deeperseeker.svg)](https://github.com/1515asd/rh-deeperseeker/stargazers)
-![Release](https://img.shields.io/badge/release-v88-2ea44f.svg)
+![Release](https://img.shields.io/badge/release-v89-2ea44f.svg)
 
 Point any OpenAI/Anthropic-compatible client at this server and it just works —
 streaming, tool calling, and long-context session management out of the box.
@@ -35,6 +35,7 @@ did:
 
 | Version | Date | What changed |
 |---|---|---|
+| v89 | Nov 04 | Tool-result hardening (from a 2026-11-01 production post-mortem): every tool result now carries a "delivered and executed" status line; execution errors are translated as "this is the command's own error, not a rejected call"; a duplicate-call warning is injected when the same command is resent verbatim ≥2 times. All three are prompt-layer changes — no protocol or session-chain code touched |
 | v88 | Nov 04 | Ported the upstream PR #94 hardening: business-level errors delivered as HTTP 200 (flagged account, killed web session, rate-limit wall) are now classified and trigger token rotation instead of pinning dead accounts; failures during new-chat creation / PoW setup are retried — outside the signature lock, so requests no longer hang |
 | v87 | Nov 04 | Fixed the memory-loss chain. Root cause: introduced by this fork's own earlier optimizations (PoW prefetch + auto-continue) — upstream has neither mechanism and never had this issue. Prefetched PoW credentials never expired → after idle periods a stale credential got rejected (40301) → misread as an empty stream → auto-continue fired as an orphan new message → the session map got poisoned. PoW credentials now carry a hard 10-minute TTL, business errors are classified correctly, and auto-continue only fires after upstream acceptance. Invisible to clients (HTTP 200) |
 | v86 | Nov 01 | Redesigned admin dashboard with deep-health integration; Docker deployment files added (PR #1, thanks @anch665) |
