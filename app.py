@@ -856,6 +856,10 @@ async def handle_chat(
 
     sig = await generate_signature(messages, model, scope)
     sess = await _db(find_session, sig)
+    # [v89] setup-phase 重试状态必须在所有分支前初始化：恢复匹配分支的
+    # 某些路径（如全库限流后的回落）同样能到达锁外的消费点，只把初始化
+    # 放在 else 分支会触发 UnboundLocalError（2026-11-04 生产实锤）。
+    setup_retry = None
     resume_recovered = False
     if not sess and os.getenv("DEEPSEEKER_RESUME_MATCH", "1") == "1":
         # Interrupted-turn recovery: when the client walks away mid-generation
@@ -965,7 +969,6 @@ async def handle_chat(
     else:
 
         create_lock = _take_lock("sig", _sig_locks, sig, SIG_LOCKS_MAX)
-        setup_retry = None
         async with create_lock:
             sess = await _db(find_session, sig)
             if not sess:
