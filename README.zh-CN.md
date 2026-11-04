@@ -7,7 +7,7 @@
 [![License: MIT](https://img.shields.io/github/license/1515asd/rh-deeperseeker.svg)](LICENSE)
 [![Last Commit](https://img.shields.io/github/last-commit/1515asd/rh-deeperseeker/main.svg)](https://github.com/1515asd/rh-deeperseeker/commits/main)
 [![Stars](https://img.shields.io/github/stars/1515asd/rh-deeperseeker.svg)](https://github.com/1515asd/rh-deeperseeker/stargazers)
-![Release](https://img.shields.io/badge/release-v88-2ea44f.svg)
+![Release](https://img.shields.io/badge/release-v89-2ea44f.svg)
 
 把任何兼容 OpenAI / Anthropic 的客户端指向本服务即可使用——流式输出、工具调用、超长上下文会话管理开箱即用。
 
@@ -30,6 +30,7 @@
 
 | 版本 | 日期 | 内容 |
 |---|---|---|
+| v89 | 11-04 | 工具结果加固（基于 11-1 生产事故复盘）：每条工具结果标注「已送达并执行」；执行报错会被翻译为「这是命令自身的错误，不是调用被拒」；同一命令被原样重发 ≥2 次时自动注入重复调用警告。三者均为提示词层改动，不触及协议与会话链 |
 | v88 | 11-04 | 移植上游 PR #94 的加固：HTTP 200 里携带的业务级错误（账号被标记、网页会话被杀、频控墙）现在会被正确分类并触发令牌轮转，不再把死号钉死；新会话创建 / PoW 阶段的失败纳入重试体系，且重试在签名锁外执行，不再把请求挂死 |
 | v87 | 11-04 | 修复「对话失忆」链。根因是本 fork 此前的两项优化（PoW 凭证预取、空流自动续写）组合引入的——上游没有预取池和续写兜底，不存在此问题：预取的凭证不再过期 → 空闲后带陈旧凭证请求被拒（40301）→ 被误判为空流 → 自动续写当成新消息发出 → 会话映射中毒。现在 PoW 凭证强制 10 分钟有效期、业务错误正确分类、自动续写只在确认上游受理后触发。修复对客户端完全透明（HTTP 200） |
 | v86 | 11-01 | 管理面板重新设计，集成深度健康检查；新增 Docker 部署文件（PR #1，感谢 @anch665） |
