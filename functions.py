@@ -3277,6 +3277,52 @@ def _has_unswallowed_tool_markup(text: str) -> bool:
     return not tools
 
 
+def _is_bare_tool_call_attempt(text: str) -> bool:
+    """[v89.4] 整段正文是否就是一个「丢了包裹标签的工具调用」。
+
+    生产实证 2026-11-05 00:23：模型把工具调用输出成裸 JSON（无
+    <tool_call> 包裹、无代码围栏，arguments 里还多了客户端 schema 的
+    tool_title 字段）。六级解析阶梯全部要求标签或围栏，裸 JSON 判不出
+    工具、原样漏进正文；模型自认为已调用完毕直接收尾，客户端只见泄露
+    生肉、无任何可执行调用，会话停摆。命中本判定时抛 malformed_tool_call
+    走 v62 诊断续写：桥接层不执行任何东西，只把写坏的调用退回给模型，
+    由模型依诊断词决定重发正确调用还是改给最终答案。
+
+    判定取最严形态，正常路径零影响：
+    * 剥掉 think 后整段正文恰好是一个 JSON 对象（多一个字都不命中）；
+    * 顶层 "name" 为非空字符串且命中本轮请求真实工具表（request_tools，
+      与抢救层同一提取口径：function.name 优先，裸 name 兜底）；以下划线
+      开头的残名拒收（v66 同规）；
+    * 顶层 "arguments" 必须是字典（教学格式必有该键；缺失视为歧义，
+      维持现状不触发）；
+    * 本轮请求未携带工具表时直接 False——无工具的普通对话里任何 JSON
+      输出一律照旧。
+    """
+    if not text or not text.strip():
+        return False
+    stripped = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
+    if not (stripped.startswith("{") and stripped.endswith("}")):
+        return False
+    try:
+        data = json.loads(stripped)
+    except Exception:
+        return False
+    if not isinstance(data, dict):
+        return False
+    name = data.get("name")
+    if not isinstance(name, str) or not name.strip() or name.lstrip().startswith("_"):
+        return False
+    if not isinstance(data.get("arguments"), dict):
+        return False
+    for t in request_tools.get() or []:
+        if not isinstance(t, dict):
+            continue
+        fn = t.get("function") or t
+        if isinstance(fn, dict) and fn.get("name") == name:
+            return True
+    return False
+
+
 def _body_has_real_content(text: str) -> bool:
     """FINISHED 时，正文剥掉工具调用标记后是否还有可读内容。
 
@@ -3459,6 +3505,14 @@ async def _send_message_once(chat_id, auth_token, message, parent_message_id, th
                         raise _SseStreamInterrupted(
                             "malformed_tool_call", _extract_malformed_call(body_text))
                     raise _SseStreamInterrupted("no_body", "")
+                elif _is_bare_tool_call_attempt(body_text):
+                    # [v89.4] 裸 JSON 工具调用（丢了 <tool_call> 包裹）：正文
+                    # 有"内容"（JSON 本身）所以上面的纯标记分支不命中，会话
+                    # 原本会在此正常收尾、客户端停摆。按畸形调用走 v62 诊断
+                    # 续写，让模型重写。
+                    logger.warning("[v89.4] FINISHED with bare-JSON tool-call attempt -> malformed continue")
+                    raise _SseStreamInterrupted(
+                        "malformed_tool_call", _extract_malformed_call(body_text))
                 raise _SseStreamFinished()
 
             if "v" in data and isinstance(data["v"], dict) and "response" in data["v"]:
