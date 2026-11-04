@@ -757,23 +757,6 @@ def _pseudo_tool_result_info(msg):
     return None
 
 
-# [v89] Conservative error-signature detection: matches only unambiguous
-# error markers, never plain prose.
-# Background (production forensics, 2026-11-01 session b3923745): a flash
-# model misread a bare traceback from a FAILED command execution as "my tool
-# call was rejected for malformed closing tags" and resent the identical
-# command 4 times. Root cause on our side: error text was forwarded verbatim
-# with no framing, letting a weak model pattern-match against the tool spec's
-# "malformed calls are rejected by the system" wording.
-_V89_ERROR_RE = re.compile(
-    r"Traceback \(most recent call last\)"
-    r"|\b(?:ValueError|TypeError|KeyError|NameError|IndexError|AttributeError|OSError|RuntimeError|MemoryError|FileNotFoundError|PermissionError|ConnectionError|TimeoutError|ZeroDivisionError|ImportError|SyntaxError|CalledProcessError)\b"
-    r"|^\s*Error:"
-    r"|\b(?:Permission denied|No such file or directory|command not found|Segmentation fault)\b",
-    re.MULTILINE,
-)
-
-
 def _tool_call_repeat_counts(messages):
     """[v89] Count occurrences of each call signature across the full history
     (same sort_keys JSON as the Command echo), for the duplicate-call gate.
@@ -849,10 +832,6 @@ async def extract_tool_results(messages, latest_only=False):
         title = ""
         if hit:
             cmd_name, cmd_args = hit
-            # [v89] Show the real tool name in the result block: the pseudo-
-            # result fallback "tool" makes the model doubt the result's
-            # origin; the index already holds the real command name.
-            block = f"Tool: {cmd_name} (Call ID: {call_id})"
             # [v70] Echo the model's own call title (tool_title): a self-chosen
             # name is the strongest ownership anchor — harder to misattribute
             # one's own call than the JSON.
@@ -865,20 +844,7 @@ async def extract_tool_results(messages, latest_only=False):
             sig = cmd_json
         if title:
             block += f"\nTitle: You named this call '{title}'"
-        # [v89] Result status framing: a result present = the call WAS
-        # executed. Eliminates the "was my result lost?" doubt space (in the
-        # 11-01 incident the model re-sent after receiving a SUCCESS result,
-        # claiming non-delivery).
-        block += "\nStatus: delivered and executed (the text below is this command's real output; its presence proves the call was executed)"
         block += f"\nResult: {content}"
-        if _V89_ERROR_RE.search(content):
-            # [v89] Error translation: bare tracebacks are routinely misread
-            # by weak models as "the call was rejected".
-            block += (
-                "\nNote: the error text above is output produced by the command's OWN execution — "
-                "producing output proves the call was executed. This is NOT a rejected call; "
-                "resending verbatim will reproduce the same error. Read the error and fix the command"
-            )
         if sig:
             n_seen = repeat_counts.get(sig, 0)
             if n_seen >= 2:
