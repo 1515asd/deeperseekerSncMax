@@ -200,9 +200,12 @@ from functions import (
     mark_active,
     is_context_limit_error,
     record_usage,
+    restore_token,
     usage_by_day_key,
     get_pool_view,
     effort_level,
+    get_effort_enhance,
+    set_effort_enhance,
     request_effort as _request_effort,
     request_tools as _request_tools,
     parse_tools,
@@ -2184,11 +2187,21 @@ async def files_upload(request: Request):
         return JSONResponse({"error": "Invalid API key"}, status_code=401)
     # [v77 PR#72 审计修复] effort 档位在此设置（此前链路断裂：
     # request_effort 无人 set，max 档指令从未挂上）
-    _request_effort.set(effort_level(body) if isinstance(body, dict) else None)
+    # [v89.6] 该行原本引用未定义的 body，端点每次调用都 NameError 500
+    # （生产实锤 2026-11-05：上传端点全坏）。JSON 体只在客户端真发了
+    # JSON 时解析——multipart 上传请求体不是 JSON，读出来 None 照旧。
+    # effort 设置统一走 _apply_effort（受面板开关门控）。
+    _req_body = None
+    if request.headers.get("content-type", "").startswith("application/json"):
+        try:
+            _req_body = await request.json()
+        except Exception:
+            _req_body = None
+    _apply_effort(_req_body if isinstance(_req_body, dict) else {})
     # [v77 P0-7] 显式模式开关：DEEPSEEKER_MODE=official 时走官方 API，
     # 无静默回退。
     if official_api.official_mode_enabled():
-        _body = await request.json()
+        _body = _req_body if isinstance(_req_body, dict) else await request.json()
         return await _official_chat_response(
             _body, _body.get("model") or "deepseek-chat",
             bool(_body.get("stream")), _body.get("tools"), request)
@@ -2358,6 +2371,20 @@ def is_thinking_enabled(body, request=None):
     return True
 
 
+def _apply_effort(body):
+    """[v89.6] 受面板开关门控的 effort 档位设置。
+
+    v77 设计的 EFFORT_INSTRUCTIONS（reasoning_effort=max 等档位对应的人话
+    强化指令）从未在生产生效——唯一的 set 点引用了未定义的 body。
+    本函数补上这条链路，但以 settings 表的 effort_enhance 开关为总闸：
+    关闭时根本不设置 ContextVar，_with_effort 读到 default None，指令不
+    附加，行为与开关加入前逐字节一致（真关得掉，不是"设了再跳过"）。
+    三个聊天入口（OpenAI completions / responses / Anthropic messages）
+    与 files_upload 统一走这里。"""
+    if get_effort_enhance():
+        _request_effort.set(effort_level(body))
+
+
 # DeepSeek now serves a single model (v4.1flash) as the website default.
 # Every request — whatever model name the client sends, including legacy
 # aliases (instant, expert, vision, anthropic/claude-*) — is served by it.
@@ -2459,6 +2486,7 @@ async def chat_completions(request: Request):
     messages = body.get("messages", [])
     model = resolve_model(body.get("model"))
     thinking = is_thinking_enabled(body, request)
+    _apply_effort(body)
     search = body.get("search", False)
     stream = body.get("stream", False)
     tools = body.get("tools", None)
@@ -2523,6 +2551,7 @@ async def openai_responses(request: Request):
     messages = _responses_input_to_messages(inputs)
 
     thinking = is_thinking_enabled(body, request)
+    _apply_effort(body)
     search = body.get("search", False)
     stream = body.get("stream", False)
     tools = body.get("tools", None)
@@ -2639,6 +2668,7 @@ async def anthropic_messages(request: Request):
     model = resolve_model(body.get("model"))
 
     thinking = is_thinking_enabled(body, request)
+    _apply_effort(body)
     stream = body.get("stream", False)
     tools = body.get("tools", [])
 
@@ -2877,6 +2907,35 @@ async def v1_pool_restore(request: Request):
     return JSONResponse({"ok": True, "token_id": token_id})
 
 
+@app.get("/v1/features/effort-enhance")
+async def v1_effort_enhance_get(request: Request):
+    """[v89.6] 提示词增强开关当前状态（管理员）。"""
+    try:
+        get_current_admin(request)
+    except HTTPException:
+        return HTMLResponse("<meta http-equiv='refresh' content='0;url=/login'>")
+    return JSONResponse({"effort_enhance": await _db(get_effort_enhance)})
+
+
+@app.post("/v1/features/effort-enhance")
+async def v1_effort_enhance_set(request: Request):
+    """[v89.6] 提示词增强开关（管理员）：{"enabled": true|false}。
+
+    写 settings 表并立即刷新内存缓存——下一个请求即时生效，无需重启。
+    关闭时聊天路径不再设置 effort ContextVar，与开关加入前逐字节一致。"""
+    try:
+        get_current_admin(request)
+    except HTTPException:
+        return HTMLResponse("<meta http-equiv='refresh' content='0;url=/login'>")
+    try:
+        body = await request.json()
+        enabled = bool(body.get("enabled"))
+    except Exception:
+        return JSONResponse({"error": "enabled (bool) required"}, status_code=400)
+    value = await _db(set_effort_enhance, enabled)
+    return JSONResponse({"ok": True, "effort_enhance": value})
+
+
 @app.get("/pool")
 async def pool_dashboard(request: Request):
     """[v86] 旧池页面已并入统一仪表盘（/dashboard），重定向兼容旧书签。"""
@@ -2943,12 +3002,13 @@ async def v1_admin_stats(request: Request):
         cookies_valid = False
     probe = await _deep_health_probe()
     return JSONResponse({
-        "version": "v86",
+        "version": "v89.6",
         "active_tokens": active,
         "total_tokens": len(tokens),
         "sessions": sessions,
         "today": today,
         "cookies_valid": cookies_valid,
+        "effort_enhance": await _db(get_effort_enhance),
         "deep": probe,
     })
 

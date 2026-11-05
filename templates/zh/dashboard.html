@@ -50,6 +50,7 @@
   .b-ok{color:var(--green);background:rgba(40,205,65,.14)}
   .b-warn{color:var(--orange);background:rgba(255,149,0,.14)}
   .b-err{color:var(--red);background:rgba(255,59,48,.14)}
+  .b-blue{color:var(--blue);background:rgba(10,132,255,.16)}
   .b-idle{color:var(--p2);background:var(--div)}
   button,.btn{background:var(--blue);color:#fff;border:0;border-radius:var(--r-sm);padding:8px 18px;cursor:pointer;
               font-size:13px;font-weight:600;font-family:var(--font);transition:background var(--tr),transform var(--tr)}
@@ -99,12 +100,17 @@
   <div class="card"><div class="num" id="d-cookie">—</div><div class="lbl">备用 Cookie</div></div>
 </div>
 
-<h2>令牌池<span class="sec"><span class="badge b-ok">正常</span> <span class="badge b-warn">限速冷却</span> <span class="badge b-err">隔离</span></span></h2>
+<h2>令牌池<span class="sec"><span class="badge b-ok">正常</span> <span class="badge b-blue">限速冷却</span> <span class="badge b-warn">疑似禁言</span> <span class="badge b-err">疑似过期</span> <span class="badge b-err">其他隔离</span></span></h2>
 <div class="wrap">
 <table id="pool">
-  <thead><tr><th>ID</th><th>别名</th><th>令牌</th><th>状态</th><th>说明</th><th>进行中</th><th>上次使用</th><th>冷却剩余</th><th>操作</th></tr></thead>
+  <thead><tr><th>ID</th><th>别名</th><th>令牌</th><th>状态</th><th>说明（这是什么意思）</th><th>进行中</th><th>上次使用</th><th>冷却剩余</th><th>操作</th></tr></thead>
   <tbody></tbody>
 </table>
+</div>
+<div class="warning" style="margin-top:12px;line-height:1.7">
+  <strong>令牌什么时候会过期？</strong>不固定，由 DeepSeek 服务端决定，这边无法预知。过期后客户端会报 <code>401</code> 或 <code>503 No tokens available</code>。<br>
+  <strong>分不清过期还是禁言？</strong>用该账号登录 <a href="https://chat.deepseek.com" target="_blank">chat.deepseek.com</a>：网页提示重新登录 = 过期；发消息弹出禁言提示 = 禁言；能正常聊 = 误判，点「恢复」即可。<br>
+  <strong>放心试：</strong>「恢复」按钮是安全的——令牌真失效的话会自动再次隔离，不会造成损失。
 </div>
 
 <h2>用量统计<span class="sec">按天 × 按 API Key</span></h2>
@@ -117,7 +123,8 @@
 
 <section>
   <h2>添加认证令牌</h2>
-  <div class="warning">令牌等同于你的 DeepSeek 账号：只贴进自己的面板，别给任何人。浏览器里退出 DeepSeek 登录后，令牌随之失效。</div>
+  <div class="warning">令牌等同于你的 DeepSeek 账号：只贴进自己的面板，别给任何人。浏览器里退出 DeepSeek 登录后，令牌随之失效。<br>
+  <strong>令牌有效期不固定</strong>，随时可能过期——仪表盘状态列显示「疑似过期」时，重新按下面的方法提取令牌再添加一次即可，旧令牌删掉就行。</div>
   <div class="card" style="padding:20px">
     <form method="post" action="/tokens/add" style="display:flex;gap:10px;flex-wrap:wrap">
       <input type="text" name="alias" placeholder="别名（可选，如：小号1）" style="width:200px">
@@ -177,6 +184,20 @@ if (out) { completion(out); } else { completion('未取到：请确认 Safari �
     <p>Anthropic 兼容端点：<code id="ep-anthropic">…</code></p>
     <p>默认模型：<code>deepseek-v4.1-flash</code>（可在请求体里指定其他已暴露模型）</p>
     <p class="hint">把上面任意一个地址填进支持 OpenAI / Anthropic 协议的客户端（Claude Code、Cherry Studio、Open WebUI 等）即可使用。</p>
+    <p><button class="btn-sm btn-ghost" onclick="checkLink()">检测链路</button> <span id="link-result" class="hint">未检测</span></p>
+    <p class="hint">此检测验证「面板 → 上游」的链路是否通（含 PoW）。客户端 API 的真实可用性以你的客户端实际发出一条消息为准——那才是最真实的检测。</p>
+  </div>
+</section>
+
+<section>
+  <h2>功能开关</h2>
+  <div class="card info-card" style="padding:20px">
+    <p style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin:0">
+      <strong>提示词增强</strong>
+      <span id="effort-state" class="badge b-idle">…</span>
+      <button id="effort-btn" class="btn-sm btn-ghost" onclick="toggleEffort()">…</button>
+    </p>
+    <p class="hint" style="margin-top:10px">干什么用的：当客户端请求里写了「高强度思考」（如 reasoning_effort=max）时，给模型额外加一段「慢慢想、多角度验证、逐步检查」的指令，让回答更深入，但会稍慢、多消耗一些 tokens。<strong>关闭后</strong>完全按模型默认方式回答（与旧版行为一致）。设置即时生效，无需重启。</p>
   </div>
 </section>
 
@@ -189,15 +210,37 @@ async function refreshPool() {
     const pool = await fetch('/v1/pool').then(r => r.json());
     const tb = document.querySelector('#pool tbody'); tb.innerHTML = '';
     let flight = 0;
+    // [v89.6] 五态五色 + 中文动态说明：后端 reason_kind 分类，
+    // 前端只做展示映射，不猜状态。
+    const KIND_LABEL = {expired: '疑似过期', restricted: '疑似禁言', other: '已隔离'};
+    const KIND_BADGE = {expired: 'b-err', restricted: 'b-warn', other: 'b-err'};
+    const KIND_NOTE = {
+      expired: 'DeepSeek 不认这个令牌了（过期或被登出）。需重新提取令牌再添加（方法见下方），点「恢复」没用。',
+      restricted: '疑似被临时限制发言（禁言）。等解封后点「恢复」即可正常使用；若能登录正常聊天，就是误判，直接点「恢复」。',
+      other: '已隔离。具体原因见下；确认上游正常后点「恢复」即可回到轮换，拿不准先按上方指南自查。',
+    };
     for (const t of (pool.pool || [])) {
       flight += t.in_flight || 0;
-      const cls = t.state_class || '';
-      const badge = cls.includes('ok') ? 'b-ok' : cls.includes('warn') ? 'b-warn' : cls.includes('err') ? 'b-err' : 'b-idle';
+      const kind = t.reason_kind || null;
+      let badge, stLabel, note;
+      if (t.status === 'ACTIVE') {
+        badge = 'b-ok'; stLabel = '正常'; note = '轮换中，能正常干活';
+      } else if (t.status === 'RATE_LIMITED') {
+        badge = 'b-blue'; stLabel = '限速冷却';
+        note = '刚才请求太频繁，休息一下自动回来（' + (t.cooldown || '—') + '），不用管';
+      } else if (kind === 'expired') {
+        badge = KIND_BADGE[kind]; stLabel = KIND_LABEL[kind]; note = KIND_NOTE[kind];
+      } else if (kind === 'restricted') {
+        badge = KIND_BADGE[kind]; stLabel = KIND_LABEL[kind]; note = KIND_NOTE[kind];
+      } else {
+        badge = 'b-err'; stLabel = '已隔离';
+        note = KIND_NOTE.other + (t.reason ? ' 原因：' + t.reason : '');
+      }
       const tr = document.createElement('tr');
       tr.innerHTML = `<td>${t.id}</td><td>${esc(t.label)}</td>`
         + `<td><code>${esc(t.token_head || '—')}</code></td>`
-        + `<td><span class="badge ${badge}">${esc(t.status)}</span></td>`
-        + `<td>${esc(t.state_note)}</td><td>${t.in_flight}</td>`
+        + `<td><span class="badge ${badge}">${esc(stLabel)}</span></td>`
+        + `<td style="white-space:normal;min-width:220px">${esc(note)}</td><td>${t.in_flight}</td>`
         + `<td>${esc(t.last_used)}</td><td>${esc(t.cooldown)}</td>`
         + `<td>${t.can_restore ? `<button class="btn-sm" onclick="restore(${t.id})">恢复</button> ` : ''}`
         + `<button class="btn-sm btn-danger" onclick="del(${t.id})">删除</button></td>`;
@@ -251,6 +294,45 @@ async function refreshDeep() {
 async function restore(id) { await fetch('/v1/pool/restore', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({token_id:id})}); refreshPool(); }
 async function del(id) { if (!confirm('确定从池中删除该令牌？')) return; await fetch(`/tokens/${id}/delete`, {method:'POST'}); refreshPool(); }
 
+// [v89.6] 功能开关：提示词增强（effort 指令）。
+async function refreshEffort() {
+  try {
+    const d = await fetch('/v1/features/effort-enhance').then(r => r.json());
+    renderEffort(d.effort_enhance);
+  } catch (e) { console.error('effort', e); }
+}
+function renderEffort(on) {
+  const st = document.getElementById('effort-state');
+  const btn = document.getElementById('effort-btn');
+  st.textContent = on ? '已开启' : '已关闭';
+  st.className = 'badge ' + (on ? 'b-ok' : 'b-idle');
+  btn.textContent = on ? '关闭' : '开启';
+  btn.dataset.on = on ? '1' : '0';
+}
+async function toggleEffort() {
+  const btn = document.getElementById('effort-btn');
+  const on = btn.dataset.on === '1';
+  try {
+    const r = await fetch('/v1/features/effort-enhance', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({enabled: !on})}).then(r => r.json());
+    renderEffort(r.effort_enhance);
+  } catch (e) { console.error('effort toggle', e); }
+}
+
+// [v89.6] 接口信息：链路检测（复用既有深度探针端点，不新增后端）。
+async function checkLink() {
+  const el = document.getElementById('link-result');
+  el.textContent = '检测中…';
+  try {
+    const d = await fetch('/v1/admin/stats').then(r => r.json());
+    const up = d.deep || {};
+    if (up.upstream_reachable && up.pow_ok) {
+      el.innerHTML = '✅ 链路正常 · 端到端延迟 ' + esc(String(up.latency_ms ?? '—')) + ' ms';
+    } else {
+      el.innerHTML = '❌ 异常' + (up.reason ? '：' + esc(up.reason) : '') + ' —— 若令牌状态显示「疑似过期」，请换新令牌';
+    }
+  } catch (e) { el.textContent = '❌ 检测请求失败：' + e; }
+}
+
 // 接口地址跟随访问面板用的域名，避免硬编码
 (() => {
   const base = location.origin;
@@ -258,7 +340,7 @@ async function del(id) { if (!confirm('确定从池中删除该令牌？')) retu
   document.getElementById('ep-anthropic').textContent = base;
 })();
 
-refreshPool(); refreshUsage(); refreshDeep();
+refreshPool(); refreshUsage(); refreshDeep(); refreshEffort();
 setInterval(refreshPool, 10000);
 setInterval(refreshUsage, 10000);
 setInterval(refreshDeep, 30000);

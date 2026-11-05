@@ -37,6 +37,7 @@ did:
 
 | Version | Date | What changed |
 |---|---|---|
+| v89.6 | Nov 05 | Three classes of fixes (production-verified Nov 5 evening): 1) the pool-restore endpoint and the file-upload endpoint have returned a NameError 500 on every call since v77 — both fixed, with a repo-wide static scan confirming no similar residue; 2) the dashboard state system rebuilt — quarantine reasons are persisted and shown as five color-coded states (likely expired / likely muted / quarantined-other with the concrete reason), mute-shaped business errors no longer masquerade as healthy after cooldown, and every state carries plain-language guidance plus a self-check recipe; Restore stays always-safe (a dead token re-quarantines automatically); 3) the effort-instruction chain fixed — `reasoning_effort=max` strengthening instructions now actually apply for the first time, with a dashboard toggle (off = byte-identical to the previous release) |
 | v89.5 | Nov 05 | Bare-JSON tool calls upgraded from "send back for rewrite" to deterministic auto-repair: when all four gates pass (the whole body is exactly one JSON object, the tool name matches this turn's real tool list, arguments is a dict, and all schema-required fields are present), the salvage layer re-wraps the lost `<tool_call>` tags and the call flows through the existing parse/delivery chain — zero extra upstream round-trip, arguments preserved verbatim, and the session history is no longer polluted by the leaked JSON. Any gate failing falls back to the v89.4 rewrite path — byte-identical to the previous version |
 | v89.4 | Nov 05 | Bare-JSON tool-call self-healing: the model occasionally emits a tool call as bare JSON without `<tool_call>` wrapping (production-verified Nov 5, 00:23), which leaks into the reply body and stalls the session. When the whole body is exactly one JSON object whose tool name matches this turn's real tool list, the existing v62 diagnostic-continue kicks in — the bridge executes nothing and lets the model resend a well-formed call or hand back a final answer. Normal replies stay byte-identical |
 | v89.3 | Nov 04 | Zero false-positive quarantines: the auth-wording classification of HTTP 200 business errors is soft evidence — a single hit no longer penalizes the account at all (zero cost on a wording fluke); quarantine now requires 3 consecutive auth-shaped business failures (configurable), and one successful turn resets the count. A real HTTP 401 (hard evidence) still quarantines immediately. Fixes the last v88 residual — English business wording that merely contains an auth-shaped word could sideline a healthy account indefinitely |
@@ -152,6 +153,24 @@ Dashboard: `http://localhost:4000/`
    ```
 
 3. Paste the token into the dashboard (`/dashboard`), close the private window.
+
+## Token lifetime & dashboard states (plain language)
+
+**When do tokens expire?** Unpredictably — DeepSeek's server decides, and there is no way to know in advance. When it happens, clients get `401` (with `INVALID_TOKEN`) or `503 No tokens available`, and the dashboard state column shows "Likely expired". The fix is to **extract a fresh token, add it, and delete the old one** — pressing "Restore" will not help; an expired token stays dead.
+
+**What do the dashboard states mean?**
+
+| State | Meaning | What to do |
+|---|---|---|
+| 🟢 Active | Working normally | Nothing |
+| 🔵 Cooling down | Requests came too fast, brief pause | Recovers automatically, no action needed |
+| 🟠 Likely muted | Account temporarily restricted | Wait out the mute, then press "Restore"; if the account chats fine on the website, it was a false positive — just press "Restore" |
+| 🔴 Likely expired | Token dead (expired or logged out) | Extract a fresh token, add it, delete the old one; "Restore" won't help |
+| 🔴 Quarantined | Left rotation for another reason (see the note column) | Press "Restore" once the upstream is healthy; when unsure, verify first as described above |
+
+**Can't tell expired from muted?** Log into `chat.deepseek.com` with that account: a re-login prompt means expired; a mute notice when sending a message means muted; normal chatting means false positive. The "Restore" button is always safe — a truly dead token simply re-quarantines automatically, no harm done.
+
+**Prompt enhancement toggle** (dashboard "Features" section): when a client sends an effort level such as `reasoning_effort=max`, an extra "think carefully, verify from angles" instruction is attached, giving deeper answers at the cost of a bit of latency and tokens. Toggle it in the dashboard anytime — effective immediately; when off, behavior is byte-identical to the previous release.
 
 ## API endpoints
 

@@ -188,6 +188,21 @@ def init_db():
         conn.execute(
             "ALTER TABLE tokens ADD COLUMN consecutive_403 INTEGER NOT NULL DEFAULT 0"
         )
+    # [v89.6] 隔离原因落库：mark_quarantined() 的 reason 写进这一列，
+    # 仪表盘据此区分「疑似过期 / 疑似禁言 / 其他隔离」并展示具体原因。
+    # 只在隔离路径写入，正常请求零接触。
+    if "quarantine_reason" not in existing_cols:
+        conn.execute("ALTER TABLE tokens ADD COLUMN quarantine_reason TEXT")
+    # [v89.6] 功能开关（管理员面板读写）：key-value 单表。
+    # 首个开关 effort_enhance：提示词增强（effort 指令）总开关，
+    # 缺省 ON（恢复 v77 设计意图）；关闭时聊天路径不再设置
+    # request_effort ContextVar，行为与本开关加入前逐字节一致。
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS settings (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        );
+    """)
     # [v77 P0-6 移植] usage 统计：每个"客户端可见成功"的完成轮一行，
     # 读取时按 天×掩码key 聚合。保留原始行而非预聚合计数器——
     # 失败的尝试没有行可记，"重试只计一次"成为结构性规则。
@@ -432,7 +447,19 @@ def _biz_data(payload, what="response"):
     payload = payload if isinstance(payload, dict) else {}
     code = payload.get("code")
     msg = payload.get("msg") or payload.get("message") or "empty biz_data"
-    status = 401 if re.search(r"login|auth|token|session|expire", str(msg), re.I) else 429
+    text = str(msg)
+    # [v89.6] 禁言/受限特征词先行：命中即映射 403——走 mark_limited 的
+    # 403 通道（冷却 + 连续 3 次才隔离），隔离后仪表盘显示「疑似禁言」。
+    # 修复"禁言账号在冷却到期后回到轮换、仪表盘显示正常"的问题。
+    # 关键词取长词避免子串误伤（banned 而非 ban——bandwidth；muted 而非
+    # mute——mute 按钮文案）。注意顺序：禁言消息里若恰好含 token/session
+    # 等词，仍以禁言归类优先（禁言是更准确的诊断）。
+    if re.search(r"禁言|违禁|违规|banned|muted|suspended|restricted|violation|violating", text, re.I):
+        status = 403
+    elif re.search(r"login|auth|token|session|expire", text, re.I):
+        status = 401
+    else:
+        status = 429
     raise UpstreamBizError(status, f"{what}: code={code} msg={msg}")
 
 
@@ -743,12 +770,16 @@ def mark_quarantined(token_id, reason):
 
     与 RATE_LIMITED 不同：此状态没有计时器——rate_limited_until 清空，
     pick_token() 的自动恢复永远不会把隔离行误认成冷却完毕的行。
+    [v89.6] reason 同步落库（quarantine_reason 列），仪表盘据此把
+    「疑似过期 / 疑似禁言 / 其他隔离」分开显示并给出对应的人话指引；
+    restore_token() 清空该列，避免旧原因在新状态下误导。
     """
     logger.warning("Token #%d QUARANTINED (manual return required): %s", token_id, reason)
     conn = get_db()
     conn.execute(
-        "UPDATE tokens SET status = ?, rate_limited_until = NULL WHERE id = ?",
-        ("QUARANTINED", token_id),
+        "UPDATE tokens SET status = ?, rate_limited_until = NULL, quarantine_reason = ? "
+        "WHERE id = ?",
+        ("QUARANTINED", str(reason or ""), token_id),
     )
     conn.commit()
     conn.close()
@@ -759,11 +790,12 @@ def restore_token(token_id):
 
     last_used 刻意不动——恢复的账号带着最旧的用量戳，
     idle-oldest 决胜会让它温和回到轮换，而不是被灌一波突发流量。
+    [v89.6] 同时清空 quarantine_reason：恢复后旧原因不应继续显示。
     """
     conn = get_db()
     conn.execute(
         "UPDATE tokens SET status = ?, rate_limited_until = NULL, "
-        "consecutive_403 = 0 WHERE id = ?",
+        "consecutive_403 = 0, quarantine_reason = NULL WHERE id = ?",
         ("ACTIVE", token_id),
     )
     conn.commit()
@@ -892,18 +924,32 @@ def get_pool_view():
     now = time.time()
     conn = get_db()
     rows = conn.execute(
-        "SELECT id, alias, status, rate_limited_until, last_used, consecutive_403, token "
-        "FROM tokens ORDER BY id"
+        "SELECT id, alias, status, rate_limited_until, last_used, consecutive_403, token, "
+        "quarantine_reason FROM tokens ORDER BY id"
     ).fetchall()
     conn.close()
 
     view = []
-    for tid, alias, status, until, last_used, streak, token in rows:
+    for tid, alias, status, until, last_used, streak, token, q_reason in rows:
         streak = streak or 0
         token_head = f"{(token or '')[:8]}…{((token or '')[-4:] if len(token or '') > 12 else '')}" if token else "—"
+        # [v89.6] 隔离分类：仪表盘据此区分「疑似过期 / 疑似禁言 / 其他」。
+        # 依据 mark_limited() 写入的 reason 文本——三种来源：
+        #   * v89.3 鉴权型业务错误："N consecutive auth-shaped business errors"
+        #   * 硬 401："upstream 401 (auth rejected)"
+        #   * 403 连击："N consecutive upstream 403s"
+        # 分类是纯读侧字符串判断，不新增任何写路径。
+        reason_kind = None
         if status == "QUARANTINED":
             state_class, cooldown = "err", "—"
             note = "quarantined — manual return required"
+            qr = str(q_reason or "")
+            if "auth-shaped" in qr or "auth rejected" in qr:
+                reason_kind = "expired"
+            elif "403" in qr:
+                reason_kind = "restricted"
+            else:
+                reason_kind = "other"
         elif status == "RATE_LIMITED" and until and until > now:
             state_class, cooldown = "warn", f"{_format_span(until - now)} left"
             note = "cooling down, recovers automatically"
@@ -916,20 +962,22 @@ def get_pool_view():
         if streak and status != "QUARANTINED":
             note = f"{note}, 403 streak {streak}"
         age = "never" if not last_used else f"{_format_span(now - last_used)} ago"
-        view.append(
-            {
-                "id": tid,
-                "label": alias if alias else f"untagged #{tid}",
-                "token_head": token_head,
-                "status": status,
-                "state_class": state_class,
-                "state_note": note,
-                "in_flight": _in_flight.get(tid, 0),
-                "last_used": age,
-                "cooldown": cooldown,
-                "can_restore": status == "QUARANTINED",
-            }
-        )
+        entry = {
+            "id": tid,
+            "label": alias if alias else f"untagged #{tid}",
+            "token_head": token_head,
+            "status": status,
+            "state_class": state_class,
+            "state_note": note,
+            "in_flight": _in_flight.get(tid, 0),
+            "last_used": age,
+            "cooldown": cooldown,
+            "can_restore": status == "QUARANTINED",
+        }
+        if reason_kind:
+            entry["reason_kind"] = reason_kind
+            entry["reason"] = str(q_reason or "")
+        view.append(entry)
     return view
 
 
@@ -1757,6 +1805,45 @@ def effort_level(body):
         if isinstance(c, str) and c.strip():
             return c.strip().lower()
     return None
+
+
+# ============ [v89.6] 提示词增强总开关（管理员面板可关） ============
+
+_effort_enhance_cache = None
+
+
+def get_effort_enhance():
+    """提示词增强是否开启。settings 表持久化，内存缓存；缺省 ON。
+
+    缺省 ON 是恢复 v77 设计意图（EFFORT_INSTRUCTIONS 从未在生产生效，
+    因为唯一的 set 点是一个 NameError）；关闭后聊天路径不再设置
+    request_effort ContextVar——build_prompt 的 _with_effort 读到的
+    是 default None，指令不附加，行为与本开关加入前逐字节一致。
+    """
+    global _effort_enhance_cache
+    if _effort_enhance_cache is None:
+        conn = get_db()
+        row = conn.execute(
+            "SELECT value FROM settings WHERE key = 'effort_enhance'"
+        ).fetchone()
+        conn.close()
+        _effort_enhance_cache = (row[0] != "off") if row else True
+    return _effort_enhance_cache
+
+
+def set_effort_enhance(enabled):
+    """写入开关（面板调用）：settings 表 + 立即刷新内存缓存。"""
+    global _effort_enhance_cache
+    conn = get_db()
+    conn.execute(
+        "INSERT INTO settings (key, value) VALUES ('effort_enhance', ?) "
+        "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        ("on" if enabled else "off",),
+    )
+    conn.commit()
+    conn.close()
+    _effort_enhance_cache = bool(enabled)
+    return _effort_enhance_cache
 
 
 def parse_tools(text):
