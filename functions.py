@@ -3115,8 +3115,23 @@ def _salvage_tool_markup(text, tools_hint=None):
     闭包丢失导致 _SALVAGE_PARAM_RE 全体失配、抢救链整体失效）。无法
     修复的块原样保留（交由既有 malformed 判定）。未发生任何修复时返回值
     与入参逐字节相同。tools_hint 为本轮 OpenAI 工具表（缺省读
-    request_tools ContextVar）。"""
-    if not text or "DSML" not in text:
+    request_tools ContextVar）。
+
+    [v89.5] 新增第六种病灶的自动修复：裸 JSON 工具调用（包裹标签整个
+    丢失，v89.4 实证形态）。四道闸门（恰好一个 JSON / 工具名命中本轮
+    工具表 / arguments 为字典 / schema required 全覆盖）全过才补
+    <tool_call> 包裹，随后解析、白名单校验、投递全部走既有链——不新增
+    任何执行路径。任一闸门不过则逐字节原样返回（下限= v89.4 的 v62
+    诊断续写兜底）。含 DSML 字样的文本不进本分支（arguments 值内嵌
+    DSML 标记的裸调用不做重序列化，避免给 parse_tools 子正则引入新输入
+    形态），照旧走 v89.4 续写。"""
+    if not text:
+        return text
+    if "DSML" not in text:
+        _bare = _parse_bare_tool_call(text, tools_hint)
+        if _bare is not None and _bare_tool_call_schema_ok(_bare, tools_hint):
+            logger.warning("[v89.5] bare-JSON tool call salvaged -> re-wrapped as <tool_call>")
+            return "<tool_call>\n" + json.dumps(_bare, ensure_ascii=False) + "\n</tool_call>"
         return text
 
     def _hidden_in(f_spans, t_spans, pos):
@@ -3277,50 +3292,84 @@ def _has_unswallowed_tool_markup(text: str) -> bool:
     return not tools
 
 
-def _is_bare_tool_call_attempt(text: str) -> bool:
-    """[v89.4] 整段正文是否就是一个「丢了包裹标签的工具调用」。
+def _parse_bare_tool_call(text: str, tools_hint=None):
+    """[v89.5] 裸 JSON 工具调用判定的解析版：命中返回该调用 dict，否则 None。
 
     生产实证 2026-11-05 00:23：模型把工具调用输出成裸 JSON（无
     <tool_call> 包裹、无代码围栏，arguments 里还多了客户端 schema 的
     tool_title 字段）。六级解析阶梯全部要求标签或围栏，裸 JSON 判不出
     工具、原样漏进正文；模型自认为已调用完毕直接收尾，客户端只见泄露
-    生肉、无任何可执行调用，会话停摆。命中本判定时抛 malformed_tool_call
-    走 v62 诊断续写：桥接层不执行任何东西，只把写坏的调用退回给模型，
-    由模型依诊断词决定重发正确调用还是改给最终答案。
+    生肉、无任何可执行调用，会话停摆。
 
     判定取最严形态，正常路径零影响：
     * 剥掉 think 后整段正文恰好是一个 JSON 对象（多一个字都不命中）；
-    * 顶层 "name" 为非空字符串且命中本轮请求真实工具表（request_tools，
-      与抢救层同一提取口径：function.name 优先，裸 name 兜底）；以下划线
-      开头的残名拒收（v66 同规）；
+    * 顶层 "name" 为非空字符串且命中本轮请求真实工具表（tools_hint，
+      缺省与抢救层同一提取口径：function.name 优先，裸 name 兜底；以下
+      划线开头的残名拒收，v66 同规）；
     * 顶层 "arguments" 必须是字典（教学格式必有该键；缺失视为歧义，
       维持现状不触发）；
-    * 本轮请求未携带工具表时直接 False——无工具的普通对话里任何 JSON
+    * 本轮请求未携带工具表时直接 None——无工具的普通对话里任何 JSON
       输出一律照旧。
+
+    v89.4 用它做布尔判定（命中 -> v62 诊断续写）；v89.5 起抢救层用它
+    做修复前置判定（命中且过 schema 闸门 -> 补 <tool_call> 包裹自动
+    修复，不过 -> 仍走 v89.4 续写）。
     """
     if not text or not text.strip():
-        return False
+        return None
     stripped = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
     if not (stripped.startswith("{") and stripped.endswith("}")):
-        return False
+        return None
     try:
         data = json.loads(stripped)
     except Exception:
-        return False
+        return None
     if not isinstance(data, dict):
-        return False
+        return None
     name = data.get("name")
     if not isinstance(name, str) or not name.strip() or name.lstrip().startswith("_"):
-        return False
+        return None
     if not isinstance(data.get("arguments"), dict):
-        return False
-    for t in request_tools.get() or []:
+        return None
+    hint = tools_hint if tools_hint is not None else request_tools.get()
+    for t in hint or []:
         if not isinstance(t, dict):
             continue
         fn = t.get("function") or t
         if isinstance(fn, dict) and fn.get("name") == name:
-            return True
+            return data
+    return None
+
+
+def _bare_tool_call_schema_ok(data, tools_hint=None):
+    """[v89.5] 裸 JSON 自动修复的 schema 闸门（v80 抢救层同规）。
+
+    命中工具在本轮工具表里的 required 参数必须全部出现在 arguments 中
+    ——名字对得上但必填参数不齐的「修复」必然在派发层失败，与其产出
+    注定失败的调用不如退回 v89.4 续写让模型重写。required 缺失/为空、
+    工具表查不到该工具（防御：理论上 _parse_bare_tool_call 已保证命中）
+    时视为通过，不凭空收紧。arguments 的多余键（如 tool_title）不拒
+    ——与正常调用同路，由客户端 schema 校验兜底。"""
+    name = data.get("name")
+    hint = tools_hint if tools_hint is not None else request_tools.get()
+    for t in hint or []:
+        if not isinstance(t, dict):
+            continue
+        fn = t.get("function") or t
+        if not isinstance(fn, dict) or fn.get("name") != name:
+            continue
+        req = ((fn.get("parameters") or {}).get("required")) or []
+        args = data.get("arguments") or {}
+        return set(req) <= set(args.keys())
     return False
+
+
+def _is_bare_tool_call_attempt(text: str) -> bool:
+    """[v89.4] 整段正文是否就是一个「丢了包裹标签的工具调用」。
+
+    v89.5 起核心判定移入 _parse_bare_tool_call（解析版，抢救层复用）；
+    本函数保留为薄壳，FINISHED 处 v89.4 兜底续写分支原样使用。"""
+    return _parse_bare_tool_call(text) is not None
 
 
 def _body_has_real_content(text: str) -> bool:
