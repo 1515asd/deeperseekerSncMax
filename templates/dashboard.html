@@ -50,6 +50,7 @@
   .b-ok{color:var(--green);background:rgba(40,205,65,.14)}
   .b-warn{color:var(--orange);background:rgba(255,149,0,.14)}
   .b-err{color:var(--red);background:rgba(255,59,48,.14)}
+  .b-blue{color:var(--blue);background:rgba(10,132,255,.16)}
   .b-idle{color:var(--p2);background:var(--div)}
   button,.btn{background:var(--blue);color:#fff;border:0;border-radius:var(--r-sm);padding:8px 18px;cursor:pointer;
               font-size:13px;font-weight:600;font-family:var(--font);transition:background var(--tr),transform var(--tr)}
@@ -99,12 +100,17 @@
   <div class="card"><div class="num" id="d-cookie">—</div><div class="lbl">Backup cookie</div></div>
 </div>
 
-<h2>Token pool<span class="sec"><span class="badge b-ok">Active</span> <span class="badge b-warn">Rate-limited</span> <span class="badge b-err">Quarantined</span></span></h2>
+<h2>Token pool<span class="sec"><span class="badge b-ok">Active</span> <span class="badge b-blue">Cooling down</span> <span class="badge b-warn">Likely muted</span> <span class="badge b-err">Likely expired</span> <span class="badge b-err">Quarantined</span></span></h2>
 <div class="wrap">
 <table id="pool">
-  <thead><tr><th>ID</th><th>Alias</th><th>Token</th><th>Status</th><th>Note</th><th>In-flight</th><th>Last used</th><th>Cooldown</th><th>Actions</th></tr></thead>
+  <thead><tr><th>ID</th><th>Alias</th><th>Token</th><th>Status</th><th>What this means</th><th>In-flight</th><th>Last used</th><th>Cooldown</th><th>Actions</th></tr></thead>
   <tbody></tbody>
 </table>
+</div>
+<div class="warning" style="margin-top:12px;line-height:1.7">
+  <strong>When do tokens expire?</strong> Unpredictably — DeepSeek's server decides, and there is no way to know in advance. Expired tokens surface as <code>401</code> or <code>503 No tokens available</code> on the client.<br>
+  <strong>Can't tell expired from muted?</strong> Log into <a href="https://chat.deepseek.com" target="_blank">chat.deepseek.com</a> with that account: a re-login prompt = expired; a mute notice when sending = muted; normal chatting = false positive, just press "Restore".<br>
+  <strong>Safe to try:</strong> the "Restore" button is always safe — a truly dead token simply re-quarantines automatically, no harm done.
 </div>
 
 <h2>Usage statistics<span class="sec">By day × API key</span></h2>
@@ -117,7 +123,8 @@
 
 <section>
   <h2>Add an auth token</h2>
-  <div class="warning">A token is equivalent to your DeepSeek account: paste it only into your own dashboard, never share it. Logging out of DeepSeek in the browser invalidates it.</div>
+  <div class="warning">A token is equivalent to your DeepSeek account: paste it only into your own dashboard, never share it. Logging out of DeepSeek in the browser invalidates it.<br>
+  <strong>Token lifetime is unpredictable</strong> — it can expire at any time. When the status column shows "Likely expired", extract a fresh token using the methods below and add it; then delete the old one.</div>
   <div class="card" style="padding:20px">
     <form method="post" action="/tokens/add" style="display:flex;gap:10px;flex-wrap:wrap">
       <input type="text" name="alias" placeholder="Alias (optional, e.g. alt-1)" style="width:200px">
@@ -177,6 +184,20 @@ if (out) { completion(out); } else { completion('Nothing found: make sure Safari
     <p>Anthropic-compatible endpoint: <code id="ep-anthropic">…</code></p>
     <p>Default model: <code>deepseek-v4.1-flash</code> (other exposed models can be requested per call)</p>
     <p class="hint">Point any OpenAI / Anthropic-compatible client (Claude Code, Cherry Studio, Open WebUI, etc.) at either address above and it just works.</p>
+    <p><button class="btn-sm btn-ghost" onclick="checkLink()">Check link</button> <span id="link-result" class="hint">Not checked</span></p>
+    <p class="hint">This check verifies the "dashboard → upstream" link (incl. PoW). For the client API, the most truthful check is simply sending one message from your client.</p>
+  </div>
+</section>
+
+<section>
+  <h2>Feature toggles</h2>
+  <div class="card info-card" style="padding:20px">
+    <p style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin:0">
+      <strong>Prompt enhancement</strong>
+      <span id="effort-state" class="badge b-idle">…</span>
+      <button id="effort-btn" class="btn-sm btn-ghost" onclick="toggleEffort()">…</button>
+    </p>
+    <p class="hint" style="margin-top:10px">What it does: when a client request carries an effort tier (e.g. reasoning_effort=max), an extra "think carefully, verify from multiple angles, double-check" instruction is attached so answers come out deeper — at the cost of slightly more latency and tokens. <strong>When off</strong>, replies follow the model's default behavior exactly (identical to the previous release). Takes effect immediately, no restart needed.</p>
   </div>
 </section>
 
@@ -189,15 +210,37 @@ async function refreshPool() {
     const pool = await fetch('/v1/pool').then(r => r.json());
     const tb = document.querySelector('#pool tbody'); tb.innerHTML = '';
     let flight = 0;
+    // [v89.6] Five color-coded states + human-readable notes: the backend
+    // classifies via reason_kind, the frontend only maps presentation.
+    const KIND_LABEL = {expired: 'Likely expired', restricted: 'Likely muted', other: 'Quarantined'};
+    const KIND_BADGE = {expired: 'b-err', restricted: 'b-warn', other: 'b-err'};
+    const KIND_NOTE = {
+      expired: 'DeepSeek no longer accepts this token (expired or logged out). Extract a fresh token and add it (methods below) — pressing "Restore" will not help.',
+      restricted: 'The account is likely temporarily restricted (muted). Once the mute is lifted, press "Restore" to return it to service; if the account chats fine on the website, it was a false positive — just press "Restore".',
+      other: 'Quarantined. See the concrete reason below; press "Restore" once the upstream is healthy, or verify first per the guide above.',
+    };
     for (const t of (pool.pool || [])) {
       flight += t.in_flight || 0;
-      const cls = t.state_class || '';
-      const badge = cls.includes('ok') ? 'b-ok' : cls.includes('warn') ? 'b-warn' : cls.includes('err') ? 'b-err' : 'b-idle';
+      const kind = t.reason_kind || null;
+      let badge, stLabel, note;
+      if (t.status === 'ACTIVE') {
+        badge = 'b-ok'; stLabel = 'Active'; note = 'In rotation, working normally';
+      } else if (t.status === 'RATE_LIMITED') {
+        badge = 'b-blue'; stLabel = 'Cooling down';
+        note = 'Requests came too fast; pauses briefly and recovers automatically (' + (t.cooldown || '—') + '). No action needed';
+      } else if (kind === 'expired') {
+        badge = KIND_BADGE[kind]; stLabel = KIND_LABEL[kind]; note = KIND_NOTE[kind];
+      } else if (kind === 'restricted') {
+        badge = KIND_BADGE[kind]; stLabel = KIND_LABEL[kind]; note = KIND_NOTE[kind];
+      } else {
+        badge = 'b-err'; stLabel = 'Quarantined';
+        note = KIND_NOTE.other + (t.reason ? ' Reason: ' + t.reason : '');
+      }
       const tr = document.createElement('tr');
       tr.innerHTML = `<td>${t.id}</td><td>${esc(t.label)}</td>`
         + `<td><code>${esc(t.token_head || '—')}</code></td>`
-        + `<td><span class="badge ${badge}">${esc(t.status)}</span></td>`
-        + `<td>${esc(t.state_note)}</td><td>${t.in_flight}</td>`
+        + `<td><span class="badge ${badge}">${esc(stLabel)}</span></td>`
+        + `<td style="white-space:normal;min-width:220px">${esc(note)}</td><td>${t.in_flight}</td>`
         + `<td>${esc(t.last_used)}</td><td>${esc(t.cooldown)}</td>`
         + `<td>${t.can_restore ? `<button class="btn-sm" onclick="restore(${t.id})">Restore</button> ` : ''}`
         + `<button class="btn-sm btn-danger" onclick="del(${t.id})">Delete</button></td>`;
@@ -258,7 +301,46 @@ async function del(id) { if (!confirm('Remove this token from the pool?')) retur
   document.getElementById('ep-anthropic').textContent = base;
 })();
 
-refreshPool(); refreshUsage(); refreshDeep();
+// [v89.6] Feature toggle: prompt enhancement (effort instructions).
+async function refreshEffort() {
+  try {
+    const d = await fetch('/v1/features/effort-enhance').then(r => r.json());
+    renderEffort(d.effort_enhance);
+  } catch (e) { console.error('effort', e); }
+}
+function renderEffort(on) {
+  const st = document.getElementById('effort-state');
+  const btn = document.getElementById('effort-btn');
+  st.textContent = on ? 'On' : 'Off';
+  st.className = 'badge ' + (on ? 'b-ok' : 'b-idle');
+  btn.textContent = on ? 'Turn off' : 'Turn on';
+  btn.dataset.on = on ? '1' : '0';
+}
+async function toggleEffort() {
+  const btn = document.getElementById('effort-btn');
+  const on = btn.dataset.on === '1';
+  try {
+    const r = await fetch('/v1/features/effort-enhance', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({enabled: !on})}).then(r => r.json());
+    renderEffort(r.effort_enhance);
+  } catch (e) { console.error('effort toggle', e); }
+}
+
+// [v89.6] API section: link check (reuses the existing deep-probe endpoint).
+async function checkLink() {
+  const el = document.getElementById('link-result');
+  el.textContent = 'Checking…';
+  try {
+    const d = await fetch('/v1/admin/stats').then(r => r.json());
+    const up = d.deep || {};
+    if (up.upstream_reachable && up.pow_ok) {
+      el.innerHTML = '✅ Link healthy · end-to-end latency ' + esc(String(up.latency_ms ?? '—')) + ' ms';
+    } else {
+      el.innerHTML = '❌ Unhealthy' + (up.reason ? ': ' + esc(up.reason) : '') + ' — if a token shows "Likely expired", replace it';
+    }
+  } catch (e) { el.textContent = '❌ Check request failed: ' + e; }
+}
+
+refreshPool(); refreshUsage(); refreshDeep(); refreshEffort();
 setInterval(refreshPool, 10000);
 setInterval(refreshUsage, 10000);
 setInterval(refreshDeep, 30000);

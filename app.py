@@ -212,9 +212,12 @@ from functions import (
     mark_active,
     is_context_limit_error,
     record_usage,
+    restore_token,
     usage_by_day_key,
     get_pool_view,
     effort_level,
+    get_effort_enhance,
+    set_effort_enhance,
     request_effort as _request_effort,
     request_tools as _request_tools,
     parse_tools,
@@ -2286,11 +2289,22 @@ async def files_upload(request: Request):
     # [v77 PR#72 audit fix] The effort tier is set here (previously the chain
     # was broken: request_effort was never set and the max-tier instructions
     # never attached)
-    _request_effort.set(effort_level(body) if isinstance(body, dict) else None)
+    # [v89.6] That line referenced an undefined `body` — this endpoint raised
+    # NameError 500 on every call (production-verified 2026-11-05). The JSON
+    # body is parsed only when the client actually sent JSON — multipart
+    # upload bodies are not JSON and read as None. The effort set goes through
+    # _apply_effort (gated by the dashboard toggle).
+    _req_body = None
+    if request.headers.get("content-type", "").startswith("application/json"):
+        try:
+            _req_body = await request.json()
+        except Exception:
+            _req_body = None
+    _apply_effort(_req_body if isinstance(_req_body, dict) else {})
     # [v77 P0-7] Explicit mode switch: with DEEPSEEKER_MODE=official, use the
     # official API; no silent fallback.
     if official_api.official_mode_enabled():
-        _body = await request.json()
+        _body = _req_body if isinstance(_req_body, dict) else await request.json()
         return await _official_chat_response(
             _body, _body.get("model") or "deepseek-chat",
             bool(_body.get("stream")), _body.get("tools"), request)
@@ -2460,6 +2474,22 @@ def is_thinking_enabled(body, request=None):
     return True
 
 
+def _apply_effort(body):
+    """[v89.6] Effort tier setting, gated by the dashboard toggle.
+
+    The v77 EFFORT_INSTRUCTIONS (plain-language strengthening instructions for
+    tiers such as reasoning_effort=max) never took effect in production — the
+    only set site referenced an undefined name. This helper wires the chain up
+    but keeps the settings-table effort_enhance switch as the master gate: when
+    OFF the ContextVar is never set, _with_effort reads the default None, no
+    instruction is attached, and behavior is byte-identical to the pre-toggle
+    release (truly off — not "set then skip"). All three chat entries (OpenAI
+    completions / responses / Anthropic messages) and files_upload go through
+    here."""
+    if get_effort_enhance():
+        _request_effort.set(effort_level(body))
+
+
 # DeepSeek now serves a single model (v4.1flash) as the website default.
 # Every request — whatever model name the client sends, including legacy
 # aliases (instant, expert, vision, anthropic/claude-*) — is served by it.
@@ -2562,6 +2592,7 @@ async def chat_completions(request: Request):
     messages = body.get("messages", [])
     model = resolve_model(body.get("model"))
     thinking = is_thinking_enabled(body, request)
+    _apply_effort(body)
     search = body.get("search", False)
     stream = body.get("stream", False)
     tools = body.get("tools", None)
@@ -2627,6 +2658,7 @@ async def openai_responses(request: Request):
     messages = _responses_input_to_messages(inputs)
 
     thinking = is_thinking_enabled(body, request)
+    _apply_effort(body)
     search = body.get("search", False)
     stream = body.get("stream", False)
     tools = body.get("tools", None)
@@ -2743,6 +2775,7 @@ async def anthropic_messages(request: Request):
     model = resolve_model(body.get("model"))
 
     thinking = is_thinking_enabled(body, request)
+    _apply_effort(body)
     stream = body.get("stream", False)
     tools = body.get("tools", [])
 
@@ -2981,6 +3014,37 @@ async def v1_pool_restore(request: Request):
     return JSONResponse({"ok": True, "token_id": token_id})
 
 
+@app.get("/v1/features/effort-enhance")
+async def v1_effort_enhance_get(request: Request):
+    """[v89.6] Current prompt-enhancement toggle state (admin)."""
+    try:
+        get_current_admin(request)
+    except HTTPException:
+        return HTMLResponse("<meta http-equiv='refresh' content='0;url=/login'>")
+    return JSONResponse({"effort_enhance": await _db(get_effort_enhance)})
+
+
+@app.post("/v1/features/effort-enhance")
+async def v1_effort_enhance_set(request: Request):
+    """[v89.6] Prompt enhancement toggle (admin): {"enabled": true|false}.
+
+    Writes the settings table and refreshes the in-memory cache immediately —
+    the next request honors it, no restart needed. When OFF the chat path
+    never sets the effort ContextVar, byte-identical to the pre-toggle
+    release."""
+    try:
+        get_current_admin(request)
+    except HTTPException:
+        return HTMLResponse("<meta http-equiv='refresh' content='0;url=/login'>")
+    try:
+        body = await request.json()
+        enabled = bool(body.get("enabled"))
+    except Exception:
+        return JSONResponse({"error": "enabled (bool) required"}, status_code=400)
+    value = await _db(set_effort_enhance, enabled)
+    return JSONResponse({"ok": True, "effort_enhance": value})
+
+
 @app.get("/pool")
 async def pool_dashboard(request: Request):
     """[v86] The old pool page has been merged into the unified dashboard
@@ -3049,12 +3113,13 @@ async def v1_admin_stats(request: Request):
         cookies_valid = False
     probe = await _deep_health_probe()
     return JSONResponse({
-        "version": "v86",
+        "version": "v89.6",
         "active_tokens": active,
         "total_tokens": len(tokens),
         "sessions": sessions,
         "today": today,
         "cookies_valid": cookies_valid,
+        "effort_enhance": await _db(get_effort_enhance),
         "deep": probe,
     })
 

@@ -196,6 +196,23 @@ def init_db():
         conn.execute(
             "ALTER TABLE tokens ADD COLUMN consecutive_403 INTEGER NOT NULL DEFAULT 0"
         )
+    # [v89.6] Quarantine reason persistence: mark_quarantined() stores its
+    # reason here; the dashboard separates "likely expired / likely muted /
+    # other" by it and shows the concrete reason. Written only on the
+    # quarantine path — zero contact with normal request handling.
+    if "quarantine_reason" not in existing_cols:
+        conn.execute("ALTER TABLE tokens ADD COLUMN quarantine_reason TEXT")
+    # [v89.6] Feature toggles (read/written from the admin dashboard):
+    # a single key-value table. First toggle: effort_enhance — the prompt
+    # enhancement (effort instructions) master switch, defaulting to ON
+    # (restoring the v77 design intent); when OFF the chat path never sets
+    # the request_effort ContextVar, byte-identical to pre-toggle behavior.
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS settings (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        );
+    """)
     # [v77 P0-6 port] Usage stats: one row per completed turn that is
     # "client-visible success", aggregated by day x masked key at read time.
     # Raw rows are kept instead of pre-aggregated counters — failed attempts
@@ -453,7 +470,21 @@ def _biz_data(payload, what="response"):
     payload = payload if isinstance(payload, dict) else {}
     code = payload.get("code")
     msg = payload.get("msg") or payload.get("message") or "empty biz_data"
-    status = 401 if re.search(r"login|auth|token|session|expire", str(msg), re.I) else 429
+    text = str(msg)
+    # [v89.6] Mute/restriction keywords first: a hit maps to 403 — riding
+    # mark_limited()'s 403 channel (cooldown + quarantine only after 3
+    # consecutive), after which the dashboard shows "likely muted". Fixes
+    # muted accounts cycling cooldown and looking healthy on the dashboard.
+    # Long words only, to avoid substring collateral (banned, not ban —
+    # bandwidth; muted, not mute). Note the order: if a mute message happens
+    # to contain token/session words, mute still wins (the more precise
+    # diagnosis).
+    if re.search(r"禁言|违禁|违规|banned|muted|suspended|restricted|violation|violating", text, re.I):
+        status = 403
+    elif re.search(r"login|auth|token|session|expire", text, re.I):
+        status = 401
+    else:
+        status = 429
     raise UpstreamBizError(status, f"{what}: code={code} msg={msg}")
 
 
@@ -771,12 +802,17 @@ def mark_quarantined(token_id, reason):
     Unlike RATE_LIMITED, this state has no timer — rate_limited_until is
     cleared, so pick_token()'s auto-recovery can never mistake a quarantined
     row for one that finished cooling down.
+    [v89.6] The reason is persisted to the quarantine_reason column; the
+    dashboard uses it to separate "likely expired / likely muted / other"
+    with per-state plain-language guidance. restore_token() clears the
+    column so a stale reason never mislabels a fresh state.
     """
     logger.warning("Token #%d QUARANTINED (manual return required): %s", token_id, reason)
     conn = get_db()
     conn.execute(
-        "UPDATE tokens SET status = ?, rate_limited_until = NULL WHERE id = ?",
-        ("QUARANTINED", token_id),
+        "UPDATE tokens SET status = ?, rate_limited_until = NULL, quarantine_reason = ? "
+        "WHERE id = ?",
+        ("QUARANTINED", str(reason or ""), token_id),
     )
     conn.commit()
     conn.close()
@@ -789,11 +825,13 @@ def restore_token(token_id):
     last_used is deliberately left untouched — the restored account carries
     the oldest usage stamp, so the idle-oldest tie-break eases it back into
     rotation instead of flooding it with a burst of traffic.
+    [v89.6] Also clears quarantine_reason: a restored account must not keep
+    displaying the stale reason of its previous state.
     """
     conn = get_db()
     conn.execute(
         "UPDATE tokens SET status = ?, rate_limited_until = NULL, "
-        "consecutive_403 = 0 WHERE id = ?",
+        "consecutive_403 = 0, quarantine_reason = NULL WHERE id = ?",
         ("ACTIVE", token_id),
     )
     conn.commit()
@@ -931,18 +969,33 @@ def get_pool_view():
     now = time.time()
     conn = get_db()
     rows = conn.execute(
-        "SELECT id, alias, status, rate_limited_until, last_used, consecutive_403, token "
-        "FROM tokens ORDER BY id"
+        "SELECT id, alias, status, rate_limited_until, last_used, consecutive_403, token, "
+        "quarantine_reason FROM tokens ORDER BY id"
     ).fetchall()
     conn.close()
 
     view = []
-    for tid, alias, status, until, last_used, streak, token in rows:
+    for tid, alias, status, until, last_used, streak, token, q_reason in rows:
         streak = streak or 0
         token_head = f"{(token or '')[:8]}…{((token or '')[-4:] if len(token or '') > 12 else '')}" if token else "—"
+        # [v89.6] Quarantine classification: the dashboard separates
+        # "likely expired / likely muted / other" by it. Based on the reason
+        # text mark_limited() writes — three sources:
+        #   * v89.3 auth-shaped biz errors: "N consecutive auth-shaped ..."
+        #   * hard 401: "upstream 401 (auth rejected)"
+        #   * 403 streaks: "N consecutive upstream 403s"
+        # Purely read-side string matching; no new write path.
+        reason_kind = None
         if status == "QUARANTINED":
             state_class, cooldown = "err", "—"
             note = "quarantined — manual return required"
+            qr = str(q_reason or "")
+            if "auth-shaped" in qr or "auth rejected" in qr:
+                reason_kind = "expired"
+            elif "403" in qr:
+                reason_kind = "restricted"
+            else:
+                reason_kind = "other"
         elif status == "RATE_LIMITED" and until and until > now:
             state_class, cooldown = "warn", f"{_format_span(until - now)} left"
             note = "cooling down, recovers automatically"
@@ -955,20 +1008,22 @@ def get_pool_view():
         if streak and status != "QUARANTINED":
             note = f"{note}, 403 streak {streak}"
         age = "never" if not last_used else f"{_format_span(now - last_used)} ago"
-        view.append(
-            {
-                "id": tid,
-                "label": alias if alias else f"untagged #{tid}",
-                "token_head": token_head,
-                "status": status,
-                "state_class": state_class,
-                "state_note": note,
-                "in_flight": _in_flight.get(tid, 0),
-                "last_used": age,
-                "cooldown": cooldown,
-                "can_restore": status == "QUARANTINED",
-            }
-        )
+        entry = {
+            "id": tid,
+            "label": alias if alias else f"untagged #{tid}",
+            "token_head": token_head,
+            "status": status,
+            "state_class": state_class,
+            "state_note": note,
+            "in_flight": _in_flight.get(tid, 0),
+            "last_used": age,
+            "cooldown": cooldown,
+            "can_restore": status == "QUARANTINED",
+        }
+        if reason_kind:
+            entry["reason_kind"] = reason_kind
+            entry["reason"] = str(q_reason or "")
+        view.append(entry)
     return view
 
 
@@ -1863,6 +1918,48 @@ def effort_level(body):
         if isinstance(c, str) and c.strip():
             return c.strip().lower()
     return None
+
+
+# ============ [v89.6] Prompt enhancement master switch (admin toggle) ============
+
+_effort_enhance_cache = None
+
+
+def get_effort_enhance():
+    """Whether prompt enhancement is enabled. Persisted in the settings
+    table, cached in memory; defaults to ON.
+
+    ON restores the v77 design intent (EFFORT_INSTRUCTIONS never took effect
+    in production because the only set site referenced an undefined name).
+    When OFF the chat path never sets the request_effort ContextVar —
+    build_prompt's _with_effort reads the default None, no instruction is
+    attached, and behavior is byte-identical to the pre-toggle release.
+    """
+    global _effort_enhance_cache
+    if _effort_enhance_cache is None:
+        conn = get_db()
+        row = conn.execute(
+            "SELECT value FROM settings WHERE key = 'effort_enhance'"
+        ).fetchone()
+        conn.close()
+        _effort_enhance_cache = (row[0] != "off") if row else True
+    return _effort_enhance_cache
+
+
+def set_effort_enhance(enabled):
+    """Write the toggle (dashboard call): settings table + immediate cache
+    refresh."""
+    global _effort_enhance_cache
+    conn = get_db()
+    conn.execute(
+        "INSERT INTO settings (key, value) VALUES ('effort_enhance', ?) "
+        "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        ("on" if enabled else "off",),
+    )
+    conn.commit()
+    conn.close()
+    _effort_enhance_cache = bool(enabled)
+    return _effort_enhance_cache
 
 
 def parse_tools(text):
