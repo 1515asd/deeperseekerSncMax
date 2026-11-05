@@ -3323,8 +3323,26 @@ def _salvage_tool_markup(text, tools_hint=None):
     and defeated the whole salvage chain). Blocks that cannot be repaired are
     left as-is (left to the existing malformed handling). With no repair made,
     the return value is byte-identical to the input. tools_hint is this turn's
-    OpenAI tool list (defaults to the request_tools ContextVar)."""
-    if not text or "DSML" not in text:
+    OpenAI tool list (defaults to the request_tools ContextVar).
+
+    [v89.5] Adds auto-repair for the sixth lesion: a bare-JSON tool call (the
+    wrapper tags lost entirely, the v89.4 production shape). Only when all
+    four gates pass (exactly one JSON object / tool name matches this turn's
+    tool table / arguments is a dict / all schema-required fields present)
+    does this re-wrap the lost <tool_call> tags; parsing, whitelist checks
+    and delivery then flow through the existing chain — no new execution
+    path is added. If any gate fails, the input is returned byte-identical
+    (floor = the v89.4 v62 diagnostic-continue fallback). Text containing
+    "DSML" never enters this branch (a bare call with DSML markup embedded
+    in an argument value is not re-serialized, avoiding any new input shape
+    for the parse_tools sub-regexes); it keeps riding the v89.4 continuation."""
+    if not text:
+        return text
+    if "DSML" not in text:
+        _bare = _parse_bare_tool_call(text, tools_hint)
+        if _bare is not None and _bare_tool_call_schema_ok(_bare, tools_hint):
+            logger.warning("[v89.5] bare-JSON tool call salvaged -> re-wrapped as <tool_call>")
+            return "<tool_call>\n" + json.dumps(_bare, ensure_ascii=False) + "\n</tool_call>"
         return text
 
     def _hidden_in(f_spans, t_spans, pos):
@@ -3500,9 +3518,9 @@ def _has_unswallowed_tool_markup(text: str) -> bool:
     return not tools
 
 
-def _is_bare_tool_call_attempt(text: str) -> bool:
-    """[v89.4] Whether the ENTIRE body is a tool call that lost its wrapper
-    tags.
+def _parse_bare_tool_call(text: str, tools_hint=None):
+    """[v89.5] Parsing form of the bare-JSON tool-call check: returns the call
+    dict on hit, None otherwise.
 
     Production case 2026-11-05 00:23: the model emitted a tool call as a
     bare JSON object (no <tool_call> wrapper, no code fence, plus a
@@ -3510,46 +3528,86 @@ def _is_bare_tool_call_attempt(text: str) -> bool:
     parse ladder requires a tag or a fence, so the JSON stayed in the body
     as plain text; the model ended its turn believing it had called, and
     the client was left with a visible leak and no executable call - a
-    stalled session. On hit we raise malformed_tool_call and ride the v62
-    diagnostic continuation: the bridge executes nothing itself, it just
-    hands the botched call back to the model, which either re-emits it
-    properly or gives a final answer per the diagnostic prompt.
+    stalled session.
 
     Strictest possible shape, zero impact on normal paths:
     * after stripping think blocks, the whole body is exactly one JSON
       object (one extra character fails the check);
     * top-level "name" is a non-empty string matching a tool in the
-      current request's tool table (request_tools, same extraction as the
-      salvage layer: function.name first, bare name fallback); underscore
-      residue names rejected (v66 rule);
+      current request's tool table (tools_hint, defaulting to the same
+      extraction as the salvage layer: function.name first, bare name
+      fallback); underscore residue names rejected (v66 rule);
     * top-level "arguments" must be a dict (the taught format always has
       it; absence is ambiguous - keep the status quo, no trigger);
-    * no tool table on this request -> always False; any JSON output in a
+    * no tool table on this request -> always None; any JSON output in a
       tool-less conversation is untouched.
+
+    v89.4 uses it as a boolean check (hit -> v62 diagnostic continue);
+    from v89.5 on the salvage layer uses it as the repair precondition
+    (hit + schema gate -> re-wrap <tool_call> for auto-repair; gate
+    failure -> still rides the v89.4 continuation).
     """
     if not text or not text.strip():
-        return False
+        return None
     stripped = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
     if not (stripped.startswith("{") and stripped.endswith("}")):
-        return False
+        return None
     try:
         data = json.loads(stripped)
     except Exception:
-        return False
+        return None
     if not isinstance(data, dict):
-        return False
+        return None
     name = data.get("name")
     if not isinstance(name, str) or not name.strip() or name.lstrip().startswith("_"):
-        return False
+        return None
     if not isinstance(data.get("arguments"), dict):
-        return False
-    for t in request_tools.get() or []:
+        return None
+    hint = tools_hint if tools_hint is not None else request_tools.get()
+    for t in hint or []:
         if not isinstance(t, dict):
             continue
         fn = t.get("function") or t
         if isinstance(fn, dict) and fn.get("name") == name:
-            return True
+            return data
+    return None
+
+
+def _bare_tool_call_schema_ok(data, tools_hint=None):
+    """[v89.5] Schema gate for bare-JSON auto-repair (same rule as the v80
+    salvage layer).
+
+    Every required parameter of the matched tool in this turn's tool table
+    must appear in arguments — a "repair" whose name matches but whose
+    required params are missing is doomed to fail at dispatch; better fall
+    back to the v89.4 continuation and let the model rewrite. Missing/empty
+    required lists, or the tool not found in the table (defensive: in
+    theory _parse_bare_tool_call already guarantees the match) count as a
+    pass — never tighten without cause. Extra keys in arguments (e.g.
+    tool_title) are not rejected — same road as a normal call, backed by
+    the client's schema validation."""
+    name = data.get("name")
+    hint = tools_hint if tools_hint is not None else request_tools.get()
+    for t in hint or []:
+        if not isinstance(t, dict):
+            continue
+        fn = t.get("function") or t
+        if not isinstance(fn, dict) or fn.get("name") != name:
+            continue
+        req = ((fn.get("parameters") or {}).get("required")) or []
+        args = data.get("arguments") or {}
+        return set(req) <= set(args.keys())
     return False
+
+
+def _is_bare_tool_call_attempt(text: str) -> bool:
+    """[v89.4] Whether the ENTIRE body is a tool call that lost its wrapper
+    tags.
+
+    From v89.5 on, the core check lives in _parse_bare_tool_call (parsing
+    form, reused by the salvage layer); this function stays as a thin shell
+    for the v89.4 fallback-continue branch at FINISHED."""
+    return _parse_bare_tool_call(text) is not None
 
 
 def _body_has_real_content(text: str) -> bool:
