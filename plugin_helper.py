@@ -342,10 +342,21 @@ for _alias in ("xhigh", "ultra", "extreme"):
 
 
 def _with_effort(prompt):
-    instruction = EFFORT_INSTRUCTIONS.get(request_effort.get() or "")
+    # [v89.6] 第二道闸（belt-and-suspenders）：主开关关闭时，即使有零散
+    # 代码设置了 request_effort，指令也不附加——「真关得掉」在构建侧
+    # 再兜一层。get_effort_enhance 走内存缓存，正常构建路径零额外 I/O。
+    instruction = ""
+    if _effort_enhance_enabled():
+        instruction = EFFORT_INSTRUCTIONS.get(request_effort.get() or "")
     if not instruction:
         return prompt
     return prompt + "\n\n" + instruction + "\n"
+
+
+def _effort_enhance_enabled():
+    # 延迟导入避免模块加载环（functions 也反向引用本模块）。
+    from functions import get_effort_enhance
+    return get_effort_enhance()
 
 
 def build_summary_request_prompt(messages):
