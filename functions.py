@@ -11,7 +11,7 @@ import threading
 import sqlite3
 import string
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import aiohttp
 import deepseek_tokenizer
@@ -455,6 +455,38 @@ class UpstreamBizError(UpstreamError):
     pinned forever. Subclassing UpstreamError lets _upstream_http_code() and
     handle_chat's 401/403/429 rotation pick it up unchanged.
     (Adapted from upstream PR #94 by Rrainich.)"""
+
+
+def _format_mute_until(ts):
+    """[v89.7] mute_until (upstream epoch seconds) -> human-readable date.
+
+    Pinned to UTC+8 (the user's timezone) instead of the container's local
+    timezone — the hosting container's TZ is not under our control, and a
+    wrong date would corrupt the "restore after unmute" guidance."""
+    try:
+        return datetime.fromtimestamp(
+            float(ts), timezone(timedelta(hours=8)),
+        ).strftime("%Y-%m-%d %H:%M")
+    except Exception:
+        return "unknown"
+
+
+class UpstreamMutedError(UpstreamBizError):
+    """[v89.7] Upstream explicitly reports the account is muted
+    (data.biz_data.is_muted == 1, nested inside an outer code=0 envelope).
+
+    Hard evidence — a boolean field from the upstream itself, not a text
+    heuristic — so unlike the v89.3 auth-shaped soft path there is no
+    multi-strike grace period: a mute lasts days (observed mute_until spans
+    7 days), cooldown rotation would just keep re-arming a doomed account
+    every 60s and feeding failures to users. Hit = immediate quarantine
+    (same tier as a hard 401); restore_token() remains the only exit."""
+
+    def __init__(self, mute_until=None):
+        self.mute_until = mute_until
+        super().__init__(
+            403, f"user is muted (until {_format_mute_until(mute_until)})",
+        )
 
 
 def _biz_data(payload, what="response"):
@@ -982,6 +1014,9 @@ def get_pool_view():
         # "likely expired / likely muted / other" by it. Based on the reason
         # text mark_limited() writes — three sources:
         #   * v89.3 auth-shaped biz errors: "N consecutive auth-shaped ..."
+        #   * [v89.7] confirmed muted: "user is muted (until <date>)"
+        #     (upstream biz_data.is_muted==1 boolean, startup/manual probe
+        #     or runtime detection)
         #   * hard 401: "upstream 401 (auth rejected)"
         #   * 403 streaks: "N consecutive upstream 403s"
         # Purely read-side string matching; no new write path.
@@ -990,7 +1025,9 @@ def get_pool_view():
             state_class, cooldown = "err", "—"
             note = "quarantined — manual return required"
             qr = str(q_reason or "")
-            if "auth-shaped" in qr or "auth rejected" in qr:
+            if "muted" in qr.lower() or "禁言" in qr:
+                reason_kind = "muted"
+            elif "auth-shaped" in qr or "auth rejected" in qr:
                 reason_kind = "expired"
             elif "403" in qr:
                 reason_kind = "restricted"
@@ -3076,6 +3113,31 @@ async def warmup_pool(max_tokens=3):
         logger.info("[warmup] token=%d warmup complete", len(actives))
     except Exception as exc:
         logger.warning("[warmup] PoW warmup failed: %s", exc)
+    # [v89.7] Silent startup scan: probe users/current once for every ACTIVE
+    # token. Only a confirmed mute (is_muted==1, upstream boolean hard
+    # evidence) quarantines — runtime detection waits for a real failure,
+    # during which the dashboard would show the muted account as "Active"
+    # (production-verified 2026-11-05). Invalidated tokens (40003) are only
+    # logged, never written: expired-token quarantine is the runtime chain's
+    # job and is proven correct (same day, token #1). Any scan failure is
+    # logged only and never blocks startup.
+    try:
+        toks_all = await asyncio.to_thread(get_tokens)
+        for t in [x for x in toks_all if x.get("status") == "ACTIVE"]:
+            _pr = await probe_token_mute(t["token"])
+            if _pr.get("verdict") == "muted":
+                _until = _format_mute_until(_pr.get("mute_until"))
+                await asyncio.to_thread(
+                    mark_quarantined,
+                    t["id"],
+                    f"user is muted (until {_until}) — startup probe",
+                )
+                logger.warning(
+                    "Token #%d: confirmed muted until %s (startup probe) — quarantined",
+                    t["id"], _until,
+                )
+    except Exception as exc:
+        logger.warning("[warmup] mute scan failed: %s", exc)
     logger.info("[warmup] all done in %.1fs, PoW pool %d entries", time.time() - t0, len(_POW_PREFETCH))
 
 
@@ -3092,6 +3154,59 @@ async def create_new_chat(auth_token):
     async with response:
         data = await response.json()
     return _biz_data(data, "chat_session/create")["chat_session"]["id"]
+
+
+async def probe_token_mute(auth_token):
+    """[v89.7] Actively probe one token's real upstream status (admin probe /
+    startup scan).
+
+    GET /api/v0/users/current — DeepSeek's own app profile endpoint: no PoW,
+    read-only, and muted accounts still answer normally (verified 2026-11-05:
+    muted accounts return biz_data.chat.is_muted=1/mute_until; invalidated
+    tokens return code=40003; healthy tokens return biz_code=0). Same domain
+    and same headers as the bridge's everyday upstream calls — no new
+    exposure surface.
+
+    Observation only — never writes state. The caller decides what to persist
+    by evidence class (confirmed mutes only; invalidated tokens are report-
+    only because expired-token quarantine is the runtime chain's job and is
+    proven correct). The return carries no credential fields."""
+    session = await get_session()
+    headers = get_headers(auth_token)
+    try:
+        async with session.get(
+            UPSTREAM_BASES[0] + "/api/v0/users/current",
+            headers=headers,
+            timeout=aiohttp.ClientTimeout(total=10),
+        ) as resp:
+            body = await resp.json(content_type=None)
+    except Exception as exc:
+        return {"verdict": "error", "detail": f"probe failed: {exc}", "mute_until": None}
+    if not isinstance(body, dict):
+        return {"verdict": "error", "detail": "unexpected non-JSON body", "mute_until": None}
+    code = body.get("code")
+    if code == 40003:
+        return {
+            "verdict": "invalid",
+            "detail": str(body.get("msg") or "upstream 40003 (invalid token)"),
+            "mute_until": None,
+        }
+    data = body.get("data") if isinstance(body.get("data"), dict) else None
+    biz = data.get("biz_data") if isinstance(data, dict) else None
+    chat = biz.get("chat") if isinstance(biz, dict) else None
+    if isinstance(chat, dict) and chat.get("is_muted") == 1:
+        return {
+            "verdict": "muted",
+            "detail": "user is muted",
+            "mute_until": chat.get("mute_until"),
+        }
+    if code == 0 and isinstance(biz, dict):
+        return {"verdict": "ok", "detail": "", "mute_until": None}
+    return {
+        "verdict": "error",
+        "detail": f"unexpected envelope: code={code}",
+        "mute_until": None,
+    }
 
 
 _EMPTY_SSE_DEFAULT = (
@@ -3235,6 +3350,32 @@ def _raise_empty_sse_response(recent_lines, parsed_events, resp_ct="", non_sse_t
         if isinstance(_bj, dict) and _bj.get("code") is not None:
             _bcode = _bj.get("code")
             _bmsg = _bj.get("msg") or _bj.get("message") or "biz error"
+            # [v89.7] Nested business envelope: outer code=0/msg="" while the
+            # real error lives in data.biz_code/biz_msg (production-verified
+            # 2026-11-05, muted account:
+            # {"code":0,"msg":"","data":{"biz_code":5,"biz_msg":"user is
+            # muted","biz_data":{"is_muted":1,"mute_until":...}}}). The old
+            # code only read the outer layer -> 502 "biz error 0", the mute
+            # info was swallowed and the token never entered any quarantine
+            # path. This branch already always raised a 502; only WHAT it
+            # raises changes: a mute -> UpstreamMutedError (hard evidence,
+            # keyed on the upstream is_muted boolean only, no text
+            # heuristics); other nested errors re-raise with the real
+            # message. Every legacy shape (outer 40301/40003, non-JSON,
+            # empty tail) stays byte-identical.
+            _ndata = _bj.get("data") if isinstance(_bj.get("data"), dict) else None
+            _nbiz = _ndata.get("biz_data") if isinstance(_ndata, dict) else None
+            if isinstance(_nbiz, dict) and _nbiz.get("is_muted") == 1:
+                logger.warning("DeepSeek biz error in non-SSE body: %s", _t[:200])
+                raise UpstreamMutedError(_nbiz.get("mute_until"))
+            _nbcode = _ndata.get("biz_code") if isinstance(_ndata, dict) else None
+            if _bcode == 0 and _nbcode not in (None, 0):
+                _nbmsg = (_ndata.get("biz_msg") or _ndata.get("msg")
+                          or _ndata.get("message") or _bmsg)
+                logger.warning("DeepSeek nested biz error in non-SSE body: %s", _t[:200])
+                raise UpstreamError(
+                    502, f"DeepSeek biz error {_nbcode}: {_nbmsg} [rid:{_rid}]",
+                )
             if str(_bcode) == "40301" or "POW" in str(_bmsg).upper():
                 _POW_PREFETCH.clear()  # invalidate all stale prefetched credentials; retry solves fresh
             logger.warning("DeepSeek biz error in non-SSE body: %s", _t[:200])

@@ -192,6 +192,7 @@ from functions import (
     CookieGenerationError,
     UpstreamBizError,
     UpstreamError,
+    UpstreamMutedError,
     cookie_file_path,
     data_dir,
     add_token,
@@ -209,12 +210,15 @@ from functions import (
     get_db,
     init_db,
     mark_limited,
+    mark_quarantined,
     mark_active,
     is_context_limit_error,
     record_usage,
     restore_token,
     usage_by_day_key,
     get_pool_view,
+    probe_token_mute,
+    _format_mute_until,
     effort_level,
     get_effort_enhance,
     set_effort_enhance,
@@ -710,6 +714,31 @@ def _is_biz_auth_error(exc):
     return isinstance(exc, UpstreamBizError) and _upstream_http_code(exc) == 401
 
 
+def _is_muted_error(exc):
+    """[v89.7] Upstream-confirmed mute (biz_data.is_muted==1, boolean hard
+    evidence).
+
+    Unlike the v89.3 text heuristics (soft evidence), this is the upstream's
+    own field — no wording-coincidence false positives — so no multi-strike
+    grace period: immediate quarantine (same tier as a hard 401)."""
+    return isinstance(exc, UpstreamMutedError)
+
+
+async def _mark_upstream_failure(e, token_id):
+    """[v89.7] Unified entry point for persisting upstream 401/403/429
+    failures.
+
+    Confirmed mute -> mark_quarantined (immediate, reason carries the unmute
+    time); all other 401/403/429 -> the existing mark_limited channel,
+    byte-identical to v89.6 behavior. Shared by the 4 call sites
+    (_setup_failure_outcome + the three rotation except blocks)."""
+    if _is_muted_error(e):
+        await _db(mark_quarantined, token_id, str(e))
+    else:
+        await _db(mark_limited, token_id, _upstream_http_code(e),
+                  _is_biz_auth_error(e))
+
+
 def _api_error_response(e, is_anthropic=False):
     code = _upstream_http_code(e) or 502
     if isinstance(e, CookieGenerationError):
@@ -844,7 +873,7 @@ async def _setup_failure_outcome(e, token_id, is_anthropic=False, _attempt=0):
     code = _upstream_http_code(e)
     auth_class = code in (401, 403, 429)
     if token_id is not None and auth_class:
-        await _db(mark_limited, token_id, code, _is_biz_auth_error(e))
+        await _mark_upstream_failure(e, token_id)
         logger.warning(
             "Upstream HTTP %s while preparing the turn (token #%s): %s",
             code, token_id, str(e)[:200],
@@ -1462,7 +1491,7 @@ async def handle_chat(
     except Exception as e:
         code = _upstream_http_code(e)
         if code in (401, 403, 429):
-            await _db(mark_limited, token_id, code, _is_biz_auth_error(e))
+            await _mark_upstream_failure(e, token_id)
             await _db(delete_sessions_for_chat, token_id, session_id)
             if not _auth_rotated:
                 new_token_id = await _db(pick_token)
@@ -1909,7 +1938,7 @@ async def stream_response(gen, model, messages, token_id, session_id, sig, tools
         failed = True
         code = _upstream_http_code(e)
         if code in (401, 403, 429):
-            await _db(mark_limited, token_id, code, _is_biz_auth_error(e))
+            await _mark_upstream_failure(e, token_id)
             await _db(delete_sessions_for_chat, token_id, session_id)
             logger.warning("stream_response upstream HTTP %s: %s", code, e)
         else:
@@ -2081,7 +2110,7 @@ async def stream_anthropic_response(gen, model, messages, token_id, session_id, 
         failed = True
         code = _upstream_http_code(e)
         if code in (401, 403, 429):
-            await _db(mark_limited, token_id, code, _is_biz_auth_error(e))
+            await _mark_upstream_failure(e, token_id)
             await _db(delete_sessions_for_chat, token_id, session_id)
             logger.warning("stream_anthropic_response upstream HTTP %s: %s", code, e)
         else:
@@ -3077,6 +3106,56 @@ async def v1_pool(request: Request):
     return JSONResponse({"pool": await _db(get_pool_view)})
 
 
+@app.get("/v1/pool/probe")
+async def v1_pool_probe(request: Request):
+    """[v89.7] Probe each token's real upstream status (admin, manual trigger,
+    no credential fields).
+
+    GET /api/v0/users/current per token (no PoW, read-only):
+      * ok      — token valid, account not muted
+      * muted   — upstream-confirmed mute (is_muted==1 boolean hard evidence);
+                  also persisted as a quarantine (same evidence bar and same
+                  portal as the startup scan) to fix "muted shown as Active"
+      * invalid — token invalidated upstream (40003). Report-only: expired-
+                  token quarantine is the runtime chain's job and is proven
+                  correct
+      * error   — the probe itself failed (network/unexpected envelope); no
+                  verdict is drawn
+    The report carries plain-language guidance and renders directly in the
+    dashboard."""
+    try:
+        get_current_admin(request)
+    except HTTPException:
+        return HTMLResponse("<meta http-equiv='refresh' content='0;url=/login'>")
+    tokens = await _db(get_tokens)
+    pool_view = {t["id"]: t for t in await _db(get_pool_view)}
+    report = []
+    for t in tokens:
+        r = await probe_token_mute(t["token"])
+        verdict = r["verdict"]
+        head = (pool_view.get(t["id"]) or {}).get("token_head", "—")
+        entry = {"id": t["id"], "label": t.get("alias") or f"untagged #{t['id']}",
+                 "token_head": head, "verdict": verdict, "status": t["status"]}
+        if verdict == "ok":
+            entry["text"] = "Healthy: token valid, account not muted"
+            entry["cls"] = "ok"
+        elif verdict == "muted":
+            until = _format_mute_until(r.get("mute_until"))
+            entry["text"] = f"Muted (upstream-confirmed): unmutes at {until}. Auto-quarantined; press \"Restore\" after the mute ends"
+            entry["cls"] = "warn"
+            reason = f"user is muted (until {until}) — manual probe"
+            await _db(mark_quarantined, t["id"], reason)
+            logger.warning("Token #%d: probe confirmed muted until %s — quarantined", t["id"], until)
+        elif verdict == "invalid":
+            entry["text"] = "Token invalidated upstream (expired or logged out). Extract a fresh token and add it; pressing \"Restore\" won't help"
+            entry["cls"] = "err"
+        else:
+            entry["text"] = f"Probe failed, no verdict drawn: {r['detail'][:120]}"
+            entry["cls"] = "idle"
+        report.append(entry)
+    return JSONResponse({"probes": report})
+
+
 def _count_sessions():
     conn = get_db()
     try:
@@ -3113,7 +3192,7 @@ async def v1_admin_stats(request: Request):
         cookies_valid = False
     probe = await _deep_health_probe()
     return JSONResponse({
-        "version": "v89.6",
+        "version": "v89.7",
         "active_tokens": active,
         "total_tokens": len(tokens),
         "sessions": sessions,

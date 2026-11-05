@@ -100,16 +100,18 @@
   <div class="card"><div class="num" id="d-cookie">—</div><div class="lbl">Backup cookie</div></div>
 </div>
 
-<h2>Token pool<span class="sec"><span class="badge b-ok">Active</span> <span class="badge b-blue">Cooling down</span> <span class="badge b-warn">Likely muted</span> <span class="badge b-err">Likely expired</span> <span class="badge b-err">Quarantined</span></span></h2>
+<h2>Token pool<span class="sec"><span class="badge b-ok">Active</span> <span class="badge b-blue">Cooling down</span> <span class="badge b-warn">Muted (confirmed)</span> <span class="badge b-warn">Likely muted</span> <span class="badge b-err">Likely expired</span> <span class="badge b-err">Quarantined</span></span></h2>
 <div class="wrap">
 <table id="pool">
   <thead><tr><th>ID</th><th>Alias</th><th>Token</th><th>Status</th><th>What this means</th><th>In-flight</th><th>Last used</th><th>Cooldown</th><th>Actions</th></tr></thead>
   <tbody></tbody>
 </table>
 </div>
+<p style="margin-top:10px"><button class="btn-sm btn-ghost" onclick="probeTokens(this)">Probe tokens (ask upstream for real status)</button></p>
+<div id="probe-result" class="hint" style="line-height:1.9;margin-top:8px"></div>
 <div class="warning" style="margin-top:12px;line-height:1.7">
   <strong>When do tokens expire?</strong> Unpredictably — DeepSeek's server decides, and there is no way to know in advance. Expired tokens surface as <code>401</code> or <code>503 No tokens available</code> on the client.<br>
-  <strong>Can't tell expired from muted?</strong> Log into <a href="https://chat.deepseek.com" target="_blank">chat.deepseek.com</a> with that account: a re-login prompt = expired; a mute notice when sending = muted; normal chatting = false positive, just press "Restore".<br>
+  <strong>Can't tell expired from muted?</strong> Press the "Probe tokens" button above — it asks DeepSeek directly for each token's real status (healthy / muted until X / invalidated), no manual testing needed. You can also log into <a href="https://chat.deepseek.com" target="_blank">chat.deepseek.com</a> with that account: a re-login prompt = expired; a mute notice when sending = muted; normal chatting = false positive, just press "Restore".<br>
   <strong>Safe to try:</strong> the "Restore" button is always safe — a truly dead token simply re-quarantines automatically, no harm done.
 </div>
 
@@ -212,9 +214,10 @@ async function refreshPool() {
     let flight = 0;
     // [v89.6] Five color-coded states + human-readable notes: the backend
     // classifies via reason_kind, the frontend only maps presentation.
-    const KIND_LABEL = {expired: 'Likely expired', restricted: 'Likely muted', other: 'Quarantined'};
-    const KIND_BADGE = {expired: 'b-err', restricted: 'b-warn', other: 'b-err'};
+    const KIND_LABEL = {muted: 'Muted (confirmed)', expired: 'Likely expired', restricted: 'Likely muted', other: 'Quarantined'};
+    const KIND_BADGE = {muted: 'b-warn', expired: 'b-err', restricted: 'b-warn', other: 'b-err'};
     const KIND_NOTE = {
+      muted: 'DeepSeek explicitly says this account is muted (not a guess). See the unmute time in the reason below. The token cannot send messages until then — no action needed; press "Restore" after the mute ends.',
       expired: 'DeepSeek no longer accepts this token (expired or logged out). Extract a fresh token and add it (methods below) — pressing "Restore" will not help.',
       restricted: 'The account is likely temporarily restricted (muted). Once the mute is lifted, press "Restore" to return it to service; if the account chats fine on the website, it was a false positive — just press "Restore".',
       other: 'Quarantined. See the concrete reason below; press "Restore" once the upstream is healthy, or verify first per the guide above.',
@@ -232,6 +235,9 @@ async function refreshPool() {
         badge = KIND_BADGE[kind]; stLabel = KIND_LABEL[kind]; note = KIND_NOTE[kind];
       } else if (kind === 'restricted') {
         badge = KIND_BADGE[kind]; stLabel = KIND_LABEL[kind]; note = KIND_NOTE[kind];
+      } else if (kind === 'muted') {
+        badge = KIND_BADGE[kind]; stLabel = KIND_LABEL[kind];
+        note = KIND_NOTE[kind] + (t.reason ? ' Reason: ' + t.reason : '');
       } else {
         badge = 'b-err'; stLabel = 'Quarantined';
         note = KIND_NOTE.other + (t.reason ? ' Reason: ' + t.reason : '');
@@ -293,6 +299,23 @@ async function refreshDeep() {
 
 async function restore(id) { await fetch('/v1/pool/restore', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({token_id:id})}); refreshPool(); }
 async function del(id) { if (!confirm('Remove this token from the pool?')) return; await fetch(`/tokens/${id}/delete`, {method:'POST'}); refreshPool(); }
+
+// [v89.7] Token probe: ask upstream for each token's real status
+// (healthy / muted / invalidated). Confirmed-muted tokens are auto-quarantined
+// and the pool view refreshes; everything else is report-only.
+async function probeTokens(btn) {
+  const el = document.getElementById('probe-result');
+  btn.disabled = true; el.textContent = 'Probing… (asking DeepSeek one by one, a few seconds)';
+  try {
+    const d = await fetch('/v1/pool/probe').then(r => r.json());
+    const icon = {ok: '✅', warn: '🟠', err: '🔴', idle: '⚪️'};
+    el.innerHTML = (d.probes || []).map(p =>
+      `<div>${icon[p.cls] || '⚪️'} <strong>${esc(p.label)}</strong> (<code>${esc(p.token_head || '—')}</code>): ${esc(p.text)}</div>`
+    ).join('') || 'The pool is empty — nothing to probe.';
+    if ((d.probes || []).some(p => p.status !== undefined && p.cls === 'warn')) refreshPool();
+  } catch (e) { el.textContent = '❌ Probe request failed: ' + e; }
+  btn.disabled = false;
+}
 
 // Endpoint URLs follow the origin the dashboard is visited from (no hardcoding)
 (() => {
