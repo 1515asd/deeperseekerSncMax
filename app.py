@@ -456,7 +456,11 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="DeeperSeeker", lifespan=lifespan)
-templates = Jinja2Templates(directory=os.path.join(BASE_DIR, "templates"))
+# [v89.6] 模板目录指向 zh：440513c 清理根模板后，这里仍指向 templates/
+# 根目录找 dashboard.html/login.html——全新克隆的面板路由 TemplateNotFound
+# （生产能跑只是因为服务器上残留着旧根模板文件）。三个模板都在 zh/ 下，
+# 指过去即自洽。english 分支的根模板布局不变（它本就只此一套）。
+templates = Jinja2Templates(directory=os.path.join(BASE_DIR, "templates", "zh"))
 app.mount("/static", StaticFiles(directory=os.path.join(BASE_DIR, "static")), name="static")
 
 
