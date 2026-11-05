@@ -18,6 +18,12 @@ streaming, tool calling, and long-context session management out of the box.
 
 </div>
 
+> [!WARNING]
+> **Upgrade notice for existing users**: if you are running v89.6 or earlier, please update to **v89.7**. Older versions have two issues that affect you —
+> 1. A muted account is shown as "Active" and surfaces `502 "biz error 0"` to clients; since v89.7 mutes are detected via upstream hard evidence and quarantined immediately (with the unmute time).
+> 2. Before v89.6, the panel's "Restore" button and the file-upload endpoint returned a 500 on every call.
+> Upgrade by pulling the latest code and restarting — data and the token pool are compatible automatically, no manual migration. Afterwards, press "Probe tokens" under the token pool to see each token's real status (healthy / muted until X / invalidated).
+
 ## What is this
 
 This project is based on upstream [`AmanCode22/deeperseeker`](https://github.com/AmanCode22/deeperseeker)
