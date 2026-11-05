@@ -100,16 +100,18 @@
   <div class="card"><div class="num" id="d-cookie">—</div><div class="lbl">备用 Cookie</div></div>
 </div>
 
-<h2>令牌池<span class="sec"><span class="badge b-ok">正常</span> <span class="badge b-blue">限速冷却</span> <span class="badge b-warn">疑似禁言</span> <span class="badge b-err">疑似过期</span> <span class="badge b-err">其他隔离</span></span></h2>
+<h2>令牌池<span class="sec"><span class="badge b-ok">正常</span> <span class="badge b-blue">限速冷却</span> <span class="badge b-warn">确认禁言</span> <span class="badge b-warn">疑似禁言</span> <span class="badge b-err">疑似过期</span> <span class="badge b-err">其他隔离</span></span></h2>
 <div class="wrap">
 <table id="pool">
   <thead><tr><th>ID</th><th>别名</th><th>令牌</th><th>状态</th><th>说明（这是什么意思）</th><th>进行中</th><th>上次使用</th><th>冷却剩余</th><th>操作</th></tr></thead>
   <tbody></tbody>
 </table>
 </div>
+<p style="margin-top:10px"><button class="btn-sm btn-ghost" onclick="probeTokens(this)">检测令牌（问上游真实状态）</button></p>
+<div id="probe-result" class="hint" style="line-height:1.9;margin-top:8px"></div>
 <div class="warning" style="margin-top:12px;line-height:1.7">
   <strong>令牌什么时候会过期？</strong>不固定，由 DeepSeek 服务端决定，这边无法预知。过期后客户端会报 <code>401</code> 或 <code>503 No tokens available</code>。<br>
-  <strong>分不清过期还是禁言？</strong>用该账号登录 <a href="https://chat.deepseek.com" target="_blank">chat.deepseek.com</a>：网页提示重新登录 = 过期；发消息弹出禁言提示 = 禁言；能正常聊 = 误判，点「恢复」即可。<br>
+  <strong>分不清过期还是禁言？</strong>点上面的「检测令牌」，直接问 DeepSeek 每个令牌的真实状态（正常 / 禁言到几点 / 已作废），不用自己挨个试。也可以用该账号登录 <a href="https://chat.deepseek.com" target="_blank">chat.deepseek.com</a>：网页提示重新登录 = 过期；发消息弹出禁言提示 = 禁言；能正常聊 = 误判，点「恢复」即可。<br>
   <strong>放心试：</strong>「恢复」按钮是安全的——令牌真失效的话会自动再次隔离，不会造成损失。
 </div>
 
@@ -212,9 +214,10 @@ async function refreshPool() {
     let flight = 0;
     // [v89.6] 五态五色 + 中文动态说明：后端 reason_kind 分类，
     // 前端只做展示映射，不猜状态。
-    const KIND_LABEL = {expired: '疑似过期', restricted: '疑似禁言', other: '已隔离'};
-    const KIND_BADGE = {expired: 'b-err', restricted: 'b-warn', other: 'b-err'};
+    const KIND_LABEL = {muted: '确认禁言', expired: '疑似过期', restricted: '疑似禁言', other: '已隔离'};
+    const KIND_BADGE = {muted: 'b-warn', expired: 'b-err', restricted: 'b-warn', other: 'b-err'};
     const KIND_NOTE = {
+      muted: '上游明确说这个账号被禁言了（不是猜测），解禁时间见下方原因列。解禁前它发不了消息，先不用管；解禁后点「恢复」即可正常使用。',
       expired: 'DeepSeek 不认这个令牌了（过期或被登出）。需重新提取令牌再添加（方法见下方），点「恢复」没用。',
       restricted: '疑似被临时限制发言（禁言）。等解封后点「恢复」即可正常使用；若能登录正常聊天，就是误判，直接点「恢复」。',
       other: '已隔离。具体原因见下；确认上游正常后点「恢复」即可回到轮换，拿不准先按上方指南自查。',
@@ -232,6 +235,9 @@ async function refreshPool() {
         badge = KIND_BADGE[kind]; stLabel = KIND_LABEL[kind]; note = KIND_NOTE[kind];
       } else if (kind === 'restricted') {
         badge = KIND_BADGE[kind]; stLabel = KIND_LABEL[kind]; note = KIND_NOTE[kind];
+      } else if (kind === 'muted') {
+        badge = KIND_BADGE[kind]; stLabel = KIND_LABEL[kind];
+        note = KIND_NOTE[kind] + (t.reason ? ' 原因：' + t.reason : '');
       } else {
         badge = 'b-err'; stLabel = '已隔离';
         note = KIND_NOTE.other + (t.reason ? ' 原因：' + t.reason : '');
@@ -331,6 +337,22 @@ async function checkLink() {
       el.innerHTML = '❌ 异常' + (up.reason ? '：' + esc(up.reason) : '') + ' —— 若令牌状态显示「疑似过期」，请换新令牌';
     }
   } catch (e) { el.textContent = '❌ 检测请求失败：' + e; }
+}
+
+// [v89.7] 令牌检测：逐个问上游真实状态（正常/禁言/已作废）。
+// 确认禁言的会自动隔离并刷新池视图；其余只报告。
+async function probeTokens(btn) {
+  const el = document.getElementById('probe-result');
+  btn.disabled = true; el.textContent = '检测中…（逐个询问 DeepSeek，几秒钟）';
+  try {
+    const d = await fetch('/v1/pool/probe').then(r => r.json());
+    const icon = {ok: '✅', warn: '🟠', err: '🔴', idle: '⚪️'};
+    el.innerHTML = (d.probes || []).map(p =>
+      `<div>${icon[p.cls] || '⚪️'} <strong>${esc(p.label)}</strong>（<code>${esc(p.token_head || '—')}</code>）：${esc(p.text)}</div>`
+    ).join('') || '池是空的，没有可检测的令牌。';
+    if ((d.probes || []).some(p => p.status !== undefined && p.cls === 'warn')) refreshPool();
+  } catch (e) { el.textContent = '❌ 检测请求失败：' + e; }
+  btn.disabled = false;
 }
 
 // 接口地址跟随访问面板用的域名，避免硬编码

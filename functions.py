@@ -11,7 +11,7 @@ import threading
 import sqlite3
 import string
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import aiohttp
 import deepseek_tokenizer
@@ -432,6 +432,37 @@ class UpstreamBizError(UpstreamError):
     pinned forever. Subclassing UpstreamError lets _upstream_http_code() and
     handle_chat's 401/403/429 rotation pick it up unchanged.
     (Adapted from upstream PR #94 by Rrainich.)"""
+
+
+def _format_mute_until(ts):
+    """[v89.7] mute_until（上游秒级时间戳）→ 用户时区可读日期。
+
+    固定 UTC+8（用户所在时区），不依赖容器本地时区——Botkeep 容器
+    时区不可控，显示错日期会让「解禁后恢复」的指引失真。"""
+    try:
+        return datetime.fromtimestamp(
+            float(ts), timezone(timedelta(hours=8)),
+        ).strftime("%Y-%m-%d %H:%M")
+    except Exception:
+        return "unknown"
+
+
+class UpstreamMutedError(UpstreamBizError):
+    """[v89.7] Upstream explicitly reports the account is muted
+    (data.biz_data.is_muted == 1, nested inside an outer code=0 envelope).
+
+    Hard evidence — a boolean field from the upstream itself, not a text
+    heuristic — so unlike the v89.3 auth-shaped soft path there is no
+    multi-strike grace period: a mute lasts days (observed mute_until spans
+    7 days), cooldown rotation would just keep re-arming a doomed account
+    every 60s and feeding failures to users. Hit = immediate quarantine
+    (same tier as a hard 401); restore_token() remains the only exit."""
+
+    def __init__(self, mute_until=None):
+        self.mute_until = mute_until
+        super().__init__(
+            403, f"user is muted (until {_format_mute_until(mute_until)})",
+        )
 
 
 def _biz_data(payload, what="response"):
@@ -934,7 +965,9 @@ def get_pool_view():
         streak = streak or 0
         token_head = f"{(token or '')[:8]}…{((token or '')[-4:] if len(token or '') > 12 else '')}" if token else "—"
         # [v89.6] 隔离分类：仪表盘据此区分「疑似过期 / 疑似禁言 / 其他」。
-        # 依据 mark_limited() 写入的 reason 文本——三种来源：
+        # 依据 mark_limited() 写入的 reason 文本——四种来源：
+        #   * v89.7 确认禁言："user is muted (until <date>)"（上游
+        #     biz_data.is_muted==1 布尔硬证据，startup probe 或运行时）
         #   * v89.3 鉴权型业务错误："N consecutive auth-shaped business errors"
         #   * 硬 401："upstream 401 (auth rejected)"
         #   * 403 连击："N consecutive upstream 403s"
@@ -944,7 +977,9 @@ def get_pool_view():
             state_class, cooldown = "err", "—"
             note = "quarantined — manual return required"
             qr = str(q_reason or "")
-            if "auth-shaped" in qr or "auth rejected" in qr:
+            if "muted" in qr.lower() or "禁言" in qr:
+                reason_kind = "muted"
+            elif "auth-shaped" in qr or "auth rejected" in qr:
                 reason_kind = "expired"
             elif "403" in qr:
                 reason_kind = "restricted"
@@ -2896,6 +2931,29 @@ async def warmup_pool(max_tokens=3):
         logger.info("[warmup] token=%d 预热完成", len(actives))
     except Exception as exc:
         logger.warning("[warmup] PoW 预热失败: %s", exc)
+    # [v89.7] 启动静默扫描：对全部 ACTIVE 令牌探一次 users/current。
+    # 确认禁言（is_muted==1，上游布尔硬证据）才入库隔离——运行时检测
+    # 要等一次真实失败才触发，期间仪表盘会把禁言账号显示成"正常"
+    # （生产实锤 2026-11-05）。令牌作废(40003)只记日志不写状态：过期
+    # 令牌的隔离由运行时链路负责且已实证正确（同日 #1 实锤）。扫描
+    # 失败只记日志，绝不影响服务启动。
+    try:
+        toks_all = await asyncio.to_thread(get_tokens)
+        for t in [x for x in toks_all if x.get("status") == "ACTIVE"]:
+            _pr = await probe_token_mute(t["token"])
+            if _pr.get("verdict") == "muted":
+                _until = _format_mute_until(_pr.get("mute_until"))
+                await asyncio.to_thread(
+                    mark_quarantined,
+                    t["id"],
+                    f"user is muted (until {_until}) — startup probe",
+                )
+                logger.warning(
+                    "Token #%d: confirmed muted until %s (startup probe) — quarantined",
+                    t["id"], _until,
+                )
+    except Exception as exc:
+        logger.warning("[warmup] mute scan failed: %s", exc)
     logger.info("[warmup] 全部完成，用时 %.1fs，PoW 池 %d 条", time.time() - t0, len(_POW_PREFETCH))
 
 
@@ -2912,6 +2970,56 @@ async def create_new_chat(auth_token):
     async with response:
         data = await response.json()
     return _biz_data(data, "chat_session/create")["chat_session"]["id"]
+
+
+async def probe_token_mute(auth_token):
+    """[v89.7] 主动探测一个令牌在上游的真实状态（管理员检测/启动扫描）。
+
+    GET /api/v0/users/current —— DeepSeek App 自己的个人信息接口：
+    免 PoW、只读、禁言账号照常应答（实测 2026-11-05：禁言账号返回
+    biz_data.chat.is_muted=1/mute_until；已作废令牌返回 code=40003；
+    健康令牌 biz_code=0）。与桥日常自用的上游调用同一域名同一头，
+    不新增任何暴露面。
+
+    只观测，不写状态——写路径由调用方按证据等级决定（确认禁言才
+    入库，令牌作废只报告：过期令牌的隔离由运行时链路负责且已实证
+    正确）。返回不含任何凭据字段。"""
+    session = await get_session()
+    headers = get_headers(auth_token)
+    try:
+        async with session.get(
+            UPSTREAM_BASES[0] + "/api/v0/users/current",
+            headers=headers,
+            timeout=aiohttp.ClientTimeout(total=10),
+        ) as resp:
+            body = await resp.json(content_type=None)
+    except Exception as exc:
+        return {"verdict": "error", "detail": f"probe failed: {exc}", "mute_until": None}
+    if not isinstance(body, dict):
+        return {"verdict": "error", "detail": "unexpected non-JSON body", "mute_until": None}
+    code = body.get("code")
+    if code == 40003:
+        return {
+            "verdict": "invalid",
+            "detail": str(body.get("msg") or "upstream 40003 (invalid token)"),
+            "mute_until": None,
+        }
+    data = body.get("data") if isinstance(body.get("data"), dict) else None
+    biz = data.get("biz_data") if isinstance(data, dict) else None
+    chat = biz.get("chat") if isinstance(biz, dict) else None
+    if isinstance(chat, dict) and chat.get("is_muted") == 1:
+        return {
+            "verdict": "muted",
+            "detail": "user is muted",
+            "mute_until": chat.get("mute_until"),
+        }
+    if code == 0 and isinstance(biz, dict):
+        return {"verdict": "ok", "detail": "", "mute_until": None}
+    return {
+        "verdict": "error",
+        "detail": f"unexpected envelope: code={code}",
+        "mute_until": None,
+    }
 
 
 _EMPTY_SSE_DEFAULT = (
@@ -3042,6 +3150,29 @@ def _raise_empty_sse_response(recent_lines, parsed_events, resp_ct="", non_sse_t
         if isinstance(_bj, dict) and _bj.get("code") is not None:
             _bcode = _bj.get("code")
             _bmsg = _bj.get("msg") or _bj.get("message") or "biz error"
+            # [v89.7] 嵌套业务信封：外层 code=0/msg="" 而真实错误在内层
+            # data.biz_code/biz_msg（实锤 2026-11-05 禁言：
+            # {"code":0,"msg":"","data":{"biz_code":5,"biz_msg":"user is
+            # muted","biz_data":{"is_muted":1,"mute_until":1794480668}}）。
+            # 旧代码只读外层 -> 502 "biz error 0"，禁言信息被吞，令牌
+            # 永远显示正常且不进任何隔离通道。本分支原本就必然抛 502，
+            # 这里只改"抛什么"：禁言 -> UpstreamMutedError（硬证据，
+            # 只认上游 is_muted 布尔，不加文本启发式）；其余嵌套错误以
+            # 真实信息上抛。所有旧形态（外层 40301/40003/非 JSON/空）
+            # 的行为逐字节不变。
+            _ndata = _bj.get("data") if isinstance(_bj.get("data"), dict) else None
+            _nbiz = _ndata.get("biz_data") if isinstance(_ndata, dict) else None
+            if isinstance(_nbiz, dict) and _nbiz.get("is_muted") == 1:
+                logger.warning("DeepSeek biz error in non-SSE body: %s", _t[:200])
+                raise UpstreamMutedError(_nbiz.get("mute_until"))
+            _nbcode = _ndata.get("biz_code") if isinstance(_ndata, dict) else None
+            if _bcode == 0 and _nbcode not in (None, 0):
+                _nbmsg = (_ndata.get("biz_msg") or _ndata.get("msg")
+                          or _ndata.get("message") or _bmsg)
+                logger.warning("DeepSeek nested biz error in non-SSE body: %s", _t[:200])
+                raise UpstreamError(
+                    502, f"DeepSeek biz error {_nbcode}: {_nbmsg} [rid:{_rid}]",
+                )
             if str(_bcode) == "40301" or "POW" in str(_bmsg).upper():
                 _POW_PREFETCH.clear()  # 陈旧预取凭证整体作废，重试现场新解
             logger.warning("DeepSeek biz error in non-SSE body: %s", _t[:200])

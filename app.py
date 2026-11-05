@@ -180,6 +180,7 @@ from functions import (
     CookieGenerationError,
     UpstreamBizError,
     UpstreamError,
+    UpstreamMutedError,
     cookie_file_path,
     data_dir,
     add_token,
@@ -198,11 +199,14 @@ from functions import (
     init_db,
     mark_limited,
     mark_active,
+    mark_quarantined,
     is_context_limit_error,
     record_usage,
     restore_token,
     usage_by_day_key,
     get_pool_view,
+    probe_token_mute,
+    _format_mute_until,
     effort_level,
     get_effort_enhance,
     set_effort_enhance,
@@ -702,6 +706,27 @@ def _is_biz_auth_error(exc):
     return isinstance(exc, UpstreamBizError) and _upstream_http_code(exc) == 401
 
 
+def _is_muted_error(exc):
+    """[v89.7] 上游确认禁言（biz_data.is_muted==1，布尔硬证据）。
+
+    与 v89.3 文本启发式的软证据不同，这是上游自己的字段，不存在
+    措辞巧合误判，因此不需要多击宽限——立即隔离（与硬 401 同级）。"""
+    return isinstance(exc, UpstreamMutedError)
+
+
+async def _mark_upstream_failure(e, token_id):
+    """[v89.7] 上游 401/403/429 失败入库的统一入口。
+
+    确认禁言 -> mark_quarantined（立即隔离，原因带解禁时间）；其余
+    401/403/429 -> 既有 mark_limited 通道，行为与 v89.6 逐字节一致。
+    4 处调用点（_setup_failure_outcome + 三处轮换 except）共用。"""
+    if _is_muted_error(e):
+        await _db(mark_quarantined, token_id, str(e))
+    else:
+        await _db(mark_limited, token_id, _upstream_http_code(e),
+                  _is_biz_auth_error(e))
+
+
 def _api_error_response(e, is_anthropic=False):
     code = _upstream_http_code(e) or 502
     if isinstance(e, CookieGenerationError):
@@ -836,7 +861,7 @@ async def _setup_failure_outcome(e, token_id, is_anthropic=False, _attempt=0):
     code = _upstream_http_code(e)
     auth_class = code in (401, 403, 429)
     if token_id is not None and auth_class:
-        await _db(mark_limited, token_id, code, _is_biz_auth_error(e))
+        await _mark_upstream_failure(e, token_id)
         logger.warning(
             "Upstream HTTP %s while preparing the turn (token #%s): %s",
             code, token_id, str(e)[:200],
@@ -1402,7 +1427,7 @@ async def handle_chat(
     except Exception as e:
         code = _upstream_http_code(e)
         if code in (401, 403, 429):
-            await _db(mark_limited, token_id, code, _is_biz_auth_error(e))
+            await _mark_upstream_failure(e, token_id)
             await _db(delete_sessions_for_chat, token_id, session_id)
             if not _auth_rotated:
                 new_token_id = await _db(pick_token)
@@ -1817,7 +1842,7 @@ async def stream_response(gen, model, messages, token_id, session_id, sig, tools
         failed = True
         code = _upstream_http_code(e)
         if code in (401, 403, 429):
-            await _db(mark_limited, token_id, code, _is_biz_auth_error(e))
+            await _mark_upstream_failure(e, token_id)
             await _db(delete_sessions_for_chat, token_id, session_id)
             logger.warning("stream_response upstream HTTP %s: %s", code, e)
         else:
@@ -1986,7 +2011,7 @@ async def stream_anthropic_response(gen, model, messages, token_id, session_id, 
         failed = True
         code = _upstream_http_code(e)
         if code in (401, 403, 429):
-            await _db(mark_limited, token_id, code, _is_biz_auth_error(e))
+            await _mark_upstream_failure(e, token_id)
             await _db(delete_sessions_for_chat, token_id, session_id)
             logger.warning("stream_anthropic_response upstream HTTP %s: %s", code, e)
         else:
@@ -2971,6 +2996,52 @@ async def v1_pool(request: Request):
     return JSONResponse({"pool": await _db(get_pool_view)})
 
 
+@app.get("/v1/pool/probe")
+async def v1_pool_probe(request: Request):
+    """[v89.7] 逐令牌探测上游真实状态（管理员，手动触发，无凭据字段）。
+
+    对每个令牌 GET /api/v0/users/current（免 PoW、只读）：
+      * ok      —— 令牌有效且账号未禁言
+      * muted   —— 上游确认禁言（is_muted==1 布尔硬证据）；
+                    同时入库隔离（与启动扫描同一证据标准、同一门户），
+                    纠正"禁言账号显示正常"
+      * invalid —— 令牌已被上游作废（40003）。只报告不写状态：过期
+                    令牌的隔离由运行时链路负责且已实证正确
+      * error   —— 探测本身失败（网络/异常报文），不下结论
+    报告含大白话建议，仪表盘直接渲染。"""
+    try:
+        get_current_admin(request)
+    except HTTPException:
+        return HTMLResponse("<meta http-equiv='refresh' content='0;url=/login'>")
+    tokens = await _db(get_tokens)
+    pool_view = {t["id"]: t for t in await _db(get_pool_view)}
+    report = []
+    for t in tokens:
+        r = await probe_token_mute(t["token"])
+        verdict = r["verdict"]
+        head = (pool_view.get(t["id"]) or {}).get("token_head", "—")
+        entry = {"id": t["id"], "label": t.get("alias") or f"untagged #{t['id']}",
+                 "token_head": head, "verdict": verdict, "status": t["status"]}
+        if verdict == "ok":
+            entry["text"] = "正常：令牌有效，账号未被禁言"
+            entry["cls"] = "ok"
+        elif verdict == "muted":
+            until = _format_mute_until(r.get("mute_until"))
+            entry["text"] = f"禁言（上游确认）：解禁时间 {until}。已自动隔离；解禁后点「恢复」即可正常使用"
+            entry["cls"] = "warn"
+            reason = f"user is muted (until {until}) — manual probe"
+            await _db(mark_quarantined, t["id"], reason)
+            logger.warning("Token #%d: probe confirmed muted until %s — quarantined", t["id"], until)
+        elif verdict == "invalid":
+            entry["text"] = "令牌已被上游作废（过期或被登出）。需重新提取令牌再添加；点「恢复」没用"
+            entry["cls"] = "err"
+        else:
+            entry["text"] = f"探测失败，不下结论：{r['detail'][:120]}"
+            entry["cls"] = "idle"
+        report.append(entry)
+    return JSONResponse({"probes": report})
+
+
 def _count_sessions():
     conn = get_db()
     try:
@@ -3006,7 +3077,7 @@ async def v1_admin_stats(request: Request):
         cookies_valid = False
     probe = await _deep_health_probe()
     return JSONResponse({
-        "version": "v89.6",
+        "version": "v89.7",
         "active_tokens": active,
         "total_tokens": len(tokens),
         "sessions": sessions,
