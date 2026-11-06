@@ -3082,6 +3082,76 @@ def _take_prefetched_pow(auth_token, target_path="/api/v0/chat/completion"):
     return p
 
 
+# ── HIF risk-control token (v89.8) ──────────────────────────────────────
+# Community packet capture (2026-10-07, ds-free-api #97/#112) proved the
+# official client attaches an x-hif-leim header to /chat/completion
+# requests — a short-lived token issued by hif-leim.deepseek.com (response
+# header x-hif-ttl, default 600s). Every third-party proxy omitted this
+# header; since the November 2026 risk-control tightening, a missing header
+# lets the upstream identify a non-official client with zero behavioral
+# statistics — matching the instant-mute wave. Official behavior: poll on
+# startup, re-fetch per TTL, and on poll failure simply send without the
+# header — this implementation mirrors that one-to-one:
+#   * cached per x-hif-ttl, treated as expired 30s before the deadline
+#   * a failed fetch backs off 60s and returns None: the caller degrades to
+#     sending without the header — exactly the historical behavior, zero
+#     new risk
+#   * never sends a stale token (expired = dropped), never blocks requests
+# The endpoint is unauthenticated, needs no account token, and generates
+# zero account-side traffic.
+_HIF_QUERY_URL = os.getenv("DEEPSEEKER_HIF_URL", "https://hif-leim.deepseek.com/query")
+_HIF_ENABLED = os.getenv("DEEPSEEKER_HIF_ENABLED", "1").strip().lower() not in ("0", "false", "off")
+_HIF_DEFAULT_TTL = 600.0    # official default when x-hif-ttl is absent
+_HIF_REFRESH_MARGIN = 30.0  # treat as expired 30s early — a stale token never goes on a request
+_HIF_FAIL_BACKOFF = 60.0    # retry backoff after a failed fetch
+_HIF_FETCH_TIMEOUT = 5.0    # network budget: degrade rather than slow the chat
+_hif_cache: dict = {"value": None, "expire_at": 0.0, "retry_at": 0.0}
+_hif_lock = asyncio.Lock()
+
+
+async def get_hif_token():
+    """[v89.8] Fetch the x-hif-leim risk-control token; returns None on any
+    failure and the caller degrades to sending without the header (exactly
+    what the real client does when its poll fails). Cache hits cost zero
+    network and zero wait."""
+    if not _HIF_ENABLED:
+        return None
+    now = time.time()
+    if _hif_cache["value"] and now < _hif_cache["expire_at"]:
+        return _hif_cache["value"]  # fast path: lock-free
+    if now < _hif_cache["retry_at"]:
+        return None  # inside backoff: degrade, never send a stale token
+    async with _hif_lock:
+        now = time.time()  # time advanced while waiting for the lock
+        if _hif_cache["value"] and now < _hif_cache["expire_at"]:
+            return _hif_cache["value"]  # double-check: another request refreshed it
+        if now < _hif_cache["retry_at"]:
+            return None
+        try:
+            session = await get_session()
+            async with session.get(
+                _HIF_QUERY_URL,
+                timeout=aiohttp.ClientTimeout(total=_HIF_FETCH_TIMEOUT),
+            ) as resp:
+                ttl = resp.headers.get("x-hif-ttl")
+                try:
+                    ttl = float(ttl)
+                except (TypeError, ValueError):
+                    ttl = _HIF_DEFAULT_TTL
+                js = await resp.json(content_type=None)
+                value = ((js.get("data") or {}).get("biz_data") or {}).get("value")
+            if value:
+                _hif_cache["value"] = value
+                _hif_cache["expire_at"] = now + max(ttl - _HIF_REFRESH_MARGIN, 1.0)
+                _hif_cache["retry_at"] = 0.0
+                return value
+            logger.warning("[hif] risk-control endpoint replied without a value, retrying in 60s")
+        except Exception as exc:
+            logger.warning("[hif] failed to fetch risk-control token (degrading to no header): %s", exc)
+        _hif_cache["retry_at"] = time.time() + _HIF_FAIL_BACKOFF
+        return None
+
+
 async def warmup_pool(max_tokens=3):
     """[v57 ported from v35] Startup warmup: moves ~30s of cold-start cost to
     the startup phase.
@@ -3138,6 +3208,18 @@ async def warmup_pool(max_tokens=3):
                 )
     except Exception as exc:
         logger.warning("[warmup] mute scan failed: %s", exc)
+    # [v89.8] The official client polls the hif-leim risk-control token on
+    # startup; prefetch once so the first chat request already carries it.
+    # Failure only logs: runtime retries with backoff and degrades to
+    # sending without the header (= historical behavior) — startup is never
+    # affected.
+    try:
+        if await get_hif_token():
+            logger.info("[warmup] hif risk-control token prefetched")
+        else:
+            logger.warning("[warmup] hif risk-control token not prefetched (runtime retries automatically, degrading to no header)")
+    except Exception as exc:
+        logger.warning("[warmup] hif prefetch error: %s", exc)
     logger.info("[warmup] all done in %.1fs, PoW pool %d entries", time.time() - t0, len(_POW_PREFETCH))
 
 
@@ -3911,6 +3993,13 @@ async def _send_message_once(chat_id, auth_token, message, parent_message_id, th
         # consumed one — refill in the background for the next turn
         asyncio.create_task(_prefetch_pow(auth_token, "/api/v0/chat/completion"))
     headers = get_headers(auth_token, _pow)
+    # [v89.8] The official client sends x-hif-leim on completion requests (a
+    # missing header is direct proof of a non-official client since Nov 2026).
+    # On failure degrade to sending without it (= historical behavior);
+    # never block, never send a stale token.
+    _hif = await get_hif_token()
+    if _hif:
+        headers["x-hif-leim"] = _hif
     # [v82] DeepSeek protocol change on the evening of 2026-10-31:
     # parent_message_id no longer accepts 0 (biz_code 26 "invalid message
     # id"). Different access points showed inconsistent tolerance for null —
