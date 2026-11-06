@@ -3192,7 +3192,7 @@ async def v1_admin_stats(request: Request):
         cookies_valid = False
     probe = await _deep_health_probe()
     return JSONResponse({
-        "version": "v89.8",
+        "version": "v89.10",
         "active_tokens": active,
         "total_tokens": len(tokens),
         "sessions": sessions,
@@ -3238,15 +3238,18 @@ async def root(request: Request):
 
 
 async def _deep_health_probe():
-    """[v77 P0-9 port] One end-to-end upstream round trip (incl. PoW): create an empty chat session.
+    """[v89.10] End-to-end upstream liveness check — read-only (GET users/current).
 
-    Cost: one empty upstream session per call — the most honest probe this
-    bridge can run, because session creation is exactly the hop that breaks
-    first when PoW/client version/account dies. The probe never sends messages
-    and never reports token material. State-aware token pick: goes through
-    pick_token(), skipping quarantined and cooling-down rows (the old
-    grab-the-first-row approach misreported degradation and sent upstream
-    traffic to credentials known to be dead)."""
+    History (v77~v89.8): this probe created a real empty upstream chat
+    session via create_new_chat. Confirmed on 2026-11-06: the dashboard
+    polls /v1/admin/stats every 30s, i.e. every 30s it conjured an empty
+    session that was never used and never deleted — a high-frequency
+    empty-session pattern that matches DeepSeek's November session-revocation
+    risk triggers, and lines up with tokens being revoked within minutes
+    while the dashboard is open. It now uses the v89.7 read-only probe
+    probe_token_mute (GET users/current: zero sessions, zero messages,
+    zero PoW) — equivalent health information (alive/muted/invalid) with
+    zero anomalous upstream traffic."""
     token_id = await _db(pick_token)
     auth_token = None
     if token_id is not None:
@@ -3260,15 +3263,16 @@ async def _deep_health_probe():
                 "reason": "no ACTIVE token in pool"}
     started = time.perf_counter()
     try:
-        await create_new_chat(auth_token)
+        _pr = await probe_token_mute(auth_token)
     except Exception as e:
         logger.warning("Deep health probe failed: %s", e)
         return {"upstream_reachable": False, "pow_ok": False,
                 "latency_ms": round((time.perf_counter() - started) * 1000, 1),
                 "reason": "upstream error"}
-    return {"upstream_reachable": True, "pow_ok": True,
+    alive = _pr.get("verdict") in ("ok", "muted")  # muted = credentials still valid
+    return {"upstream_reachable": alive, "pow_ok": alive,
             "latency_ms": round((time.perf_counter() - started) * 1000, 1),
-            "session_created": True}
+            "reason": "" if alive else f"token verdict: {_pr.get('verdict')}"}
 
 
 @app.get("/health")
