@@ -11,6 +11,7 @@ import threading
 import sqlite3
 import string
 import time
+import uuid
 from datetime import datetime, timedelta, timezone
 
 import aiohttp
@@ -361,7 +362,15 @@ async def post_with_failover(path, *, headers, session=None, header_timeout=None
 # degrades every account simultaneously, and identical fingerprints correlate
 # bans. The version is env-configurable now; per-token identity profiles
 # (rotating UA/version/locale) remain a P1.
-DEEPSEEKER_CLIENT_VERSION = os.getenv("DEEPSEEKER_CLIENT_VERSION", "2.4.5")
+DEEPSEEKER_CLIENT_VERSION = os.getenv("DEEPSEEKER_CLIENT_VERSION", "2.5.0")
+
+
+def _device_uuid(auth_token):
+    """[v89.9] 设备级 UUID：按令牌确定性派生（uuid5），零存储、重启不变、
+    丢了也永远算得回来 —— 一个账号恒定一台"设备"，对齐真实客户端一人
+    一机的形态。社区抓包（ds-free-api raw-api-reference 公共头集合）实锤
+    官方客户端每条请求都带 x-device-id；缺头是逐请求的形态差异。"""
+    return str(uuid.uuid5(uuid.NAMESPACE_URL, "deeperseeker:" + auth_token))
 
 
 def get_headers(auth_token, pow=None):
@@ -380,6 +389,10 @@ def get_headers(auth_token, pow=None):
     }
     if auth_token:
         headers["authorization"] = f"Bearer {auth_token}"
+        # [v89.9] 真实客户端每条请求都带设备级 UUID + 设备型号（抓包公共头
+        # 集合）；device-model 固定发空串。只加不减，其余逐字节不变。
+        headers["x-device-id"] = _device_uuid(auth_token)
+        headers["x-device-model"] = ""
     if pow:
         headers["x-ds-pow-response"] = pow
     return headers
@@ -3027,6 +3040,17 @@ async def warmup_pool(max_tokens=3):
             logger.warning("[warmup] hif 风控令牌预取未成功（运行时自动重试，降级不带该头）")
     except Exception as exc:
         logger.warning("[warmup] hif 预取异常: %s", exc)
+    # [v89.9] 真实客户端账号初始化时上报设备（check_device）——启动序列的
+    # 最后一块形态差异。失败只记日志，绝不影响服务启动。
+    try:
+        _toks = await asyncio.to_thread(get_tokens)
+        _ok = 0
+        for t in [x for x in _toks if x.get("status") == "ACTIVE"]:
+            if await check_device_report(t["token"]):
+                _ok += 1
+        logger.info("[warmup] check_device 上报完成 (%d ok)", _ok)
+    except Exception as exc:
+        logger.warning("[warmup] check_device failed: %s", exc)
     logger.info("[warmup] 全部完成，用时 %.1fs，PoW 池 %d 条", time.time() - t0, len(_POW_PREFETCH))
 
 
@@ -3093,6 +3117,28 @@ async def probe_token_mute(auth_token):
         "detail": f"unexpected envelope: code={code}",
         "mute_until": None,
     }
+
+
+async def check_device_report(auth_token):
+    """[v89.9] 真实客户端拿到令牌后的设备登记（POST
+    /users/auth_token/check_device）。社区抓包（ds-free-api raw-api-reference
+    0.1）：device_id 即请求头 x-device-id 的设备级 UUID，device_model 固定
+    空串，响应 rotate=null 表示不轮换。官方客户端账号初始化时必调——补上
+    启动序列的最后一块差异。任何失败返回 False，调用方只记日志不阻塞。"""
+    dev = _device_uuid(auth_token)
+    try:
+        session = await get_session()
+        async with session.post(
+            UPSTREAM_BASES[0] + "/api/v0/users/auth_token/check_device",
+            headers=get_headers(auth_token),
+            json={"device_id": dev, "device_model": ""},
+            timeout=aiohttp.ClientTimeout(total=10),
+        ) as resp:
+            body = await resp.json(content_type=None)
+        return isinstance(body, dict) and body.get("code") == 0
+    except Exception as exc:
+        logger.warning("[device] check_device 上报失败（忽略）: %s", exc)
+        return False
 
 
 _EMPTY_SSE_DEFAULT = (
