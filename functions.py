@@ -11,7 +11,6 @@ import threading
 import sqlite3
 import string
 import time
-import uuid
 from datetime import datetime, timedelta, timezone
 
 import aiohttp
@@ -385,17 +384,7 @@ async def post_with_failover(path, *, headers, session=None, header_timeout=None
 # degrades every account simultaneously, and identical fingerprints correlate
 # bans. The version is env-configurable now; per-token identity profiles
 # (rotating UA/version/locale) remain a P1.
-DEEPSEEKER_CLIENT_VERSION = os.getenv("DEEPSEEKER_CLIENT_VERSION", "2.5.0")
-
-
-def _device_uuid(auth_token):
-    """[v89.9] Device-level UUID: deterministically derived from the token
-    (uuid5), zero storage, stable across restarts — one account, one stable
-    "device", matching the official one-person-one-device profile. Community
-    packet capture (ds-free-api raw-api-reference common header set) proved
-    the official client sends x-device-id on every request; missing it is a
-    per-request profile difference."""
-    return str(uuid.uuid5(uuid.NAMESPACE_URL, "deeperseeker:" + auth_token))
+DEEPSEEKER_CLIENT_VERSION = os.getenv("DEEPSEEKER_CLIENT_VERSION", "2.4.5")
 
 
 def get_headers(auth_token, pow=None):
@@ -414,12 +403,6 @@ def get_headers(auth_token, pow=None):
     }
     if auth_token:
         headers["authorization"] = f"Bearer {auth_token}"
-        # [v89.9] the official client sends device-level UUID + device model
-        # on every request (community-captured common header set); device
-        # model is a fixed empty string. Additive only, everything else
-        # byte-identical.
-        headers["x-device-id"] = _device_uuid(auth_token)
-        headers["x-device-model"] = ""
     if pow:
         headers["x-ds-pow-response"] = pow
     return headers
@@ -3237,18 +3220,6 @@ async def warmup_pool(max_tokens=3):
             logger.warning("[warmup] hif risk-control token not prefetched (runtime retries automatically, degrading to no header)")
     except Exception as exc:
         logger.warning("[warmup] hif prefetch error: %s", exc)
-    # [v89.9] the official client reports its device (check_device) during
-    # account init — the last piece of the startup-sequence profile. Failures
-    # only log, never affect startup.
-    try:
-        _toks = await asyncio.to_thread(get_tokens)
-        _ok = 0
-        for t in [x for x in _toks if x.get("status") == "ACTIVE"]:
-            if await check_device_report(t["token"]):
-                _ok += 1
-        logger.info("[warmup] check_device reports done (%d ok)", _ok)
-    except Exception as exc:
-        logger.warning("[warmup] check_device failed: %s", exc)
     logger.info("[warmup] all done in %.1fs, PoW pool %d entries", time.time() - t0, len(_POW_PREFETCH))
 
 
@@ -3318,30 +3289,6 @@ async def probe_token_mute(auth_token):
         "detail": f"unexpected envelope: code={code}",
         "mute_until": None,
     }
-
-
-async def check_device_report(auth_token):
-    """[v89.9] The device registration the official client performs right
-    after obtaining a token (POST /users/auth_token/check_device).
-    Community capture (ds-free-api raw-api-reference 0.1): device_id is the
-    same device-level UUID sent in the x-device-id header, device_model is a
-    fixed empty string, and rotate=null in the response means no rotation.
-    Completes the startup-sequence profile. Any failure returns False and
-    only logs — never blocks startup."""
-    dev = _device_uuid(auth_token)
-    try:
-        session = await get_session()
-        async with session.post(
-            UPSTREAM_BASES[0] + "/api/v0/users/auth_token/check_device",
-            headers=get_headers(auth_token),
-            json={"device_id": dev, "device_model": ""},
-            timeout=aiohttp.ClientTimeout(total=10),
-        ) as resp:
-            body = await resp.json(content_type=None)
-        return isinstance(body, dict) and body.get("code") == 0
-    except Exception as exc:
-        logger.warning("[device] check_device report failed (ignored): %s", exc)
-        return False
 
 
 _EMPTY_SSE_DEFAULT = (
