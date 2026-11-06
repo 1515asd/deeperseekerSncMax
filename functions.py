@@ -2902,6 +2902,69 @@ def _take_prefetched_pow(auth_token, target_path="/api/v0/chat/completion"):
     return p
 
 
+# ── HIF 风控令牌（v89.8）─────────────────────────────────────────────────
+# 2026-10-07 社区抓包实锤（ds-free-api #97/#112）：官方客户端在
+# /chat/completion 请求上带 x-hif-leim 头 —— 由 hif-leim.deepseek.com
+# 下发的短期令牌（响应头 x-hif-ttl，默认 600s）。所有第三方反代都漏了
+# 这个头；2026-11 风控收紧后「缺头 = 上游无需任何行为统计即可判定请求
+# 不是官方客户端」，与一用即禁言的现象吻合。官方行为：启动即轮询，之后
+# 按 TTL 续取，轮询失败时只是不带该头继续请求 —— 本实现一比一对齐：
+#   * 按 x-hif-ttl 缓存，到期前 30s 视为过期（对齐社区实现）
+#   * 取令牌失败退避 60s，期间返回 None：调用方降级为不带该头，
+#     即历史现状，零新增风险
+#   * 绝不发陈年令牌（过期即弃，宁缺毋假），绝不阻断业务请求
+# 端点无鉴权、不需要账号令牌、不产生任何账号侧流量。
+_HIF_QUERY_URL = os.getenv("DEEPSEEKER_HIF_URL", "https://hif-leim.deepseek.com/query")
+_HIF_ENABLED = os.getenv("DEEPSEEKER_HIF_ENABLED", "1").strip().lower() not in ("0", "false", "off")
+_HIF_DEFAULT_TTL = 600.0    # 服务端不带 x-hif-ttl 时按官方缺省 600s
+_HIF_REFRESH_MARGIN = 30.0  # 到期前 30s 就视为过期 —— 绝不让陈令牌上请求
+_HIF_FAIL_BACKOFF = 60.0    # 取令牌失败后的重试退避
+_HIF_FETCH_TIMEOUT = 5.0    # 取令牌网络预算：宁可降级也不拖慢对话
+_hif_cache: dict = {"value": None, "expire_at": 0.0, "retry_at": 0.0}
+_hif_lock = asyncio.Lock()
+
+
+async def get_hif_token():
+    """[v89.8] 取 x-hif-leim 风控令牌；任何失败返回 None，调用方降级为
+    不带该头（真实客户端轮询失败时同样如此）。缓存命中零网络零等待。"""
+    if not _HIF_ENABLED:
+        return None
+    now = time.time()
+    if _hif_cache["value"] and now < _hif_cache["expire_at"]:
+        return _hif_cache["value"]  # 快路径：无锁直取
+    if now < _hif_cache["retry_at"]:
+        return None  # 失败退避期内：降级不带，绝不发陈令牌
+    async with _hif_lock:
+        now = time.time()  # 等锁期间时间已前进，重算
+        if _hif_cache["value"] and now < _hif_cache["expire_at"]:
+            return _hif_cache["value"]  # 双检：别的请求已刷新
+        if now < _hif_cache["retry_at"]:
+            return None
+        try:
+            session = await get_session()
+            async with session.get(
+                _HIF_QUERY_URL,
+                timeout=aiohttp.ClientTimeout(total=_HIF_FETCH_TIMEOUT),
+            ) as resp:
+                ttl = resp.headers.get("x-hif-ttl")
+                try:
+                    ttl = float(ttl)
+                except (TypeError, ValueError):
+                    ttl = _HIF_DEFAULT_TTL
+                js = await resp.json(content_type=None)
+                value = ((js.get("data") or {}).get("biz_data") or {}).get("value")
+            if value:
+                _hif_cache["value"] = value
+                _hif_cache["expire_at"] = now + max(ttl - _HIF_REFRESH_MARGIN, 1.0)
+                _hif_cache["retry_at"] = 0.0
+                return value
+            logger.warning("[hif] 风控令牌端点应答异常（缺 value），60s 后重试")
+        except Exception as exc:
+            logger.warning("[hif] 取风控令牌失败（降级为不带该头）: %s", exc)
+        _hif_cache["retry_at"] = time.time() + _HIF_FAIL_BACKOFF
+        return None
+
+
 async def warmup_pool(max_tokens=3):
     """[v57 移植 v35] 启动预热：把冷启动 ~30s 的开销前移到启动阶段。
 
@@ -2954,6 +3017,16 @@ async def warmup_pool(max_tokens=3):
                 )
     except Exception as exc:
         logger.warning("[warmup] mute scan failed: %s", exc)
+    # [v89.8] 官方客户端启动即轮询 hif-leim 风控令牌；这里预取一次，第一个
+    # 对话请求就带上。失败只记日志：运行时按退避自动重试，期间降级为不带
+    # 该头（= 历史现状），绝不影响服务启动。
+    try:
+        if await get_hif_token():
+            logger.info("[warmup] hif 风控令牌已预取")
+        else:
+            logger.warning("[warmup] hif 风控令牌预取未成功（运行时自动重试，降级不带该头）")
+    except Exception as exc:
+        logger.warning("[warmup] hif 预取异常: %s", exc)
     logger.info("[warmup] 全部完成，用时 %.1fs，PoW 池 %d 条", time.time() - t0, len(_POW_PREFETCH))
 
 
@@ -3646,6 +3719,12 @@ async def _send_message_once(chat_id, auth_token, message, parent_message_id, th
         # consumed one — refill in the background for the next turn
         asyncio.create_task(_prefetch_pow(auth_token, "/api/v0/chat/completion"))
     headers = get_headers(auth_token, _pow)
+    # [v89.8] 官方客户端 completion 请求带 x-hif-leim 风控令牌（缺头即被
+    # 上游判定非官方客户端，2026-11 实锤）。取不到就降级不带（= 历史
+    # 现状），绝不阻断、绝不发陈令牌。
+    _hif = await get_hif_token()
+    if _hif:
+        headers["x-hif-leim"] = _hif
     # [v82] DeepSeek 2026-10-31 晚协议变更：parent_message_id 不再接受
     # 0（biz_code 26 "invalid message id"）。实测不同接入点对 null 的
     # 宽容度不一致——彻底不发该键（首条消息）是唯一全节点安全的写法。
