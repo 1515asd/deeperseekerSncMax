@@ -124,33 +124,52 @@
 </div>
 
 <section>
-  <h2>添加认证令牌</h2>
-  <div class="warning">令牌等同于你的 DeepSeek 账号：只贴进自己的面板，别给任何人。浏览器里退出 DeepSeek 登录后，令牌随之失效。<br>
-  <strong>令牌有效期不固定</strong>，随时可能过期——仪表盘状态列显示「疑似过期」时，重新按下面的方法提取令牌再添加一次即可，旧令牌删掉就行。</div>
-  <div class="card" style="padding:20px">
+  <h2>添加账号 / 令牌</h2>
+  <div class="warning" style="line-height:1.8">
+    <strong>⚠️ 重要声明（2026-11 风控现状）：手动提取浏览器令牌的方式已不再是主要用法。</strong><br>
+    11 月起上游执行「跨环境会话吊销」：令牌在浏览器里出生、拿到桥里使用，会被判定为会话盗用并<strong>整体吊销</strong>——令牌立刻作废，浏览器那边也一起被登出。表现为<strong>频繁封号</strong>，且每次都只能重新去浏览器登录提取，<strong>提取频率越来越高、账号越来越危险</strong>。请优先使用下面的「桥内登录」。
+  </div>
+
+  <div class="card" style="padding:20px;margin-top:14px">
+    <p style="margin:0 0 10px"><strong>方式一（推荐）· 桥内登录</strong>：账号直接在桥里登录，会话出生与使用都在桥内，不经过浏览器。令牌作废时自动重新登录（保守节流：至少间隔 6 小时）。密码只存在本机数据库，不上日志。</p>
+    <div class="hint" style="margin-bottom:10px">添加前请先删除该账号的旧令牌（浏览器提取的那一条）。</div>
+    <div id="login-result" class="hint" style="margin-bottom:8px;display:none"></div>
+    <form method="post" action="/tokens/login" style="display:flex;gap:10px;flex-wrap:wrap">
+      <input type="text" name="alias" placeholder="别名（可选）" style="width:160px">
+      <input type="text" name="account" placeholder="邮箱或手机号" style="flex:1;min-width:200px" autocomplete="off">
+      <input type="password" name="password" placeholder="密码" style="flex:1;min-width:160px" autocomplete="new-password">
+      <input type="text" name="device_id" placeholder="设备指纹（可选，见下方说明）" style="flex:1;min-width:280px" autocomplete="off">
+      <button type="submit">登录并加入池</button>
+    </form>
+    <details style="margin-top:10px">
+      <summary>设备指纹是什么？怎么获取？（强烈建议填写）</summary>
+      <div class="hint" style="padding:8px 2px;line-height:1.9">
+        真实安卓 App 登录时，请求体会携带<strong>数美 SDK 生成的设备指纹</strong>（89 字符的 base64 串）。实测显示，用随机/伪造的 UUID 登录会被风控直接拒绝（<code>RISK_DEVICE_DETECTED</code>）。填写真实指纹可以显著降低登录被拒的风险。<br>
+        <strong>获取方法（一次即可，长期有效）：</strong>
+        <ol style="margin:6px 0">
+          <li>Chrome 打开 <a href="https://chat.deepseek.com" target="_blank">chat.deepseek.com</a>（<strong>不需要登录</strong>），等页面完全加载</li>
+          <li>按 F12 → 控制台 / Console → 执行：<code>SMSdk.getDeviceId()</code></li>
+          <li>把输出的那串 base64 粘贴到上面的「设备指纹」框里</li>
+        </ol>
+        若仍提示「上游拒绝了这个设备的登录」，改用：无痕窗口<strong>真实登录一次</strong> chat.deepseek.com → F12 → Network 过滤 <code>users/login</code> → 复制该请求 Payload 里的 <code>device_id</code> 值（这一次登录产生的浏览器会话之后会被吊销，属正常现象）。<strong>同一账号请始终使用同一个指纹</strong>，桥会记住它并在自动重登时复用。
+      </div>
+    </details>
+  </div>
+
+  <details style="margin-top:12px">
+    <summary>方式二（不推荐）· 手动粘贴浏览器令牌 —— 会频繁封号，需要反复重新提取</summary>
+    <div class="card" style="padding:20px;margin-top:8px">
+      <div class="warning" style="margin-bottom:10px;line-height:1.7">⚠️ 这样添加的令牌<strong>随时会被整体吊销</strong>（通常几分钟到几小时内）：账号可能被禁言/封号，且每次失效都要重新去浏览器登录提取一次。仅建议在暂时无法使用桥内登录时应急。</div>
+      <div class="hint" style="margin-bottom:10px">令牌等同于你的 DeepSeek 账号：只贴进自己的面板，别给任何人。浏览器里退出 DeepSeek 登录后，令牌随之失效。</div>
     <form method="post" action="/tokens/add" style="display:flex;gap:10px;flex-wrap:wrap">
       <input type="text" name="alias" placeholder="别名（可选，如：小号1）" style="width:200px">
       <input type="text" name="auth_token" placeholder="粘贴令牌（不要带引号）" style="flex:1;min-width:280px">
       <button type="submit">添加令牌</button>
     </form>
-  </div>
-
-  <details style="margin-top:12px">
-    <summary>桥内登录（可选）：让账号直接在桥里登录，令牌自动生成与自愈</summary>
-    <div class="card" style="padding:20px;margin-top:8px">
-      <div class="hint" style="margin-bottom:10px">11 月起上游会整体吊销「在别的环境使用」的会话——浏览器提取的令牌在桥里一用就死。<strong>桥内登录让会话直接出生在桥里</strong>，令牌作废时自动重新登录（保守节流：至少间隔 6 小时）。密码只存在本机数据库，不上日志。添加前请先删除该账号的旧令牌。</div>
-      <div id="login-result" class="hint" style="margin-bottom:8px;display:none"></div>
-      <form method="post" action="/tokens/login" style="display:flex;gap:10px;flex-wrap:wrap">
-        <input type="text" name="alias" placeholder="别名（可选）" style="width:160px">
-        <input type="text" name="account" placeholder="邮箱或手机号" style="flex:1;min-width:200px" autocomplete="off">
-        <input type="password" name="password" placeholder="密码" style="flex:1;min-width:160px" autocomplete="new-password">
-        <button type="submit">登录并加入池</button>
-      </form>
     </div>
-  </details>
 
-  <details>
-    <summary>怎么拿到令牌？三种方法选一种就行</summary>
+    <details style="margin-top:8px">
+      <summary>怎么拿到令牌？三种方法选一种就行（仅供方式二使用）</summary>
     <div style="padding:4px 2px 14px">
       <p><strong>方法 A · 电脑 / 安卓（最简单）</strong></p>
       <ol>
@@ -190,6 +209,7 @@ if (out) { completion(out); } else { completion('未取到：请确认 Safari �
         </div>
       </details>
     </div>
+    </details>
   </details>
 </section>
 
@@ -385,7 +405,7 @@ refreshPool(); refreshUsage(); refreshDeep(); refreshEffort();
   const box = document.getElementById('login-result');
   const REASON = {bad_credentials: '账号或密码不对（PASSWORD_OR_USER_NAME_IS_WRONG）',
     banned: '账号被上游封禁（USER_IS_BANNED）',
-    risk_device: '上游拒绝了这个设备的登录（RISK_DEVICE_DETECTED）——设备指纹校验比预期严，账号本身没事',
+    risk_device: '上游拒绝了这个设备的登录（RISK_DEVICE_DETECTED）——大概率是没填设备指纹或指纹无效。展开登录表单下方的「设备指纹是什么？」按步骤获取真实指纹后重试（账号本身没事）',
     network: '网络请求失败，稍后再试', no_token: '上游应答异常（未返回令牌）',
     unexpected: '上游应答格式异常', empty: '账号和密码都要填'};
   if (lr === 'ok') { box.textContent = '✅ 登录成功，令牌已加入池（带「桥内」标记），作废时会自动重新登录'; box.style.display = 'block'; }

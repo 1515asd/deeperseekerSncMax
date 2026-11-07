@@ -203,6 +203,13 @@ def init_db():
         conn.execute("ALTER TABLE tokens ADD COLUMN password TEXT")
     if "last_login" not in existing_cols:
         conn.execute("ALTER TABLE tokens ADD COLUMN last_login REAL")
+    # [v89.13] native 令牌的登录设备指纹（数美 SMSdk 89 字符 base64）。
+    # 社区抓包与 ds_core 实测：登录体 device_id 必须是真实设备指纹，
+    # 随机 UUID 返回 RISK_DEVICE_DETECTED（biz_code=11）。用户在面板
+    # 提供一次后落库，自动重登复用同一指纹（与真实设备行为一致）；
+    # 留空则回退确定性 uuid5（可能被风控拒绝，如实上报 risk_device）。
+    if "device_id" not in existing_cols:
+        conn.execute("ALTER TABLE tokens ADD COLUMN device_id TEXT")
     # [v89.6] 功能开关（管理员面板读写）：key-value 单表。
     # 首个开关 effort_enhance：提示词增强（effort 指令）总开关，
     # 缺省 ON（恢复 v77 设计意图）；关闭时聊天路径不再设置
@@ -692,17 +699,23 @@ def _login_device_uuid(account):
     return str(uuid.uuid5(uuid.NAMESPACE_URL, "deeperseeker-native:" + account))
 
 
-async def login_account(account, password):
-    """[v89.12] 桥内登录一个账号，返回结构化结果（绝不含密码）。
+async def login_account(account, password, device_id=None):
+    """[v89.12] 桥内登录一个账号，返回结构化结果（绝不含密码/指纹）。
 
     account 支持邮箱或手机号（@ 判别），请求形态 = 官方安卓 App 登录：
-    安卓头组 + os=android + referer sign_in。上游业务拒绝（密码错误/
-    封号/风控设备）原样上报，由调用方决定如何呈现；网络失败返回
-    reason="network"，不区分重试性。"""
+    安卓头组 + os=android + referer sign_in + x-device-id 头。
+    [v89.13] 请求体 device_id 优先使用调用方提供的数美设备指纹
+    （真实安卓 App 登录携带的就是它；随机 UUID 会被风控以
+    RISK_DEVICE_DETECTED 拒绝——ds_core 2026 实测），未提供时回退
+    确定性 uuid5。x-device-id 头始终是 UUID（与请求体指纹是两个不同
+    的东西，真实客户端分别发送设备 UUID 与数美指纹）。
+    上游业务拒绝（密码错误/封号/风控设备）原样上报，由调用方决定如何
+    呈现；网络失败返回 reason="network"，不区分重试性。"""
     if "@" in account:
         email, mobile = account, None
     else:
         email, mobile = None, account
+    device_uuid = _login_device_uuid(account)
     _fail = lambda r, d="": {"ok": False, "reason": r, "detail": d,
                              "token": None, "muted": None, "mute_until": None}
     session = await get_session()
@@ -710,10 +723,11 @@ async def login_account(account, password):
         async with session.post(
             UPSTREAM_BASES[0] + "/api/v0/users/login",
             headers={**get_headers(None),
-                     "referer": "https://chat.deepseek.com/sign_in"},
+                     "referer": "https://chat.deepseek.com/sign_in",
+                     "x-device-id": device_uuid, "x-device-model": ""},
             json={
                 "email": email, "mobile": mobile, "password": password,
-                "area_code": "+86", "device_id": _login_device_uuid(account),
+                "area_code": "+86", "device_id": device_id or device_uuid,
                 "os": "android",
             },
             timeout=aiohttp.ClientTimeout(total=15),
@@ -740,9 +754,9 @@ async def login_account(account, password):
             "mute_until": chat.get("mute_until")}
 
 
-def add_native_token(token, account, password, alias=None):
+def add_native_token(token, account, password, alias=None, device_id=None):
     """[v89.12] 桥内登录产出的令牌入库：与浏览器令牌同池同调度，仅多出
-    account/password/last_login 元数据（自动重登用）。"""
+    account/password/last_login/device_id 元数据（自动重登用）。"""
     conn = get_db()
     if not conn.execute("SELECT 1 FROM tokens WHERE id = 1").fetchone():
         next_id = 1
@@ -755,9 +769,9 @@ def add_native_token(token, account, password, alias=None):
         """).fetchone()
         next_id = row[0] if row and row[0] else 1
     conn.execute(
-        "INSERT INTO tokens (id, alias, token, status, account, password, last_login) "
-        "VALUES (?, ?, ?, 'ACTIVE', ?, ?, ?)",
-        (next_id, alias, token, account, password, time.time()),
+        "INSERT INTO tokens (id, alias, token, status, account, password, "
+        "last_login, device_id) VALUES (?, ?, ?, 'ACTIVE', ?, ?, ?, ?)",
+        (next_id, alias, token, account, password, time.time(), device_id),
     )
     conn.commit()
     conn.close()
@@ -780,11 +794,13 @@ def get_native_credentials(token_id):
     返回 None——自动重登只对显式添加过账号的行生效。"""
     conn = get_db()
     row = conn.execute(
-        "SELECT account, password, last_login FROM tokens WHERE id = ?", (token_id,)
+        "SELECT account, password, last_login, device_id FROM tokens WHERE id = ?",
+        (token_id,),
     ).fetchone()
     conn.close()
     if row and row[0] and row[1]:
-        return {"account": row[0], "password": row[1], "last_login": row[2] or 0.0}
+        return {"account": row[0], "password": row[1],
+                "last_login": row[2] or 0.0, "device_id": row[3] or None}
     return None
 
 
@@ -807,7 +823,9 @@ async def relogin_native(token_id):
             logger.info("[relogin] token #%s 距上次登录不足 %.0fs，跳过自动重登",
                         token_id, _RELOGIN_MIN_INTERVAL)
             return
-        result = await login_account(creds["account"], creds["password"])
+        result = await login_account(
+            creds["account"], creds["password"], creds.get("device_id"),
+        )
         if result.get("ok"):
             await asyncio.to_thread(update_native_token, token_id, result["token"])
             logger.info("[relogin] token #%s 已通过桥内登录自愈（账号 %s***）",

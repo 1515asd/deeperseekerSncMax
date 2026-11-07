@@ -3086,7 +3086,7 @@ async def v1_admin_stats(request: Request):
         cookies_valid = False
     probe = await _deep_health_probe()
     return JSONResponse({
-        "version": "v89.12",
+        "version": "v89.13",
         "active_tokens": active,
         "total_tokens": len(tokens),
         "sessions": sessions,
@@ -3135,11 +3135,15 @@ async def tokens_login(request: Request):
     account = (form.get("account") or "").strip()
     password = form.get("password") or ""
     alias = (form.get("alias") or "").strip() or None
+    # [v89.13] 可选的数美设备指纹：真实安卓 App 登录体携带的就是它，
+    # 随机 UUID 会被 RISK_DEVICE_DETECTED 拒绝。落库供自动重登复用。
+    device_id = (form.get("device_id") or "").strip() or None
     if not account or not password:
         return HTMLResponse("<meta http-equiv='refresh' content='0;url=/dashboard?login=empty'>")
-    result = await login_account(account, password)
+    result = await login_account(account, password, device_id)
     if result.get("ok"):
-        await _db(add_native_token, result["token"], account, password, alias)
+        await _db(add_native_token, result["token"], account, password,
+                  alias, device_id)
         return HTMLResponse("<meta http-equiv='refresh' content='0;url=/dashboard?login=ok'>")
     reason = result.get("reason") or "fail"
     return HTMLResponse(
