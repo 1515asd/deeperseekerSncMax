@@ -3077,7 +3077,7 @@ async def v1_admin_stats(request: Request):
         cookies_valid = False
     probe = await _deep_health_probe()
     return JSONResponse({
-        "version": "v89.10",
+        "version": "v89.11",
         "active_tokens": active,
         "total_tokens": len(tokens),
         "sessions": sessions,

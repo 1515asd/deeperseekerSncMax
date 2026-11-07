@@ -2915,7 +2915,12 @@ def _take_prefetched_pow(auth_token, target_path="/api/v0/chat/completion"):
 #   * 绝不发陈年令牌（过期即弃，宁缺毋假），绝不阻断业务请求
 # 端点无鉴权、不需要账号令牌、不产生任何账号侧流量。
 _HIF_QUERY_URL = os.getenv("DEEPSEEKER_HIF_URL", "https://hif-leim.deepseek.com/query")
-_HIF_ENABLED = os.getenv("DEEPSEEKER_HIF_ENABLED", "1").strip().lower() not in ("0", "false", "off")
+# [v89.11] 默认关闭。artyom08-dev 的抓包结论：安卓 App 不发送 x-hif-leim
+# （该头来自 web 前端源码）；本桥是安卓形态，戴着 web 专属头构成「安卓+web
+# 混血」，这种形态不一致本身是可识别信号。且 11-02 的环境检测只架在
+# 浏览器/登录路径上，安卓 API 路径无需携带任何 web 味道的属性。需要时
+# DEEPSEEKER_HIF_ENABLED=1 可一键恢复。
+_HIF_ENABLED = os.getenv("DEEPSEEKER_HIF_ENABLED", "0").strip().lower() not in ("0", "false", "off")
 _HIF_DEFAULT_TTL = 600.0    # 服务端不带 x-hif-ttl 时按官方缺省 600s
 _HIF_REFRESH_MARGIN = 30.0  # 到期前 30s 就视为过期 —— 绝不让陈令牌上请求
 _HIF_FAIL_BACKOFF = 60.0    # 取令牌失败后的重试退避
@@ -3021,10 +3026,13 @@ async def warmup_pool(max_tokens=3):
     # 对话请求就带上。失败只记日志：运行时按退避自动重试，期间降级为不带
     # 该头（= 历史现状），绝不影响服务启动。
     try:
-        if await get_hif_token():
-            logger.info("[warmup] hif 风控令牌已预取")
+        if _HIF_ENABLED:
+            if await get_hif_token():
+                logger.info("[warmup] hif 风控令牌已预取")
+            else:
+                logger.warning("[warmup] hif 风控令牌预取未成功（运行时自动重试，降级不带该头）")
         else:
-            logger.warning("[warmup] hif 风控令牌预取未成功（运行时自动重试，降级不带该头）")
+            logger.info("[warmup] hif 已禁用（纯安卓形态，不发送 x-hif-leim）")
     except Exception as exc:
         logger.warning("[warmup] hif 预取异常: %s", exc)
     logger.info("[warmup] 全部完成，用时 %.1fs，PoW 池 %d 条", time.time() - t0, len(_POW_PREFETCH))
