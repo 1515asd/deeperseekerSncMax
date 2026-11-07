@@ -103,12 +103,21 @@
 <h2>令牌池<span class="sec"><span class="badge b-ok">正常</span> <span class="badge b-blue">限速冷却</span> <span class="badge b-warn">确认禁言</span> <span class="badge b-warn">疑似禁言</span> <span class="badge b-err">疑似过期</span> <span class="badge b-err">其他隔离</span></span></h2>
 <div class="wrap">
 <table id="pool">
-  <thead><tr><th>ID</th><th>别名</th><th>令牌</th><th>状态</th><th>说明（这是什么意思）</th><th>进行中</th><th>上次使用</th><th>冷却剩余</th><th>操作</th></tr></thead>
+  <thead><tr><th>ID</th><th>别名</th><th>令牌</th><th>状态</th><th>说明（这是什么意思）</th><th>进行中</th><th>上次使用</th><th>冷却剩余</th><th>指纹</th><th>操作</th></tr></thead>
   <tbody></tbody>
 </table>
 </div>
 <p style="margin-top:10px"><button class="btn-sm btn-ghost" onclick="probeTokens(this)">检测令牌（问上游真实状态）</button></p>
 <div id="probe-result" class="hint" style="line-height:1.9;margin-top:8px"></div>
+<details style="margin-top:12px">
+  <summary>补录 / 更新某个令牌的设备指纹（可选 · 仅备档，不发请求）</summary>
+  <form id="fp-form" onsubmit="return submitFingerprint(event)" style="display:flex;gap:10px;flex-wrap:wrap;margin-top:8px">
+    <input type="text" id="fp-token-id" placeholder="令牌 ID（池表格第一列）" style="width:180px">
+    <input type="text" id="fp-value" placeholder="数美设备指纹（约 89 字符）" style="flex:1;min-width:280px">
+    <button type="submit" class="btn-sm">保存指纹</button>
+  </form>
+  <p class="hint" style="margin:6px 0 0">指纹只在本面板备档并做格式检查（安卓原生格式 / 网页格式 / 未填），不会随任何请求发出去。留空保存即清除。</p>
+</details>
 <div class="warning" style="margin-top:12px;line-height:1.7">
   <strong>令牌什么时候会过期？</strong>不固定，由 DeepSeek 服务端决定，这边无法预知。过期后客户端会报 <code>401</code> 或 <code>503 No tokens available</code>。<br>
   <strong>分不清过期还是禁言？</strong>点上面的「检测令牌」，直接问 DeepSeek 每个令牌的真实状态（正常 / 禁言到几点 / 已作废），不用自己挨个试。也可以用该账号登录 <a href="https://chat.deepseek.com" target="_blank">chat.deepseek.com</a>：网页提示重新登录 = 过期；发消息弹出禁言提示 = 禁言；能正常聊 = 误判，点「恢复」即可。<br>
@@ -148,16 +157,17 @@
     </details>
 
     <details style="margin-top:6px">
-      <summary>方法 B · iPhone / iPad（快捷指令，不装任何 App）</summary>
+      <summary>方法 B · iPhone / iPad（不用电脑，实测可行：Safari 登录 + 书签取令牌）</summary>
       <div style="padding:8px 2px;line-height:1.9">
+        <p style="margin:0 0 8px"><strong>为什么不是快捷指令？</strong>原来的快捷指令方案模拟安卓 App 登录，但上游现在要求登录请求必须携带<strong>安卓版数美 SDK 生成的设备指纹</strong>（安卓手机上才能生成的 89 字符串），iPhone 网页上取到的是另一种格式，怎么填都会被拒（<code>RISK_DEVICE_DETECTED</code>）。所以放弃快捷指令，改用下面这套——2026-11-07 在真 iPhone 上完整实测通过的：</p>
         <ol>
-          <li>快捷指令 App → 新建 → 添加两个「要求输入」（提示语：账号；密码）</li>
-          <li>添加「获取 URL 内容」：URL 栏填 <code>https://chat.deepseek.com/api/v0/users/login</code>，方式选 <strong>POST</strong>，展开「头部」，<strong>键和值是两个格子，分开填</strong>（冒号左边进键、右边进值，不要带冒号连粘）：<table><tr><th>键</th><th>值</th></tr><tr><td><code>content-type</code></td><td><code>application/json</code></td></tr><tr><td><code>referer</code></td><td><code>https://chat.deepseek.com/sign_in</code></td></tr><tr><td><code>user-agent</code></td><td><code>Dalvik/2.1.0 (Linux; U; Android 14; Pixel 7)</code></td></tr></table></li>
-          <li>展开「请求体」，类型选 <strong>JSON</strong>，同样<strong>一行一个键、键和值分开填</strong>：<table><tr><th>键</th><th>值</th></tr><tr><td><code>email</code>（账号含 @ 用 email，手机号改用 <code>mobile</code>）</td><td>选变量 → 你的「账号」输入</td></tr><tr><td><code>password</code></td><td>选变量 → 你的「密码」输入</td></tr><tr><td><code>area_code</code></td><td><code>+86</code>（选「文本」类型）</td></tr><tr><td><code>device_id</code>（可选）</td><td>设备指纹，见下方说明</td></tr><tr><td><code>os</code></td><td><code>android</code></td></tr></table></li>
-          <li>添加「获取词典值」：键填 <code>data.biz_data.user.token</code>，<strong>词典来源选变量 →「URL 内容」的结果</strong>，再接「拷贝至剪贴板」（拷贝的对象是词典值的输出）。若返回为空，说明登录被拒，查看请求结果里的报错字段</li>
-          <li>运行 → 令牌进剪贴板 → 贴到下方表单</li>
+          <li>iPhone 的 <strong>Safari</strong> 打开 <code>chat.deepseek.com</code>，用账号密码正常登录。第一次在这台设备登录会要求<strong>邮箱验证</strong>：DeepSeek 发一串验证码到你的注册邮箱，去邮箱把码抄出来填进去，登录才算完成。这是官方流程，正常走即可</li>
+          <li>登录成功、能看到聊天页面后<strong>别关这个页面</strong>。点 Safari 底部的「分享」按钮 → 选「添加书签」，先随便存一个书签</li>
+          <li>打开 Safari 的书签列表 → 「编辑」→ 点刚才那个书签 → 把<strong>网址</strong>一栏整个替换成下面这段（整段复制，一个字符都别少）：<br><code>javascript:prompt('令牌如下',JSON.parse(localStorage.getItem('userToken')).value)</code><br>改完保存</li>
+          <li>回到 <code>chat.deepseek.com</code> 那个页面（必须停在这个页面），从书签列表里<strong>点一下刚才改好的书签</strong>。屏幕会弹出一个框，里面就是你的令牌——长按全选复制</li>
+          <li>把令牌贴到下方「贴入令牌」的表单，完成</li>
         </ol>
-        <p class="hint">手机发请求不受浏览器 CORS 限制，且走的是你自己的移动网络，IP 天然干净。</p>
+        <p class="hint">说明：第 4 步必须停在 chat.deepseek.com 页面上点书签才有效；如果弹出来是 null 或报错，说明页面没登录成功（回第 1 步），或 Safari 的 JavaScript 被关了（设置 → Safari → 高级 → 打开 JavaScript）。这个令牌来自你自己手机上的完整官方登录（含邮箱验证码），是你账号的钥匙，不要发给别人。风险提示照旧：会话是网页形态出生的，暂不能保证长期不被风控波及，建议用小号。</p>
       </div>
     </details>
 
@@ -170,22 +180,26 @@
     </details>
 
     <details style="margin-top:6px">
-      <summary>设备指纹（可选 · 不知道有没有用）</summary>
+      <summary>设备指纹（2026-11-07 实测更新：只有安卓真机能生成有效指纹）</summary>
       <div class="hint" style="padding:8px 2px;line-height:1.9">
-        真实安卓 App 登录时会携带<strong>数美 SDK 生成的设备指纹</strong>（89 字符 base64）。实测：<strong>伪造/随机的值会被上游直接拒绝</strong>（RISK_DEVICE_DETECTED），所以工具里留了这个可选项；但<strong>填了真实指纹能不能进一步降低风险，不知道有没有用</strong>——建议填，同一账号每次登录用同一个即可。获取方法：
-        <ol style="margin:6px 0">
-          <li><strong>电脑/安卓：</strong>Chrome 打开 <a href="https://chat.deepseek.com" target="_blank">chat.deepseek.com</a>（不需要登录）→ F12 → 控制台执行 <code>SMSdk.getDeviceId()</code>（输出 undefined 就等几秒再执行一次）</li>
-          <li><strong>iPhone：</strong>用「在网页上运行 JavaScript」快捷指令在 chat.deepseek.com 页面（不登录）执行 <code>completion(SMSdk.getDeviceId())</code>，记得把「接收」类型设为 Safari 网页</li>
-        </ol>
+        真实安卓 App 登录时携带<strong>数美 SDK（安卓原生版）生成的设备指纹</strong>（约 89 字符 base64）。当天完整实测结论：
+        <ul style="margin:6px 0">
+          <li>登录请求现在<strong>必须</strong>携带 <code>device_id</code> 字段——缺了直接 422 被拒（连账号都不校验）</li>
+          <li>空值 / 随机伪造值 → <code>RISK_DEVICE_DETECTED</code>（biz_code 11）</li>
+          <li><strong>浏览器版数美 SDK 生成的指纹（约 31 字符短 ID）同样被拒（11）</strong>——包括电脑 Chrome 和 iPhone Safari 取到的。所以旧版教程里「浏览器 F12 取指纹」的方法<strong>已失效</strong></li>
+        </ul>
+        结论：<strong>没有安卓真机，就无法生成能通过校验的指纹</strong>，安卓协议登录（方法 A / 安卓命令行）也就走不通。这正是本面板改推「Safari 网页登录 + 书签取令牌」（方法 B）的原因。手头有安卓真机的用户仍可走方法 A：在安卓手机浏览器打开 chat.deepseek.com（不登录），页面控制台执行 <code>SMSdk.getDeviceId()</code>（输出 undefined 就等几秒再执行一次），取到的指纹随登录工具填入。
       </div>
     </details>
   </div>
 
   <div class="card" style="padding:20px;margin-top:12px">
-    <p style="margin:0 0 10px"><strong>贴入令牌</strong>：把登录工具输出的令牌粘贴到这里（不要带引号）。令牌等同于你的 DeepSeek 账号，只贴进自己的面板。</p>
+    <p style="margin:0 0 10px"><strong>贴入令牌</strong>：把登录工具输出的令牌粘贴到这里（不要带引号）。令牌等同于你的 DeepSeek 账号，只贴进自己的面板。<br>
+    <span class="hint">设备指纹是<strong>可选</strong>的备档信息：面板只把它记录下来并检查格式，<strong>不会</strong>用它发任何请求。从安卓真机/登录工具拿到数美指纹（约 89 字符）可以填；手机网页取到的短指纹也能填（会标注为「网页格式」，实测它无法通过安卓登录，仅备档）。</span></p>
     <form method="post" action="/tokens/add" style="display:flex;gap:10px;flex-wrap:wrap">
       <input type="text" name="alias" placeholder="别名（可选，如：小号1）" style="width:200px">
       <input type="text" name="auth_token" placeholder="粘贴登录工具输出的令牌" style="flex:1;min-width:280px">
+      <input type="text" name="device_fingerprint" placeholder="数美设备指纹（可选，仅备档）" style="flex:1;min-width:280px">
       <button type="submit">添加令牌</button>
     </form>
     <p class="hint" style="margin:8px 0 0">令牌有效期不固定，失效就再跑一次登录工具换新的，旧的删掉即可。面板「检测」按钮可查看每个令牌的真实状态（正常 / 禁言到几点 / 已作废）。</p>
@@ -256,17 +270,23 @@ async function refreshPool() {
         note = KIND_NOTE.other + (t.reason ? ' 原因：' + t.reason : '');
       }
       const tr = document.createElement('tr');
+      // [v90.1] 指纹列：格式徽章（纯展示，不发请求）
+      const FP_BADGE = {android: ['b-ok', '✓ 安卓格式'], web: ['b-warn', '网页格式'], unknown: ['b-err', '格式未知']};
+      const fpb = t.fingerprint_class ? (FP_BADGE[t.fingerprint_class] || ['b-err', '格式未知']) : null;
+      const fpCell = fpb
+        ? `<span class="badge ${fpb[0]}" title="${esc(t.fingerprint_head || '')}">${fpb[1]}</span>`
+        : '<span class="hint">未填</span>';
       tr.innerHTML = `<td>${t.id}</td><td>${esc(t.label)}</td>`
         + `<td><code>${esc(t.token_head || '—')}</code></td>`
         + `<td><span class="badge ${badge}">${esc(stLabel)}</span></td>`
         + `<td style="white-space:normal;min-width:220px">${esc(note)}</td><td>${t.in_flight}</td>`
-        + `<td>${esc(t.last_used)}</td><td>${esc(t.cooldown)}</td>`
+        + `<td>${esc(t.last_used)}</td><td>${esc(t.cooldown)}</td><td>${fpCell}</td>`
         + `<td>${t.can_restore ? `<button class="btn-sm" onclick="restore(${t.id})">恢复</button> ` : ''}`
         + `<button class="btn-sm btn-danger" onclick="del(${t.id})">删除</button></td>`;
       tb.appendChild(tr);
     }
     document.getElementById('c-flight').textContent = fmt(flight);
-    if (!(pool.pool || []).length) tb.innerHTML = '<tr><td colspan="9" class="hint" style="text-align:center;padding:24px">池是空的 —— 在下方「添加认证令牌」加入第一个账号</td></tr>';
+    if (!(pool.pool || []).length) tb.innerHTML = '<tr><td colspan="10" class="hint" style="text-align:center;padding:24px">池是空的 —— 在下方「添加认证令牌」加入第一个账号</td></tr>';
   } catch (e) { console.error('pool', e); }
 }
 
@@ -362,10 +382,28 @@ async function probeTokens(btn) {
     const icon = {ok: '✅', warn: '🟠', err: '🔴', idle: '⚪️'};
     el.innerHTML = (d.probes || []).map(p =>
       `<div>${icon[p.cls] || '⚪️'} <strong>${esc(p.label)}</strong>（<code>${esc(p.token_head || '—')}</code>）：${esc(p.text)}</div>`
+      + `<div style="margin:2px 0 10px 26px">🔑 指纹：${esc(p.fingerprint_text || '未记录')}</div>`
     ).join('') || '池是空的，没有可检测的令牌。';
     if ((d.probes || []).some(p => p.status !== undefined && p.cls === 'warn')) refreshPool();
   } catch (e) { el.textContent = '❌ 检测请求失败：' + e; }
   btn.disabled = false;
+}
+
+// [v90.1] 补录/更新指纹：POST /tokens/<id>/fingerprint，纯备档
+async function submitFingerprint(ev) {
+  ev.preventDefault();
+  const id = document.getElementById('fp-token-id').value.trim();
+  const fp = document.getElementById('fp-value').value.trim();
+  if (!id) { alert('先填令牌 ID（池表格第一列的数字）'); return false; }
+  try {
+    await fetch('/tokens/' + encodeURIComponent(id) + '/fingerprint', {
+      method: 'POST', headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+      body: 'device_fingerprint=' + encodeURIComponent(fp)
+    });
+    document.getElementById('fp-value').value = '';
+    refreshPool();
+  } catch (e) { alert('保存失败：' + e); }
+  return false;
 }
 
 // 接口地址跟随访问面板用的域名，避免硬编码

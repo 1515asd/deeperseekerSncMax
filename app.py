@@ -207,6 +207,8 @@ from functions import (
     get_pool_view,
     probe_token_mute,
     _format_mute_until,
+    set_token_fingerprint,
+    classify_fingerprint,
     effort_level,
     get_effort_enhance,
     set_effort_enhance,
@@ -3022,6 +3024,20 @@ async def v1_pool_probe(request: Request):
         head = (pool_view.get(t["id"]) or {}).get("token_head", "—")
         entry = {"id": t["id"], "label": t.get("alias") or f"untagged #{t['id']}",
                  "token_head": head, "verdict": verdict, "status": t["status"]}
+        # [v90.1] 深度检测融合指纹状态：格式判定 + 大白话说明。
+        # 指纹检查是纯本地字符串分类，不新增任何上游请求。
+        fp_cls = classify_fingerprint(t.get("device_fingerprint"))
+        fp_head = (pool_view.get(t["id"]) or {}).get("fingerprint_head")
+        entry["fingerprint_class"] = fp_cls
+        entry["fingerprint_head"] = fp_head
+        if fp_cls == "android":
+            entry["fingerprint_text"] = f"指纹已记录（安卓原生格式 {fp_head}）——与真机指纹同格式"
+        elif fp_cls == "web":
+            entry["fingerprint_text"] = f"指纹已记录（网页格式 {fp_head}）——实测此格式无法通过安卓登录，仅备档"
+        elif fp_cls == "unknown":
+            entry["fingerprint_text"] = "指纹已记录（格式不常见，无法判定来源）"
+        else:
+            entry["fingerprint_text"] = "未记录指纹（可选项；从安卓真机或登录工具获取后可在令牌池补录）"
         if verdict == "ok":
             entry["text"] = "正常：令牌有效，账号未被禁言"
             entry["cls"] = "ok"
@@ -3077,7 +3093,7 @@ async def v1_admin_stats(request: Request):
         cookies_valid = False
     probe = await _deep_health_probe()
     return JSONResponse({
-        "version": "v90.0",
+        "version": "v90.1",
         "active_tokens": active,
         "total_tokens": len(tokens),
         "sessions": sessions,
@@ -3100,12 +3116,35 @@ async def tokens_add(request: Request):
         form = _parse_urlencoded_form(await request.body())
         auth_token = form.get("auth_token", "").strip().strip("'\"")
         alias = form.get("alias", "").strip() or None
+        # [v90.1] 数美设备指纹（可选，纯记录，不参与任何上游请求）
+        device_fingerprint = form.get("device_fingerprint", "").strip() or None
     else:
         form = await request.form()
         auth_token = form.get("auth_token", "").strip().strip("'\"")
         alias = form.get("alias", "").strip() or None
+        device_fingerprint = form.get("device_fingerprint", "").strip() or None
     if auth_token:
-        await _db(add_token, auth_token, alias)
+        await _db(add_token, auth_token, alias, device_fingerprint)
+    return HTMLResponse("<meta http-equiv='refresh' content='0;url=/dashboard'>")
+
+
+@app.post("/tokens/{token_id}/fingerprint")
+async def tokens_fingerprint(token_id: int, request: Request):
+    """[v90.1] 补录/更新某令牌的数美设备指纹（管理员）。
+
+    纯 DB 写 + 仪表盘回显：指纹不参与任何上游请求，不影响轮换与
+    聊天路径；用途是备档（将来需要重新登录时复用）与格式检查展示。"""
+    try:
+        get_current_admin(request)
+    except HTTPException:
+        return HTMLResponse("<meta http-equiv='refresh' content='0;url=/login'>")
+    ctype = request.headers.get("content-type", "")
+    if ctype.startswith("application/x-www-form-urlencoded"):
+        form = _parse_urlencoded_form(await request.body())
+    else:
+        form = await request.form()
+    fingerprint = form.get("device_fingerprint", "").strip()
+    await _db(set_token_fingerprint, token_id, fingerprint)
     return HTMLResponse("<meta http-equiv='refresh' content='0;url=/dashboard'>")
 
 

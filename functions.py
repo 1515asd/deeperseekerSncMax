@@ -193,6 +193,11 @@ def init_db():
     # 只在隔离路径写入，正常请求零接触。
     if "quarantine_reason" not in existing_cols:
         conn.execute("ALTER TABLE tokens ADD COLUMN quarantine_reason TEXT")
+    # [v90.1] 数美设备指纹（可选，纯记录）：贴令牌模型下指纹不参与
+    # 任何上游请求——只存储、展示、格式判定，供将来需要重新登录时
+    # 复用。请求路径零改动，未填时行为与 v90.0 逐字节一致。
+    if "device_fingerprint" not in existing_cols:
+        conn.execute("ALTER TABLE tokens ADD COLUMN device_fingerprint TEXT")
     # [v89.6] 功能开关（管理员面板读写）：key-value 单表。
     # 首个开关 effort_enhance：提示词增强（effort 指令）总开关，
     # 缺省 ON（恢复 v77 设计意图）；关闭时聊天路径不再设置
@@ -614,7 +619,7 @@ def get_auth_token():
     return None
 
 
-def add_token(token, alias=None):
+def add_token(token, alias=None, device_fingerprint=None):
     conn = get_db()
     if not conn.execute("SELECT 1 FROM tokens WHERE id = 1").fetchone():
         next_id = 1
@@ -626,25 +631,59 @@ def add_token(token, alias=None):
             WHERE t2.id IS NULL
         """).fetchone()
         next_id = row[0] if row and row[0] else 1
-    conn.execute("INSERT INTO tokens (id, alias, token, status) VALUES (?, ?, ?, 'ACTIVE')", (next_id, alias, token))
+    conn.execute(
+        "INSERT INTO tokens (id, alias, token, status, device_fingerprint) VALUES (?, ?, ?, 'ACTIVE', ?)",
+        (next_id, alias, token, device_fingerprint),
+    )
     conn.commit()
     conn.close()
 
 
 def get_tokens():
     conn = get_db()
-    rows = conn.execute("SELECT id, alias, token, status FROM tokens").fetchall()
+    rows = conn.execute("SELECT id, alias, token, status, device_fingerprint FROM tokens").fetchall()
     conn.close()
-    return [{"id": r[0], "alias": r[1], "token": r[2], "status": r[3]} for r in rows]
+    return [{"id": r[0], "alias": r[1], "token": r[2], "status": r[3], "device_fingerprint": r[4]} for r in rows]
 
 
 def get_token(token_id):
     conn = get_db()
-    row = conn.execute("SELECT id, alias, token, status FROM tokens WHERE id = ?", (token_id,)).fetchone()
+    row = conn.execute(
+        "SELECT id, alias, token, status, device_fingerprint FROM tokens WHERE id = ?", (token_id,)
+    ).fetchone()
     conn.close()
     if row:
-        return {"id": row[0], "alias": row[1], "token": row[2], "status": row[3]}
+        return {"id": row[0], "alias": row[1], "token": row[2], "status": row[3], "device_fingerprint": row[4]}
     return None
+
+
+def set_token_fingerprint(token_id, fingerprint):
+    """[v90.1] 补录/更新数美设备指纹（管理员，纯 DB 写，零上游请求）。"""
+    conn = get_db()
+    conn.execute(
+        "UPDATE tokens SET device_fingerprint = ? WHERE id = ?",
+        (fingerprint.strip() or None, token_id),
+    )
+    conn.commit()
+    conn.close()
+
+
+def classify_fingerprint(fp):
+    """[v90.1] 数美指纹格式判定（纯本地字符串检查，不发任何请求）。
+
+    实测背景（2026-11-07）：安卓原生 SDK 产物约 89 字符 base64；
+    网页版 SDK 在 iPhone 浏览器上产出 ~31 字符短 id，且实测会被
+    安卓协议登录以 RISK_DEVICE_DETECTED (biz_code 11) 拒绝。
+    返回 'android' / 'web' / 'unknown' / None（未填）。
+    本判定只看格式，无法验证真伪——诚实呈现，不承诺更多。"""
+    if not fp or not str(fp).strip():
+        return None
+    n = len(str(fp).strip())
+    if 80 <= n <= 100:
+        return "android"
+    if 16 <= n <= 48:
+        return "web"
+    return "unknown"
 
 
 def delete_token(token_id):
@@ -956,14 +995,18 @@ def get_pool_view():
     conn = get_db()
     rows = conn.execute(
         "SELECT id, alias, status, rate_limited_until, last_used, consecutive_403, token, "
-        "quarantine_reason FROM tokens ORDER BY id"
+        "quarantine_reason, device_fingerprint FROM tokens ORDER BY id"
     ).fetchall()
     conn.close()
 
     view = []
-    for tid, alias, status, until, last_used, streak, token, q_reason in rows:
+    for tid, alias, status, until, last_used, streak, token, q_reason, fp in rows:
         streak = streak or 0
         token_head = f"{(token or '')[:8]}…{((token or '')[-4:] if len(token or '') > 12 else '')}" if token else "—"
+        # [v90.1] 指纹格式判定（纯读侧，不发请求）：仅暴露类别与首段，
+        # 不回传完整指纹（与 token_head 同一脱敏口径）。
+        fp_cls = classify_fingerprint(fp)
+        fp_head = (str(fp).strip()[:8] + "…") if fp_cls else None
         # [v89.6] 隔离分类：仪表盘据此区分「疑似过期 / 疑似禁言 / 其他」。
         # 依据 mark_limited() 写入的 reason 文本——四种来源：
         #   * v89.7 确认禁言："user is muted (until <date>)"（上游
@@ -1012,6 +1055,9 @@ def get_pool_view():
         if reason_kind:
             entry["reason_kind"] = reason_kind
             entry["reason"] = str(q_reason or "")
+        # [v90.1] 指纹展示字段（纯读侧）：cls ∈ android/web/unknown/None。
+        entry["fingerprint_class"] = fp_cls
+        entry["fingerprint_head"] = fp_head
         view.append(entry)
     return view
 
