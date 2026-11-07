@@ -103,12 +103,21 @@
 <h2>Token pool<span class="sec"><span class="badge b-ok">Active</span> <span class="badge b-blue">Cooling down</span> <span class="badge b-warn">Muted (confirmed)</span> <span class="badge b-warn">Likely muted</span> <span class="badge b-err">Likely expired</span> <span class="badge b-err">Quarantined</span></span></h2>
 <div class="wrap">
 <table id="pool">
-  <thead><tr><th>ID</th><th>Alias</th><th>Token</th><th>Status</th><th>What this means</th><th>In-flight</th><th>Last used</th><th>Cooldown</th><th>Actions</th></tr></thead>
+  <thead><tr><th>ID</th><th>Alias</th><th>Token</th><th>Status</th><th>What this means</th><th>In-flight</th><th>Last used</th><th>Cooldown</th><th>Fingerprint</th><th>Actions</th></tr></thead>
   <tbody></tbody>
 </table>
 </div>
 <p style="margin-top:10px"><button class="btn-sm btn-ghost" onclick="probeTokens(this)">Probe tokens (ask upstream for real status)</button></p>
 <div id="probe-result" class="hint" style="line-height:1.9;margin-top:8px"></div>
+<details style="margin-top:12px">
+  <summary>Record / update a token's device fingerprint (optional · record only, no requests)</summary>
+  <form id="fp-form" onsubmit="return submitFingerprint(event)" style="display:flex;gap:10px;flex-wrap:wrap;margin-top:8px">
+    <input type="text" id="fp-token-id" placeholder="Token ID (first column in the pool)" style="width:180px">
+    <input type="text" id="fp-value" placeholder="Shumei device fingerprint (~89 chars)" style="flex:1;min-width:280px">
+    <button type="submit" class="btn-sm">Save fingerprint</button>
+  </form>
+  <p class="hint" style="margin:6px 0 0">The fingerprint is only stored in this dashboard with a format check (android-native / web / unfilled) — it is never sent with any request. Saving an empty value clears it.</p>
+</details>
 <div class="warning" style="margin-top:12px;line-height:1.7">
   <strong>When do tokens expire?</strong> Unpredictably — DeepSeek's server decides, and there is no way to know in advance. Expired tokens surface as <code>401</code> or <code>503 No tokens available</code> on the client.<br>
   <strong>Can't tell expired from muted?</strong> Press the "Probe tokens" button above — it asks DeepSeek directly for each token's real status (healthy / muted until X / invalidated), no manual testing needed. You can also log into <a href="https://chat.deepseek.com" target="_blank">chat.deepseek.com</a> with that account: a re-login prompt = expired; a mute notice when sending = muted; normal chatting = false positive, just press "Restore".<br>
@@ -148,15 +157,17 @@
     </details>
 
     <details style="margin-top:6px">
-      <summary>Method B · iPhone / iPad (Shortcuts, no extra apps)</summary>
+      <summary>Method B · iPhone / iPad (no computer needed, tested working: Safari login + bookmarklet)</summary>
       <div style="padding:8px 2px;line-height:1.9">
+        <p style="margin:0 0 8px"><strong>Why not Shortcuts?</strong> The old Shortcuts recipe imitated the android app's login, but upstream now requires the login request to carry a <strong>device fingerprint produced by the android-native Shumei SDK</strong> (an ~89-char string only an android phone can generate). The fingerprint that Safari's web SDK produces is a different format and gets rejected no matter what (<code>RISK_DEVICE_DETECTED</code>). So Shortcuts is retired; the path below was fully tested end to end on a real iPhone on 2026-11-07:</p>
         <ol>
-          <li>Shortcuts app → new → add two "Ask for Input" actions (account; password)</li>
-          <li>Add "Get Contents of URL": URL field <code>https://chat.deepseek.com/api/v0/users/login</code>, method <strong>POST</strong>, expand "Headers" — <strong>key and value go in separate boxes</strong> (left of the colon into the key box, right into the value box; don't paste the whole line):<table><tr><th>Key</th><th>Value</th></tr><tr><td><code>content-type</code></td><td><code>application/json</code></td></tr><tr><td><code>referer</code></td><td><code>https://chat.deepseek.com/sign_in</code></td></tr><tr><td><code>user-agent</code></td><td><code>Dalvik/2.1.0 (Linux; U; Android 14; Pixel 7)</code></td></tr></table></li>
-          <li>Expand "Request Body", type <strong>JSON</strong> — again <strong>one key per row, key and value in separate boxes</strong>:<table><tr><th>Key</th><th>Value</th></tr><tr><td><code>email</code> (use email when the account contains @; use <code>mobile</code> for phone numbers)</td><td>select variable → your "account" input</td></tr><tr><td><code>password</code></td><td>select variable → your "password" input</td></tr><tr><td><code>area_code</code></td><td><code>+86</code> (type "String")</td></tr><tr><td><code>device_id</code> (optional)</td><td>device fingerprint, see below</td></tr><tr><td><code>os</code></td><td><code>android</code></td></tr></table></li>
-          <li>Add "Get Dictionary Value": key <code>data.biz_data.user.token</code>, <strong>dictionary source = variable → the result of "Get Contents of URL"</strong>, then "Copy to Clipboard" (copy the dictionary value's output). An empty result means the login was rejected — check the error field in the response</li>
+          <li>Open <code>chat.deepseek.com</code> in <strong>Safari</strong> and log in normally with the account and password. First login on a new device asks for <strong>email verification</strong>: DeepSeek emails you a code, enter it from your mailbox, then the login completes. That's the official flow — just follow it</li>
+          <li>Once logged in and you can see the chat page, <strong>don't close the tab</strong>. Tap the share button → "Add Bookmark" and save a bookmark</li>
+          <li>Open the bookmarks list → "Edit" → tap the bookmark → replace the <strong>URL</strong> field entirely with this (copy the whole thing, every character):<br><code>javascript:prompt('Your token',JSON.parse(localStorage.getItem('userToken')).value)</code><br>Save</li>
+          <li>Go back to the <code>chat.deepseek.com</code> tab (you must be on that page) and <strong>tap the bookmark</strong>. A dialog pops up with your token — select all and copy</li>
+          <li>Paste the token into the "Paste the token" form below. Done</li>
         </ol>
-        <p class="hint">Native apps are not bound by browser CORS, and mobile networks give you a clean residential IP.</p>
+        <p class="hint">Notes: step 4 only works while the chat.deepseek.com tab is open; if the dialog shows null or errors, the page isn't logged in (go back to step 1) or JavaScript is disabled (Settings → Safari → Advanced → enable JavaScript). The token comes from a complete official login on your own phone (email OTP included) — it is your account's key, don't share it. Same risk disclaimer as ever: the session is web-born, we can't yet promise it survives the risk wave long-term; use an alt account.</p>
       </div>
     </details>
 
@@ -169,22 +180,26 @@
     </details>
 
     <details style="margin-top:6px">
-      <summary>Device fingerprint (optional · effectiveness unknown)</summary>
+      <summary>Device fingerprint (updated 2026-11-07 after real testing: only an android device can produce a valid one)</summary>
       <div class="hint" style="padding:8px 2px;line-height:1.9">
-        The real android app carries a <strong>Shumei SDK device fingerprint</strong> (89-char base64) at login. Tested facts: <strong>fabricated/random values are rejected outright</strong> (RISK_DEVICE_DETECTED); whether a real fingerprint further reduces risk is <strong>unknown</strong> — filling it in is still suggested, reusing the same one per account. How to get it:
-        <ol style="margin:6px 0">
-          <li><strong>Desktop/Android:</strong> Chrome → <a href="https://chat.deepseek.com" target="_blank">chat.deepseek.com</a> (no login needed) → F12 console → <code>SMSdk.getDeviceId()</code></li>
-          <li><strong>iPhone:</strong> a "Run JavaScript on Web Page" shortcut executing <code>completion(SMSdk.getDeviceId())</code> on chat.deepseek.com, with the shortcut's input type set to Safari web page</li>
-        </ol>
+        The real android app carries a <strong>Shumei SDK (android-native) device fingerprint</strong> (~89-char base64) at login. Same-day full test results:
+        <ul style="margin:6px 0">
+          <li>The login request now <strong>requires</strong> the <code>device_id</code> field — omit it and you get a 422 rejection before the account is even checked</li>
+          <li>Empty / fabricated random values → <code>RISK_DEVICE_DETECTED</code> (biz_code 11)</li>
+          <li><strong>Fingerprints from the browser Shumei SDK (~31-char short ids) are rejected too (11)</strong> — including ones taken via desktop Chrome or iPhone Safari. The old "F12 in a browser" recipe is therefore <strong>retired</strong></li>
+        </ul>
+        Conclusion: <strong>without a physical android device there is no way to produce a fingerprint that passes the check</strong>, which is why the panel now recommends the "Safari web login + bookmarklet" path (Method B). Users who do have an android phone can still use Method A: open chat.deepseek.com in the phone's browser (no login), run <code>SMSdk.getDeviceId()</code> in the page console (if it prints undefined, wait a few seconds and run it again), and feed that fingerprint to the login tool.
       </div>
     </details>
   </div>
 
   <div class="card" style="padding:20px;margin-top:12px">
-    <p style="margin:0 0 10px"><strong>Paste the token</strong>: paste the token printed by the login tool (no quotes). A token equals your DeepSeek account — only paste it into your own dashboard.</p>
+    <p style="margin:0 0 10px"><strong>Paste the token</strong>: paste the token printed by the login tool (no quotes). A token equals your DeepSeek account — only paste it into your own dashboard.<br>
+    <span class="hint">The device fingerprint is an <strong>optional</strong> record: the panel only stores it and checks its format, it <strong>never</strong> sends it with any request. Fill it if you have a Shumei fingerprint from an android device or the login tool (~89 chars); a short web fingerprint can also be stored (it will be labeled "web format" — known to fail android login, kept for the record).</span></p>
     <form method="post" action="/tokens/add" style="display:flex;gap:10px;flex-wrap:wrap">
       <input type="text" name="alias" placeholder="Alias (optional, e.g. alt-1)" style="width:200px">
       <input type="text" name="auth_token" placeholder="Paste the token from the login tool" style="flex:1;min-width:280px">
+      <input type="text" name="device_fingerprint" placeholder="Shumei device fingerprint (optional, record only)" style="flex:1;min-width:280px">
       <button type="submit">Add token</button>
     </form>
     <p class="hint" style="margin:8px 0 0">Token lifetime is unpredictable — when one dies, run the tool again and replace it. The "Probe tokens" button shows each token's real status (healthy / muted until X / invalidated).</p>
@@ -256,17 +271,23 @@ async function refreshPool() {
         note = KIND_NOTE.other + (t.reason ? ' Reason: ' + t.reason : '');
       }
       const tr = document.createElement('tr');
+      // [v90.1] fingerprint column: format badge (display only, no requests)
+      const FP_BADGE = {android: ['b-ok', '✓ android-format'], web: ['b-warn', 'web-format'], unknown: ['b-err', 'unknown-format']};
+      const fpb = t.fingerprint_class ? (FP_BADGE[t.fingerprint_class] || ['b-err', 'unknown-format']) : null;
+      const fpCell = fpb
+        ? `<span class="badge ${fpb[0]}" title="${esc(t.fingerprint_head || '')}">${fpb[1]}</span>`
+        : '<span class="hint">unset</span>';
       tr.innerHTML = `<td>${t.id}</td><td>${esc(t.label)}</td>`
         + `<td><code>${esc(t.token_head || '—')}</code></td>`
         + `<td><span class="badge ${badge}">${esc(stLabel)}</span></td>`
         + `<td style="white-space:normal;min-width:220px">${esc(note)}</td><td>${t.in_flight}</td>`
-        + `<td>${esc(t.last_used)}</td><td>${esc(t.cooldown)}</td>`
+        + `<td>${esc(t.last_used)}</td><td>${esc(t.cooldown)}</td><td>${fpCell}</td>`
         + `<td>${t.can_restore ? `<button class="btn-sm" onclick="restore(${t.id})">Restore</button> ` : ''}`
         + `<button class="btn-sm btn-danger" onclick="del(${t.id})">Delete</button></td>`;
       tb.appendChild(tr);
     }
     document.getElementById('c-flight').textContent = fmt(flight);
-    if (!(pool.pool || []).length) tb.innerHTML = '<tr><td colspan="9" class="hint" style="text-align:center;padding:24px">Pool is empty — add your first account under “Add an auth token” below</td></tr>';
+    if (!(pool.pool || []).length) tb.innerHTML = '<tr><td colspan="10" class="hint" style="text-align:center;padding:24px">Pool is empty — add your first account under “Add an auth token” below</td></tr>';
   } catch (e) { console.error('pool', e); }
 }
 
@@ -324,10 +345,28 @@ async function probeTokens(btn) {
     const icon = {ok: '✅', warn: '🟠', err: '🔴', idle: '⚪️'};
     el.innerHTML = (d.probes || []).map(p =>
       `<div>${icon[p.cls] || '⚪️'} <strong>${esc(p.label)}</strong> (<code>${esc(p.token_head || '—')}</code>): ${esc(p.text)}</div>`
+      + `<div style="margin:2px 0 10px 26px">🔑 Fingerprint: ${esc(p.fingerprint_text || 'not on record')}</div>`
     ).join('') || 'The pool is empty — nothing to probe.';
     if ((d.probes || []).some(p => p.status !== undefined && p.cls === 'warn')) refreshPool();
   } catch (e) { el.textContent = '❌ Probe request failed: ' + e; }
   btn.disabled = false;
+}
+
+// [v90.1] record/update fingerprint: POST /tokens/<id>/fingerprint, record-keeping only
+async function submitFingerprint(ev) {
+  ev.preventDefault();
+  const id = document.getElementById('fp-token-id').value.trim();
+  const fp = document.getElementById('fp-value').value.trim();
+  if (!id) { alert('Enter the token ID first (the number in the pool table\'s first column)'); return false; }
+  try {
+    await fetch('/tokens/' + encodeURIComponent(id) + '/fingerprint', {
+      method: 'POST', headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+      body: 'device_fingerprint=' + encodeURIComponent(fp)
+    });
+    document.getElementById('fp-value').value = '';
+    refreshPool();
+  } catch (e) { alert('Save failed: ' + e); }
+  return false;
 }
 
 // Endpoint URLs follow the origin the dashboard is visited from (no hardcoding)

@@ -202,6 +202,13 @@ def init_db():
     # quarantine path — zero contact with normal request handling.
     if "quarantine_reason" not in existing_cols:
         conn.execute("ALTER TABLE tokens ADD COLUMN quarantine_reason TEXT")
+    # [v90.1] Shumei device fingerprint (optional, record-keeping only):
+    # under the paste-token model the fingerprint never touches any upstream
+    # request — stored, displayed and format-classified only, for reuse if a
+    # re-login is ever needed. Zero request-path change; with the column
+    # empty, behavior is byte-identical to v90.0.
+    if "device_fingerprint" not in existing_cols:
+        conn.execute("ALTER TABLE tokens ADD COLUMN device_fingerprint TEXT")
     # [v89.6] Feature toggles (read/written from the admin dashboard):
     # a single key-value table. First toggle: effort_enhance — the prompt
     # enhancement (effort instructions) master switch, defaulting to ON
@@ -640,7 +647,7 @@ def get_auth_token():
     return None
 
 
-def add_token(token, alias=None):
+def add_token(token, alias=None, device_fingerprint=None):
     conn = get_db()
     if not conn.execute("SELECT 1 FROM tokens WHERE id = 1").fetchone():
         next_id = 1
@@ -652,25 +659,62 @@ def add_token(token, alias=None):
             WHERE t2.id IS NULL
         """).fetchone()
         next_id = row[0] if row and row[0] else 1
-    conn.execute("INSERT INTO tokens (id, alias, token, status) VALUES (?, ?, ?, 'ACTIVE')", (next_id, alias, token))
+    conn.execute(
+        "INSERT INTO tokens (id, alias, token, status, device_fingerprint) VALUES (?, ?, ?, 'ACTIVE', ?)",
+        (next_id, alias, token, device_fingerprint),
+    )
     conn.commit()
     conn.close()
 
 
 def get_tokens():
     conn = get_db()
-    rows = conn.execute("SELECT id, alias, token, status FROM tokens").fetchall()
+    rows = conn.execute("SELECT id, alias, token, status, device_fingerprint FROM tokens").fetchall()
     conn.close()
-    return [{"id": r[0], "alias": r[1], "token": r[2], "status": r[3]} for r in rows]
+    return [{"id": r[0], "alias": r[1], "token": r[2], "status": r[3], "device_fingerprint": r[4]} for r in rows]
 
 
 def get_token(token_id):
     conn = get_db()
-    row = conn.execute("SELECT id, alias, token, status FROM tokens WHERE id = ?", (token_id,)).fetchone()
+    row = conn.execute(
+        "SELECT id, alias, token, status, device_fingerprint FROM tokens WHERE id = ?", (token_id,)
+    ).fetchone()
     conn.close()
     if row:
-        return {"id": row[0], "alias": row[1], "token": row[2], "status": row[3]}
+        return {"id": row[0], "alias": row[1], "token": row[2], "status": row[3], "device_fingerprint": row[4]}
     return None
+
+
+def set_token_fingerprint(token_id, fingerprint):
+    """[v90.1] Record/update a token's Shumei device fingerprint (admin,
+    pure DB write, zero upstream requests)."""
+    conn = get_db()
+    conn.execute(
+        "UPDATE tokens SET device_fingerprint = ? WHERE id = ?",
+        (fingerprint.strip() or None, token_id),
+    )
+    conn.commit()
+    conn.close()
+
+
+def classify_fingerprint(fp):
+    """[v90.1] Fingerprint format classifier (local string check only,
+    no requests).
+
+    Tested background (2026-11-07): android-native SDK output is ~89-char
+    base64; the web SDK in an iPhone browser yields a ~31-char short id,
+    and both empty/fabricated values and web-format ids are rejected by the
+    android-protocol login with RISK_DEVICE_DETECTED (biz_code 11).
+    Returns 'android' / 'web' / 'unknown' / None (unset). Format check
+    only — it cannot verify authenticity, and we say so honestly."""
+    if not fp or not str(fp).strip():
+        return None
+    n = len(str(fp).strip())
+    if 80 <= n <= 100:
+        return "android"
+    if 16 <= n <= 48:
+        return "web"
+    return "unknown"
 
 
 def delete_token(token_id):
@@ -1002,14 +1046,19 @@ def get_pool_view():
     conn = get_db()
     rows = conn.execute(
         "SELECT id, alias, status, rate_limited_until, last_used, consecutive_403, token, "
-        "quarantine_reason FROM tokens ORDER BY id"
+        "quarantine_reason, device_fingerprint FROM tokens ORDER BY id"
     ).fetchall()
     conn.close()
 
     view = []
-    for tid, alias, status, until, last_used, streak, token, q_reason in rows:
+    for tid, alias, status, until, last_used, streak, token, q_reason, fp in rows:
         streak = streak or 0
         token_head = f"{(token or '')[:8]}…{((token or '')[-4:] if len(token or '') > 12 else '')}" if token else "—"
+        # [v90.1] fingerprint format class (read-side only, no requests):
+        # expose the class and a head snippet, never the full fingerprint
+        # (same redaction policy as token_head).
+        fp_cls = classify_fingerprint(fp)
+        fp_head = (str(fp).strip()[:8] + "…") if fp_cls else None
         # [v89.6] Quarantine classification: the dashboard separates
         # "likely expired / likely muted / other" by it. Based on the reason
         # text mark_limited() writes — three sources:
@@ -1060,6 +1109,9 @@ def get_pool_view():
         if reason_kind:
             entry["reason_kind"] = reason_kind
             entry["reason"] = str(q_reason or "")
+        # [v90.1] fingerprint display fields (read-side): cls ∈ android/web/unknown/None
+        entry["fingerprint_class"] = fp_cls
+        entry["fingerprint_head"] = fp_head
         view.append(entry)
     return view
 

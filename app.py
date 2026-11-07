@@ -219,6 +219,8 @@ from functions import (
     get_pool_view,
     probe_token_mute,
     _format_mute_until,
+    set_token_fingerprint,
+    classify_fingerprint,
     effort_level,
     get_effort_enhance,
     set_effort_enhance,
@@ -3136,6 +3138,20 @@ async def v1_pool_probe(request: Request):
         head = (pool_view.get(t["id"]) or {}).get("token_head", "—")
         entry = {"id": t["id"], "label": t.get("alias") or f"untagged #{t['id']}",
                  "token_head": head, "verdict": verdict, "status": t["status"]}
+        # [v90.1] probe merges fingerprint status: local format classification
+        # plus plain-language note — zero extra upstream requests.
+        fp_cls = classify_fingerprint(t.get("device_fingerprint"))
+        fp_head = (pool_view.get(t["id"]) or {}).get("fingerprint_head")
+        entry["fingerprint_class"] = fp_cls
+        entry["fingerprint_head"] = fp_head
+        if fp_cls == "android":
+            entry["fingerprint_text"] = f"Fingerprint on record (android-native format {fp_head}) — same shape as a real device's"
+        elif fp_cls == "web":
+            entry["fingerprint_text"] = f"Fingerprint on record (web format {fp_head}) — known to be rejected by android login; kept for the record only"
+        elif fp_cls == "unknown":
+            entry["fingerprint_text"] = "Fingerprint on record (uncommon format, source undeterminable)"
+        else:
+            entry["fingerprint_text"] = "No fingerprint on record (optional; get one from a real android device or the login tool, then add it in the pool section)"
         if verdict == "ok":
             entry["text"] = "Healthy: token valid, account not muted"
             entry["cls"] = "ok"
@@ -3192,7 +3208,7 @@ async def v1_admin_stats(request: Request):
         cookies_valid = False
     probe = await _deep_health_probe()
     return JSONResponse({
-        "version": "v90.0",
+        "version": "v90.1",
         "active_tokens": active,
         "total_tokens": len(tokens),
         "sessions": sessions,
@@ -3217,8 +3233,32 @@ async def tokens_add(request: Request):
         form = await request.form()
     auth_token = form.get("auth_token", "").strip().strip("'\"")
     alias = form.get("alias", "").strip() or None
+    # [v90.1] Shumei device fingerprint (optional, record-keeping only,
+    # never sent with any upstream request)
+    device_fingerprint = form.get("device_fingerprint", "").strip() or None
     if auth_token:
-        await _db(add_token, auth_token, alias)
+        await _db(add_token, auth_token, alias, device_fingerprint)
+    return HTMLResponse("<meta http-equiv='refresh' content='0;url=/dashboard'>")
+
+
+@app.post("/tokens/{token_id}/fingerprint")
+async def tokens_fingerprint(token_id: int, request: Request):
+    """[v90.1] Record/update a token's Shumei device fingerprint (admin).
+
+    Pure DB write + dashboard echo: the fingerprint never joins any upstream
+    request and does not affect rotation or the chat path; purpose is
+    record-keeping (reuse if a re-login is ever needed) and format display."""
+    try:
+        get_current_admin(request)
+    except HTTPException:
+        return HTMLResponse("<meta http-equiv='refresh' content='0;url=/login'>")
+    ctype = request.headers.get("content-type", "")
+    if ctype.startswith("application/x-www-form-urlencoded"):
+        form = _parse_urlencoded_form(await request.body())
+    else:
+        form = await request.form()
+    fingerprint = form.get("device_fingerprint", "").strip()
+    await _db(set_token_fingerprint, token_id, fingerprint)
     return HTMLResponse("<meta http-equiv='refresh' content='0;url=/dashboard'>")
 
 
