@@ -11,6 +11,7 @@ import threading
 import sqlite3
 import string
 import time
+import uuid
 from datetime import datetime, timedelta, timezone
 
 import aiohttp
@@ -193,6 +194,15 @@ def init_db():
     # 只在隔离路径写入，正常请求零接触。
     if "quarantine_reason" not in existing_cols:
         conn.execute("ALTER TABLE tokens ADD COLUMN quarantine_reason TEXT")
+    # [v89.12] 桥内登录（可选模块）元数据列：native 令牌记录来源账号与
+    # 密码（自动重登用）。密码只存本地 DB，不出接口、不进日志。列缺失
+    # 或为空时模块完全惰性，行为与此前逐字节一致。
+    if "account" not in existing_cols:
+        conn.execute("ALTER TABLE tokens ADD COLUMN account TEXT")
+    if "password" not in existing_cols:
+        conn.execute("ALTER TABLE tokens ADD COLUMN password TEXT")
+    if "last_login" not in existing_cols:
+        conn.execute("ALTER TABLE tokens ADD COLUMN last_login REAL")
     # [v89.6] 功能开关（管理员面板读写）：key-value 单表。
     # 首个开关 effort_enhance：提示词增强（effort 指令）总开关，
     # 缺省 ON（恢复 v77 设计意图）；关闭时聊天路径不再设置
@@ -655,6 +665,171 @@ def delete_token(token_id):
 
 
 # ==============================================================================
+# [v89.12] 桥内登录（可选模块）
+#
+# 背景：2026-11 起上游按「会话环境」判定并整体吊销会话——浏览器出生的
+# 令牌在桥内使用即触发，令牌秒死且浏览器端一起被登出。唯一出路是让会话
+# 出生在桥内：走安卓协议登录（沙箱实测：请求形态合法，错误密码能走到
+# 密码校验一步）。
+#
+# 红线：
+#   * 未添加任何 native 账号时模块完全惰性——零请求、零行为变化
+#   * 自动重登保守节流：距上次登录不足 DEEPSEEKER_RELOGIN_MIN_INTERVAL
+#     （默认 6 小时，即每天至多 4 次）绝不尝试——宁可不自愈，绝不形成
+#     「重登机器」的异常节奏
+#   * device_id 按账号确定性派生（uuid5，零存储、重启不变），一个账号
+#     恒定一台「设备」
+#   * 社区文档称 device_id 需数美 SDK 真实指纹（空/随机值可能吃
+#     RISK_DEVICE_DETECTED，biz_code=11）；我们的错误密码探测未触达该层，
+#     真值待首个真实账号验证——risk_device 结果会如实上报并停止自动重试
+# ==============================================================================
+
+_RELOGIN_MIN_INTERVAL = float(os.getenv("DEEPSEEKER_RELOGIN_MIN_INTERVAL", "21600"))
+_relogin_inflight: set = set()
+
+
+def _login_device_uuid(account):
+    return str(uuid.uuid5(uuid.NAMESPACE_URL, "deeperseeker-native:" + account))
+
+
+async def login_account(account, password):
+    """[v89.12] 桥内登录一个账号，返回结构化结果（绝不含密码）。
+
+    account 支持邮箱或手机号（@ 判别），请求形态 = 官方安卓 App 登录：
+    安卓头组 + os=android + referer sign_in。上游业务拒绝（密码错误/
+    封号/风控设备）原样上报，由调用方决定如何呈现；网络失败返回
+    reason="network"，不区分重试性。"""
+    if "@" in account:
+        email, mobile = account, None
+    else:
+        email, mobile = None, account
+    _fail = lambda r, d="": {"ok": False, "reason": r, "detail": d,
+                             "token": None, "muted": None, "mute_until": None}
+    session = await get_session()
+    try:
+        async with session.post(
+            UPSTREAM_BASES[0] + "/api/v0/users/login",
+            headers={**get_headers(None),
+                     "referer": "https://chat.deepseek.com/sign_in"},
+            json={
+                "email": email, "mobile": mobile, "password": password,
+                "area_code": "+86", "device_id": _login_device_uuid(account),
+                "os": "android",
+            },
+            timeout=aiohttp.ClientTimeout(total=15),
+        ) as resp:
+            body = await resp.json(content_type=None)
+    except Exception as exc:
+        return _fail("network", str(exc)[:200])
+    code = body.get("code") if isinstance(body, dict) else None
+    data = body.get("data") if isinstance(body, dict) else None
+    if code != 0 or not isinstance(data, dict):
+        return _fail("unexpected", str(body)[:200])
+    biz = data.get("biz_code")
+    if biz not in (None, 0):
+        reason_map = {2: "bad_credentials", 10: "banned", 11: "risk_device"}
+        return _fail(reason_map.get(biz, f"biz_{biz}"),
+                     str(data.get("biz_msg") or "")[:200])
+    user = (data.get("biz_data") or {}).get("user") or {}
+    token = user.get("token")
+    if not token:
+        return _fail("no_token", "login accepted but no token in response")
+    chat = user.get("chat") or {}
+    return {"ok": True, "reason": None, "detail": None, "token": token,
+            "muted": chat.get("is_muted") == 1,
+            "mute_until": chat.get("mute_until")}
+
+
+def add_native_token(token, account, password, alias=None):
+    """[v89.12] 桥内登录产出的令牌入库：与浏览器令牌同池同调度，仅多出
+    account/password/last_login 元数据（自动重登用）。"""
+    conn = get_db()
+    if not conn.execute("SELECT 1 FROM tokens WHERE id = 1").fetchone():
+        next_id = 1
+    else:
+        row = conn.execute("""
+            SELECT min(t1.id + 1)
+            FROM tokens t1
+            LEFT JOIN tokens t2 ON t1.id + 1 = t2.id
+            WHERE t2.id IS NULL
+        """).fetchone()
+        next_id = row[0] if row and row[0] else 1
+    conn.execute(
+        "INSERT INTO tokens (id, alias, token, status, account, password, last_login) "
+        "VALUES (?, ?, ?, 'ACTIVE', ?, ?, ?)",
+        (next_id, alias, token, account, password, time.time()),
+    )
+    conn.commit()
+    conn.close()
+
+
+def update_native_token(token_id, new_token):
+    """[v89.12] 自动重登成功后原地替换令牌材料并复位轮换状态。"""
+    conn = get_db()
+    conn.execute(
+        "UPDATE tokens SET token = ?, status = 'ACTIVE', rate_limited_until = NULL, "
+        "consecutive_403 = 0, quarantine_reason = NULL, last_login = ? WHERE id = ?",
+        (new_token, time.time(), token_id),
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_native_credentials(token_id):
+    """[v89.12] 读 native 令牌的重登凭据；非 native（无 account/password）
+    返回 None——自动重登只对显式添加过账号的行生效。"""
+    conn = get_db()
+    row = conn.execute(
+        "SELECT account, password, last_login FROM tokens WHERE id = ?", (token_id,)
+    ).fetchone()
+    conn.close()
+    if row and row[0] and row[1]:
+        return {"account": row[0], "password": row[1], "last_login": row[2] or 0.0}
+    return None
+
+
+async def relogin_native(token_id):
+    """[v89.12] 保守自动重登：节流内绝不尝试；结果如实入库。
+
+    成功 → update_native_token 原地替换（令牌池无感自愈）；密码被拒/
+    封号/风控设备 → 如实记录，封号与风控设备按终态处理不再自动重试；
+    网络/意外失败 → 保持现状，下次触发时按节流重试。并发去重：同一
+    令牌同一时刻只跑一个重登任务。"""
+    if token_id in _relogin_inflight:
+        return
+    _relogin_inflight.add(token_id)
+    try:
+        creds = await asyncio.to_thread(get_native_credentials, token_id)
+        if not creds:
+            return  # 非 native：模块惰性
+        now = time.time()
+        if now - creds["last_login"] < _RELOGIN_MIN_INTERVAL:
+            logger.info("[relogin] token #%s 距上次登录不足 %.0fs，跳过自动重登",
+                        token_id, _RELOGIN_MIN_INTERVAL)
+            return
+        result = await login_account(creds["account"], creds["password"])
+        if result.get("ok"):
+            await asyncio.to_thread(update_native_token, token_id, result["token"])
+            logger.info("[relogin] token #%s 已通过桥内登录自愈（账号 %s***）",
+                        token_id, str(creds["account"])[:3])
+            if result.get("muted"):
+                logger.warning("[relogin] token #%s 的新会话本身处于禁言期（至 %s）",
+                               token_id, result.get("mute_until"))
+        elif result.get("reason") == "banned":
+            await asyncio.to_thread(
+                mark_quarantined, token_id, "account banned (bridge login)")
+        elif result.get("reason") in ("bad_credentials", "risk_device", "no_token"):
+            logger.warning("[relogin] token #%s 桥内登录被拒（%s: %s）——保持现状，"
+                           "请人工检查账号", token_id, result.get("reason"),
+                           result.get("detail") or "")
+        else:
+            logger.warning("[relogin] token #%s 桥内登录失败（%s），下次按节流重试",
+                           token_id, result.get("reason"))
+    finally:
+        _relogin_inflight.discard(token_id)
+
+
+# ==============================================================================
 # B3 (Stage 1 audit) — token pool scheduler v2
 #
 # The old pool selected ACTIVE tokens with ORDER BY RANDOM() and, when every
@@ -956,12 +1131,12 @@ def get_pool_view():
     conn = get_db()
     rows = conn.execute(
         "SELECT id, alias, status, rate_limited_until, last_used, consecutive_403, token, "
-        "quarantine_reason FROM tokens ORDER BY id"
+        "quarantine_reason, account FROM tokens ORDER BY id"
     ).fetchall()
     conn.close()
 
     view = []
-    for tid, alias, status, until, last_used, streak, token, q_reason in rows:
+    for tid, alias, status, until, last_used, streak, token, q_reason, account in rows:
         streak = streak or 0
         token_head = f"{(token or '')[:8]}…{((token or '')[-4:] if len(token or '') > 12 else '')}" if token else "—"
         # [v89.6] 隔离分类：仪表盘据此区分「疑似过期 / 疑似禁言 / 其他」。
@@ -1009,6 +1184,10 @@ def get_pool_view():
             "cooldown": cooldown,
             "can_restore": status == "QUARANTINED",
         }
+        # [v89.12] 桥内登录的令牌打 native 标（仪表盘显示「桥内」徽章）；
+        # 浏览器令牌不带该字段，展示完全不变。
+        if account:
+            entry["native"] = True
         if reason_kind:
             entry["reason_kind"] = reason_kind
             entry["reason"] = str(q_reason or "")

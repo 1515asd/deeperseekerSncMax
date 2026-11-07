@@ -135,6 +135,20 @@
     </form>
   </div>
 
+  <details style="margin-top:12px">
+    <summary>桥内登录（可选）：让账号直接在桥里登录，令牌自动生成与自愈</summary>
+    <div class="card" style="padding:20px;margin-top:8px">
+      <div class="hint" style="margin-bottom:10px">11 月起上游会整体吊销「在别的环境使用」的会话——浏览器提取的令牌在桥里一用就死。<strong>桥内登录让会话直接出生在桥里</strong>，令牌作废时自动重新登录（保守节流：至少间隔 6 小时）。密码只存在本机数据库，不上日志。添加前请先删除该账号的旧令牌。</div>
+      <div id="login-result" class="hint" style="margin-bottom:8px;display:none"></div>
+      <form method="post" action="/tokens/login" style="display:flex;gap:10px;flex-wrap:wrap">
+        <input type="text" name="alias" placeholder="别名（可选）" style="width:160px">
+        <input type="text" name="account" placeholder="邮箱或手机号" style="flex:1;min-width:200px" autocomplete="off">
+        <input type="password" name="password" placeholder="密码" style="flex:1;min-width:160px" autocomplete="new-password">
+        <button type="submit">登录并加入池</button>
+      </form>
+    </div>
+  </details>
+
   <details>
     <summary>怎么拿到令牌？三种方法选一种就行</summary>
     <div style="padding:4px 2px 14px">
@@ -243,7 +257,7 @@ async function refreshPool() {
         note = KIND_NOTE.other + (t.reason ? ' 原因：' + t.reason : '');
       }
       const tr = document.createElement('tr');
-      tr.innerHTML = `<td>${t.id}</td><td>${esc(t.label)}</td>`
+      tr.innerHTML = `<td>${t.id}</td><td>${esc(t.label)}${t.native ? ' <span class="badge b-blue">桥内</span>' : ''}</td>`
         + `<td><code>${esc(t.token_head || '—')}</code></td>`
         + `<td><span class="badge ${badge}">${esc(stLabel)}</span></td>`
         + `<td style="white-space:normal;min-width:220px">${esc(note)}</td><td>${t.in_flight}</td>`
@@ -363,6 +377,21 @@ async function probeTokens(btn) {
 })();
 
 refreshPool(); refreshUsage(); refreshDeep(); refreshEffort();
+// [v89.12] 桥内登录结果回显（/tokens/login 重定向带回）
+(function () {
+  const q = new URLSearchParams(location.search);
+  const lr = q.get('login');
+  if (!lr) return;
+  const box = document.getElementById('login-result');
+  const REASON = {bad_credentials: '账号或密码不对（PASSWORD_OR_USER_NAME_IS_WRONG）',
+    banned: '账号被上游封禁（USER_IS_BANNED）',
+    risk_device: '上游拒绝了这个设备的登录（RISK_DEVICE_DETECTED）——设备指纹校验比预期严，账号本身没事',
+    network: '网络请求失败，稍后再试', no_token: '上游应答异常（未返回令牌）',
+    unexpected: '上游应答格式异常', empty: '账号和密码都要填'};
+  if (lr === 'ok') { box.textContent = '✅ 登录成功，令牌已加入池（带「桥内」标记），作废时会自动重新登录'; box.style.display = 'block'; }
+  else { box.textContent = '❌ 登录失败：' + (REASON[q.get('reason')] || (q.get('reason') || '未知原因')); box.style.display = 'block'; }
+  history.replaceState(null, '', location.pathname);
+})();
 setInterval(refreshPool, 10000);
 setInterval(refreshUsage, 10000);
 setInterval(refreshDeep, 30000);
