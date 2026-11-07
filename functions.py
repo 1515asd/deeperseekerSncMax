@@ -3749,6 +3749,8 @@ async def _send_message_once(chat_id, auth_token, message, parent_message_id, th
     incomplete = False
     # [v58] 累积非思考正文，供 FINISHED 时判断是否只剩未解析的工具标记
     body_acc = []
+    # [v90.3] 一键回退：DEEPSEEKER_FRAGMENT_FIX=0 即恢复到 v90.2 的旧解析。
+    _fragment_fix = os.getenv("DEEPSEEKER_FRAGMENT_FIX", "1") != "0"
     # [v63] 首字节预算提前到 POST 之前定义（S8）：该预算的设计意图本就是
     # "从发请求到见到第一个字节"（原注释：预填期上游"一个字都不吐"，连响应
     # 头都不发），但旧实现只把它用在 body 首字节上，响应头阶段裸奔、只能等
@@ -3878,7 +3880,15 @@ async def _send_message_once(chat_id, auth_token, message, parent_message_id, th
                             yield fragment.get("content", "")
                 return
 
-            if data.get("p") == "response/fragments" and data.get("o") == "APPEND":
+            # [v90.3] 官方把带思考的一条回复拆成 THINK / RESPONSE 两段，思考
+            # 吐完后发一条 o 为空的 response/fragments 作为“整包切段快照”：
+            # 其中 THINK 是已逐字吐过的思考全文（纯重复，不能重吐），RESPONSE
+            # 只带正文首字（唯一新内容，不能丢）。旧代码只认 o=="APPEND"，
+            # 这条被整条丢弃 -> <think> 始终不闭合 -> 正文全被算进思考盒，
+            # 客户端只见思考、正文全空。此处让该分支也认这条快照。
+            _frag_op = data.get("o")
+            _snapshot = _fragment_fix and _frag_op is None
+            if data.get("p") == "response/fragments" and (_frag_op == "APPEND" or _snapshot):
                 fragments = data.get("v")
                 if isinstance(fragments, list):
                     for fragment in fragments:
@@ -3892,6 +3902,8 @@ async def _send_message_once(chat_id, auth_token, message, parent_message_id, th
                             body_acc.append(fragment.get("content", "") or "")
                             yield fragment.get("content", "")
                         elif fragment.get("type") == "THINK":
+                            if _snapshot:
+                                continue  # 整包快照：思考全文已吐过，不重吐
                             if not think_open:
                                 yield "\n<think>"
                                 think_open = True
@@ -3909,10 +3921,17 @@ async def _send_message_once(chat_id, auth_token, message, parent_message_id, th
             v = data.get("v")
             if isinstance(v, str) and v:
                 got_output = True
-                got_body = True
                 _last_emit[0] = time.time()
-                body_acc.append(v)
-                yield v
+                # [v90.3] 思考盒仍开着时，这段纯文本是思考增量而非正文。
+                # 旧代码无条件记 got_body / body_acc，让思考冒充正文糊弄过
+                # FINISHED 的 auto-continue 判定（空响应静默、不报错不重试）。
+                # 关盒后（含 thinking=false 全程）行为与旧版逐字一致。
+                if think_open and _fragment_fix:
+                    yield v
+                else:
+                    got_body = True
+                    body_acc.append(v)
+                    yield v
 
         async def _consume_sse_line(decoded_line: str):
             if not decoded_line.startswith("data: "):
