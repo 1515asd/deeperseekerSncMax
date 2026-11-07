@@ -124,93 +124,72 @@
 </div>
 
 <section>
-  <h2>添加账号 / 令牌</h2>
+  <h2>添加账号</h2>
   <div class="warning" style="line-height:1.8">
-    <strong>⚠️ 重要声明（2026-11 风控现状）：手动提取浏览器令牌的方式已不再是主要用法。</strong><br>
-    11 月起上游执行「跨环境会话吊销」：令牌在浏览器里出生、拿到桥里使用，会被判定为会话盗用并<strong>整体吊销</strong>——令牌立刻作废，浏览器那边也一起被登出。表现为<strong>频繁封号</strong>，且每次都只能重新去浏览器登录提取，<strong>提取频率越来越高、账号越来越危险</strong>。请优先使用下面的「桥内登录」。
+    <strong>⚠️ 使用模型说明（2026-11 起）：令牌出生在你自己的设备上，使用在服务器。</strong><br>
+    11 月起上游执行「跨环境会话吊销」：浏览器里提取的令牌拿到服务器使用，会被判定为会话盗用并<strong>整体吊销</strong>（频繁封号）。所以请<strong>不要再从浏览器提取令牌</strong>，改用下面的方式一：在自己设备上运行登录工具，让服务器把令牌直接发给你。<br>
+    <strong>风险提示：</strong>新模型能否完全避免封号<strong>尚无定论</strong>，需要使用一段时间观察。请<strong>使用小号</strong>，账号被封无法承担责任。
   </div>
 
   <div class="card" style="padding:20px;margin-top:14px">
-    <p style="margin:0 0 10px"><strong>方式一（推荐）· 桥内登录</strong>：账号直接在桥里登录，会话出生与使用都在桥内，不经过浏览器。令牌作废时自动重新登录（保守节流：至少间隔 6 小时）。密码只存在本机数据库，不上日志。</p>
-    <div class="hint" style="margin-bottom:10px">添加前请先删除该账号的旧令牌（浏览器提取的那一条）。</div>
-    <div id="login-result" class="hint" style="margin-bottom:8px;display:none"></div>
-    <form method="post" action="/tokens/login" style="display:flex;gap:10px;flex-wrap:wrap">
-      <input type="text" name="alias" placeholder="别名（可选）" style="width:160px">
-      <input type="text" name="account" placeholder="邮箱或手机号" style="flex:1;min-width:200px" autocomplete="off">
-      <input type="password" name="password" placeholder="密码" style="flex:1;min-width:160px" autocomplete="new-password">
-      <input type="text" name="device_id" placeholder="设备指纹（可选，见下方说明）" style="flex:1;min-width:280px" autocomplete="off">
-      <button type="submit">登录并加入池</button>
-    </form>
-    <details style="margin-top:10px">
-      <summary>设备指纹是什么？怎么获取？（强烈建议填写）</summary>
-      <div class="hint" style="padding:8px 2px;line-height:1.9">
-        真实安卓 App 登录时，请求体会携带<strong>数美 SDK 生成的设备指纹</strong>（89 字符的 base64 串）。实测显示，用随机/伪造的 UUID 登录会被风控直接拒绝（<code>RISK_DEVICE_DETECTED</code>）。填写真实指纹可以显著降低登录被拒的风险。<br>
-        <strong>获取方法（一次即可，长期有效）：</strong>
-        <ol style="margin:6px 0">
-          <li>Chrome 打开 <a href="https://chat.deepseek.com" target="_blank">chat.deepseek.com</a>（<strong>不需要登录</strong>），等页面完全加载</li>
-          <li>按 F12 → 控制台 / Console → 执行：<code>SMSdk.getDeviceId()</code></li>
-          <li>把输出的那串 base64 粘贴到上面的「设备指纹」框里</li>
+    <p style="margin:0 0 10px"><strong>方式一（推荐）· 在自己设备上登录</strong>：用登录工具向 DeepSeek 发送一次官方安卓 App 同款登录请求（走你自己的家庭网络），令牌随登录结果直接返回——出生即安卓，与桥的使用形态一致。</p>
+
+    <details style="margin-top:6px">
+      <summary>方法 A · 电脑（Windows / Mac / Linux，跑一次脚本）</summary>
+      <div style="padding:8px 2px;line-height:1.9">
+        <ol>
+          <li>装好 Python（没有的话去 python.org 装一个，勾选 Add to PATH）</li>
+          <li>下载登录脚本：<code>tools/login_once.py</code>（仓库里，右键另存为）</li>
+          <li>运行 <code>python login_once.py</code>，按提示输入账号、密码，可选设备指纹</li>
+          <li>输出的令牌复制，贴到下方「贴入令牌」表单</li>
         </ol>
-        若仍提示「上游拒绝了这个设备的登录」，改用：无痕窗口<strong>真实登录一次</strong> chat.deepseek.com → F12 → Network 过滤 <code>users/login</code> → 复制该请求 Payload 里的 <code>device_id</code> 值（这一次登录产生的浏览器会话之后会被吊销，属正常现象）。<strong>同一账号请始终使用同一个指纹</strong>，桥会记住它并在自动重登时复用。
+        <p class="hint">在公司/校园网或 VPN 下运行可能被 WAF 拦（脚本会自动检测并提示），换家庭宽带或手机热点即可。</p>
+      </div>
+    </details>
+
+    <details style="margin-top:6px">
+      <summary>方法 B · iPhone / iPad（快捷指令，不装任何 App）</summary>
+      <div style="padding:8px 2px;line-height:1.9">
+        <ol>
+          <li>快捷指令 App → 新建 → 添加两个「要求输入」（提示语：账号；密码）</li>
+          <li>添加「获取 URL 内容」：URL 填 <code>https://chat.deepseek.com/api/v0/users/login</code>，方式选 <strong>POST</strong>，头部加三条：<code>content-type: application/json</code>、<code>referer: https://chat.deepseek.com/sign_in</code>、<code>user-agent: Dalvik/2.1.0 (Linux; U; Android 14; Pixel 7)</code></li>
+          <li>请求体选 JSON，字段：<code>email</code> 或 <code>mobile</code>（账号含 @ 用 email，否则用 mobile）、<code>password</code>、<code>area_code</code> 填 <code>+86</code>、<code>device_id</code>（可选指纹）、<code>os</code> 填 <code>android</code></li>
+          <li>添加「获取词典值」→ 路径 <code>data.biz_data.user.token</code>，再接「拷贝至剪贴板」</li>
+          <li>运行 → 令牌进剪贴板 → 贴到下方表单</li>
+        </ol>
+        <p class="hint">手机发请求不受浏览器 CORS 限制，且走的是你自己的移动网络，IP 天然干净。</p>
+      </div>
+    </details>
+
+    <details style="margin-top:6px">
+      <summary>方法 C · 安卓（Termux / HTTP Shortcuts）</summary>
+      <div style="padding:8px 2px;line-height:1.9">
+        <p><strong>命令行（推荐）：</strong>安装 Termux → <code>pkg install curl -y</code> → 下载仓库里的 <code>tools/deepseek-login.sh</code> → <code>bash deepseek-login.sh</code>，按提示输入账号密码，令牌随结果输出。</p>
+        <p><strong>图形化（备选）：</strong>安装开源应用 HTTP Shortcuts → 导入 → 从 cURL 命令导入，粘贴 <code>tools/deepseek-login.sh</code> 里的 curl 段，再把账号密码改成自己的（建议用 App 变量）→ 桌面小组件一键登录。</p>
+      </div>
+    </details>
+
+    <details style="margin-top:6px">
+      <summary>设备指纹（可选 · 不知道有没有用）</summary>
+      <div class="hint" style="padding:8px 2px;line-height:1.9">
+        真实安卓 App 登录时会携带<strong>数美 SDK 生成的设备指纹</strong>（89 字符 base64）。实测：<strong>伪造/随机的值会被上游直接拒绝</strong>（RISK_DEVICE_DETECTED），所以工具里留了这个可选项；但<strong>填了真实指纹能不能进一步降低风险，不知道有没有用</strong>——建议填，同一账号每次登录用同一个即可。获取方法：
+        <ol style="margin:6px 0">
+          <li><strong>电脑/安卓：</strong>Chrome 打开 <a href="https://chat.deepseek.com" target="_blank">chat.deepseek.com</a>（不需要登录）→ F12 → 控制台执行 <code>SMSdk.getDeviceId()</code>（输出 undefined 就等几秒再执行一次）</li>
+          <li><strong>iPhone：</strong>用「在网页上运行 JavaScript」快捷指令在 chat.deepseek.com 页面（不登录）执行 <code>completion(SMSdk.getDeviceId())</code>，记得把「接收」类型设为 Safari 网页</li>
+        </ol>
       </div>
     </details>
   </div>
 
-  <details style="margin-top:12px">
-    <summary>方式二（不推荐）· 手动粘贴浏览器令牌 —— 会频繁封号，需要反复重新提取</summary>
-    <div class="card" style="padding:20px;margin-top:8px">
-      <div class="warning" style="margin-bottom:10px;line-height:1.7">⚠️ 这样添加的令牌<strong>随时会被整体吊销</strong>（通常几分钟到几小时内）：账号可能被禁言/封号，且每次失效都要重新去浏览器登录提取一次。仅建议在暂时无法使用桥内登录时应急。</div>
-      <div class="hint" style="margin-bottom:10px">令牌等同于你的 DeepSeek 账号：只贴进自己的面板，别给任何人。浏览器里退出 DeepSeek 登录后，令牌随之失效。</div>
+  <div class="card" style="padding:20px;margin-top:12px">
+    <p style="margin:0 0 10px"><strong>贴入令牌</strong>：把登录工具输出的令牌粘贴到这里（不要带引号）。令牌等同于你的 DeepSeek 账号，只贴进自己的面板。</p>
     <form method="post" action="/tokens/add" style="display:flex;gap:10px;flex-wrap:wrap">
       <input type="text" name="alias" placeholder="别名（可选，如：小号1）" style="width:200px">
-      <input type="text" name="auth_token" placeholder="粘贴令牌（不要带引号）" style="flex:1;min-width:280px">
+      <input type="text" name="auth_token" placeholder="粘贴登录工具输出的令牌" style="flex:1;min-width:280px">
       <button type="submit">添加令牌</button>
     </form>
-    </div>
-
-    <details style="margin-top:8px">
-      <summary>怎么拿到令牌？三种方法选一种就行（仅供方式二使用）</summary>
-    <div style="padding:4px 2px 14px">
-      <p><strong>方法 A · 电脑 / 安卓（最简单）</strong></p>
-      <ol>
-        <li>开一个<strong>无痕窗口</strong>，登录 <a href="https://chat.deepseek.com" target="_blank">chat.deepseek.com</a></li>
-        <li>按 <strong>F12</strong> 打开开发者工具 → 切到「控制台 / Console」→ 粘贴下面这行回车：</li>
-      </ol>
-      <pre><code>JSON.parse(localStorage.getItem("userToken")).value</code></pre>
-      <p class="hint">输出的一长串就是令牌，复制它。</p>
-
-      <p><strong>方法 B · iPhone / iPad（快捷指令，实测可用）</strong></p>
-      <ol>
-        <li>快捷指令 App → 右上角 <strong>+</strong> 新建 → 添加操作「<strong>在网页上运行 JavaScript</strong>」，脚本框粘贴：</li>
-      </ol>
-      <pre><code>var out = '';
-try {
-  var r = localStorage.getItem('userToken');
-  if (r) { try { out = JSON.parse(r).value || r; } catch(e) { out = r; } }
-} catch(e) { out = ''; }
-if (out) { completion(out); } else { completion('未取到：请确认 Safari 已登录 chat.deepseek.com'); }</code></pre>
-      <ol start="2">
-        <li>再添加操作「<strong>拷贝至剪贴板</strong>」</li>
-        <li><strong>关键一步（漏了会"运行完没结果"）</strong>：编辑快捷指令底部「接收」→ 类型选「<strong>Safari 网页</strong>」，并确认 JS 操作的「网页」输入已连上上一步</li>
-        <li>使用：Safari 打开已登录的 chat.deepseek.com（页面加载完）→ 分享 → 运行快捷指令 → 令牌进剪贴板</li>
-      </ol>
-
-      <details style="margin-top:10px">
-        <summary>方法 C · Safari 书签小工具（备选：部分 iOS 会报 The operation is insecure，报错就用方法 B）</summary>
-        <div style="padding:8px 0">
-          <p>iOS 不允许在地址栏直接执行 <code>javascript:</code>，书签是唯一入口。但部分 iOS 会禁掉书签脚本的 localStorage 读取——报错请改用方法 B。</p>
-          <ol>
-            <li>Safari 打开任意普通页面 → 分享 → 添加到书签 → 存储</li>
-            <li>书签列表 → 编辑该条 → 「地址」整段替换为下面的代码 → 存储</li>
-            <li>在已登录的 chat.deepseek.com 页面点书签运行 → 自动复制</li>
-          </ol>
-          <pre><code>javascript:(function(){var t='';try{var r=localStorage.getItem('userToken');if(r){try{t=JSON.parse(r).value||r;}catch(e){t=r;}}}catch(e){alert('读取失败: '+e.message+'（请改用方式 B 快捷指令）');return;}if(!t||t.length&lt;20){alert('未找到 userToken。请确认已登录且页面加载完成');return;}var a=document.createElement('textarea');a.value=t;a.style.cssText='position:fixed;left:-9999px';document.body.appendChild(a);a.select();a.setSelectionRange(0,999999);var ok=document.execCommand('copy');a.remove();alert((ok?'已复制到剪贴板 ✓\n\n':'复制失败，请手动长按复制\n\n')+'长度 '+t.length+'\n'+t.substring(0,12)+'...');})();</code></pre>
-          <p class="hint">安卓也可以用方法 C 的书签（新版 Chrome 同样禁止地址栏执行 javascript:），或继续用 F12 控制台。</p>
-        </div>
-      </details>
-    </div>
-    </details>
-  </details>
+    <p class="hint" style="margin:8px 0 0">令牌有效期不固定，失效就再跑一次登录工具换新的，旧的删掉即可。面板「检测」按钮可查看每个令牌的真实状态（正常 / 禁言到几点 / 已作废）。</p>
+  </div>
 </section>
 
 <section>
@@ -277,7 +256,7 @@ async function refreshPool() {
         note = KIND_NOTE.other + (t.reason ? ' 原因：' + t.reason : '');
       }
       const tr = document.createElement('tr');
-      tr.innerHTML = `<td>${t.id}</td><td>${esc(t.label)}${t.native ? ' <span class="badge b-blue">桥内</span>' : ''}</td>`
+      tr.innerHTML = `<td>${t.id}</td><td>${esc(t.label)}</td>`
         + `<td><code>${esc(t.token_head || '—')}</code></td>`
         + `<td><span class="badge ${badge}">${esc(stLabel)}</span></td>`
         + `<td style="white-space:normal;min-width:220px">${esc(note)}</td><td>${t.in_flight}</td>`
@@ -397,21 +376,6 @@ async function probeTokens(btn) {
 })();
 
 refreshPool(); refreshUsage(); refreshDeep(); refreshEffort();
-// [v89.12] 桥内登录结果回显（/tokens/login 重定向带回）
-(function () {
-  const q = new URLSearchParams(location.search);
-  const lr = q.get('login');
-  if (!lr) return;
-  const box = document.getElementById('login-result');
-  const REASON = {bad_credentials: '账号或密码不对（PASSWORD_OR_USER_NAME_IS_WRONG）',
-    banned: '账号被上游封禁（USER_IS_BANNED）',
-    risk_device: '上游拒绝了这个设备的登录（RISK_DEVICE_DETECTED）——大概率是没填设备指纹或指纹无效。展开登录表单下方的「设备指纹是什么？」按步骤获取真实指纹后重试（账号本身没事）',
-    network: '网络请求失败，稍后再试', no_token: '上游应答异常（未返回令牌）',
-    unexpected: '上游应答格式异常', empty: '账号和密码都要填'};
-  if (lr === 'ok') { box.textContent = '✅ 登录成功，令牌已加入池（带「桥内」标记），作废时会自动重新登录'; box.style.display = 'block'; }
-  else { box.textContent = '❌ 登录失败：' + (REASON[q.get('reason')] || (q.get('reason') || '未知原因')); box.style.display = 'block'; }
-  history.replaceState(null, '', location.pathname);
-})();
 setInterval(refreshPool, 10000);
 setInterval(refreshUsage, 10000);
 setInterval(refreshDeep, 30000);

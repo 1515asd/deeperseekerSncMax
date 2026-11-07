@@ -181,9 +181,6 @@ from functions import (
     UpstreamBizError,
     UpstreamError,
     UpstreamMutedError,
-    add_native_token,
-    login_account,
-    relogin_native,
     cookie_file_path,
     data_dir,
     add_token,
@@ -728,12 +725,6 @@ async def _mark_upstream_failure(e, token_id):
     else:
         await _db(mark_limited, token_id, _upstream_http_code(e),
                   _is_biz_auth_error(e))
-        # [v89.12] 鉴权型作废（40003/401）时尝试桥内登录自愈——仅对
-        # native 令牌生效（内部立即查凭据，非 native 零开销返回），
-        # 且自带 6h 节流与并发去重；429 等非鉴权失败不触发。
-        if _is_biz_auth_error(e):
-            with suppress(Exception):
-                asyncio.create_task(relogin_native(token_id))
 
 
 def _api_error_response(e, is_anthropic=False):
@@ -3086,7 +3077,7 @@ async def v1_admin_stats(request: Request):
         cookies_valid = False
     probe = await _deep_health_probe()
     return JSONResponse({
-        "version": "v89.13",
+        "version": "v90.0",
         "active_tokens": active,
         "total_tokens": len(tokens),
         "sessions": sessions,
@@ -3118,38 +3109,6 @@ async def tokens_add(request: Request):
     return HTMLResponse("<meta http-equiv='refresh' content='0;url=/dashboard'>")
 
 
-@app.post("/tokens/login")
-async def tokens_login(request: Request):
-    """[v89.12] 桥内登录（可选）：账号密码走安卓协议在桥内登录上游，
-    会话令牌直接入池（native 标记）。失败原因经 query 参数回显，
-    密码不落日志、不进任何响应。"""
-    try:
-        get_current_admin(request)
-    except HTTPException:
-        return HTMLResponse("<meta http-equiv='refresh' content='0;url=/login'>")
-    ctype = request.headers.get("content-type", "")
-    if ctype.startswith("application/x-www-form-urlencoded"):
-        form = _parse_urlencoded_form(await request.body())
-    else:
-        form = await request.form()
-    account = (form.get("account") or "").strip()
-    password = form.get("password") or ""
-    alias = (form.get("alias") or "").strip() or None
-    # [v89.13] 可选的数美设备指纹：真实安卓 App 登录体携带的就是它，
-    # 随机 UUID 会被 RISK_DEVICE_DETECTED 拒绝。落库供自动重登复用。
-    device_id = (form.get("device_id") or "").strip() or None
-    if not account or not password:
-        return HTMLResponse("<meta http-equiv='refresh' content='0;url=/dashboard?login=empty'>")
-    result = await login_account(account, password, device_id)
-    if result.get("ok"):
-        await _db(add_native_token, result["token"], account, password,
-                  alias, device_id)
-        return HTMLResponse("<meta http-equiv='refresh' content='0;url=/dashboard?login=ok'>")
-    reason = result.get("reason") or "fail"
-    return HTMLResponse(
-        f"<meta http-equiv='refresh' content='0;url=/dashboard?login=fail&reason={reason}'>")
-
-
 @app.post("/tokens/{token_id}/delete")
 async def tokens_delete(token_id: int, request: Request):
     try:
@@ -3166,15 +3125,13 @@ async def root(request: Request):
 
 
 async def _deep_health_probe():
-    """[v89.10] 端到端上游存活检查——只读形态（GET users/current）。
+    """[v77 P0-9 移植] 一次端到端上游往返（含 PoW）：创建空聊天会话。
 
-    历史（v77~v89.8）：本探针通过 create_new_chat 真实创建一个空上游
-    会话。2026-11-06 实锤：仪表盘每 30s 轮询一次 /v1/admin/stats，即每
-    30s 凭空创建一个从不使用、从不删除的空会话——「高频创建空会话」
-    正是 11 月会话吊销风控的特征信号，与令牌「仪表盘开着就秒死」的
-    时间线吻合。现改为 v89.7 的只读探针 probe_token_mute（GET
-    users/current，零会话、零消息、零 PoW），健康信息等价（能区分
-    存活/禁言/作废），异常上游流量归零。"""
+    成本：每次调用一个空上游会话——这是本桥能跑的最诚实的探针，因为
+    会话创建正是 PoW/客户端版本/账号死亡时最先断的那一跳。探针从不发
+    消息，也绝不报告 token 材料。状态感知选号：走 pick_token()，跳过
+    隔离与冷却中的行（旧式抓第一行的做法会误报降级、还会把上游流量
+    送进已知死亡的凭据）。"""
     token_id = await _db(pick_token)
     auth_token = None
     if token_id is not None:
@@ -3188,16 +3145,15 @@ async def _deep_health_probe():
                 "reason": "no ACTIVE token in pool"}
     started = time.perf_counter()
     try:
-        _pr = await probe_token_mute(auth_token)
+        await create_new_chat(auth_token)
     except Exception as e:
         logger.warning("Deep health probe failed: %s", e)
         return {"upstream_reachable": False, "pow_ok": False,
                 "latency_ms": round((time.perf_counter() - started) * 1000, 1),
                 "reason": "upstream error"}
-    alive = _pr.get("verdict") in ("ok", "muted")  # 禁言=凭据仍有效
-    return {"upstream_reachable": alive, "pow_ok": alive,
+    return {"upstream_reachable": True, "pow_ok": True,
             "latency_ms": round((time.perf_counter() - started) * 1000, 1),
-            "reason": "" if alive else f"token verdict: {_pr.get('verdict')}"}
+            "session_created": True}
 
 
 @app.get("/health")
