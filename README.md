@@ -16,17 +16,16 @@ streaming, tool calling, and long-context session management out of the box.
 
 </div>
 
-## ⚠️ Usage model change (v90.0, effective Nov 2026)
+## ⚠️ Usage model change (v90.x, effective Nov 2026)
 
-DeepSeek now runs double risk control: browser-born tokens get revoked wholesale when used from another environment (rapid bans), and the login endpoint answers datacenter IPs with a WAF challenge. The correct usage is therefore: **sessions are born on your own device and used on the server**.
+Upstream risk control tightened sharply in November. Real-device testing on 2026-11-07 established:
 
-1. On your own computer or phone, run the one-shot login tool (a byte-faithful replica of the official android app login, over your home network): run [`tools/login_once.py`](tools/login_once.py) on desktop; on iPhone use the Shortcuts app to send the same POST natively (setup steps in the dashboard, "Method B"); on Android run [`tools/deepseek-login.sh`](tools/deepseek-login.sh) in Termux or import it into HTTP Shortcuts via its cURL import
-2. The tool prints the token — paste it into the dashboard
-3. When a token dies, run the tool again for a fresh one
+1. **The android-protocol login now hard-requires a fingerprint from the Shumei SDK on a physical android phone** (~89 chars): omit it and the endpoint rejects with 422; fabricated values and web-SDK short ids alike get RISK_DEVICE_DETECTED — **users without an android device cannot use the android-protocol login at all** (desktop and iPhone alike)
+2. **Browser logins on new devices force an email OTP** (password → emailed code → code entry → session)
+3. **The path that ran end to end in testing**: complete a full login in Safari (or any browser) — email OTP included, over your own home network — then use a javascript bookmarklet to read the token from the page's localStorage and paste it into the dashboard (setup steps in the dashboard, "Method B")
+4. Desktop/Android users may still try [`tools/login_once.py`](tools/login_once.py) / [`tools/deepseek-login.sh`](tools/deepseek-login.sh), but only if they can produce an android-native fingerprint; otherwise the device risk check rejects them
 
-**Do not extract tokens from the browser anymore** — those are web-born sessions that die on first use here. Device fingerprint (optional, effectiveness unknown): open chat.deepseek.com in a browser without logging in, run `SMSdk.getDeviceId()` in the console, reuse the same one per account.
-
-**Risk disclaimer**: whether this model fully avoids bans is unproven — it needs real-world observation time. **Use alt accounts**; the maintainer cannot take responsibility for banned accounts.
+Third parties report tokens dying after just 3-4 requests since last night: a single successful request proves nothing long-term. **Risk disclaimer**: whether bans can be fully avoided is unproven — it needs observation time. **Use alt accounts** and keep usage light; the maintainer cannot take responsibility for banned accounts.
 
 **The maintainer has no usable accounts left for testing.** The project implements the model above but is currently unverified end-to-end with a real account. Please test it yourself (the dashboard "Probe tokens" button shows each token's real status); if something breaks, [open an issue](https://github.com/1515asd/rh-deeperseeker/issues/new) with the dashboard status and probe results — **never include tokens or credentials**.
 

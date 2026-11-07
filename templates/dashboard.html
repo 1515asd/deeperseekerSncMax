@@ -135,13 +135,13 @@
 <section>
   <h2>Add an account</h2>
   <div class="warning" style="line-height:1.8">
-    <strong>⚠️ Usage model (since Nov 2026): tokens are born on your own device, used on the server.</strong><br>
-    Since November, upstream revokes whole sessions that get used from a different environment: a token extracted in the browser and pasted into the bridge is treated as session theft and <strong>revoked wholesale</strong> (rapid bans). So <strong>do not extract tokens from the browser</strong> — use Method 1 below: run the login tool on your own device and let DeepSeek hand the token directly to you.<br>
-    <strong>Risk disclaimer:</strong> whether this model fully avoids bans is <strong>unproven</strong> — it needs observation time. Please <strong>use alt accounts</strong>; banned accounts are at your own risk.
+    <strong>⚠️ Usage model (updated after real-device testing on 2026-11-07): tokens are born on your own device, used on the server.</strong><br>
+    Upstream risk control tightened sharply this November. Today's real-device test found: the <strong>android-protocol login now hard-requires a fingerprint produced by the Shumei SDK on a physical android phone</strong> (~89 chars) — omitted, fabricated, or browser-SDK short ids all get RISK_DEVICE_DETECTED, so <strong>users without an android device (iPhone included) cannot use the android-protocol login</strong>; and <strong>email logins on new devices now force an email OTP</strong>. The path that ran end to end in testing: <strong>complete Safari login (email OTP included) → javascript bookmarklet pulls the token from the page</strong> (see Method B below).<br>
+    <strong>Risk disclaimer:</strong> third parties report tokens dying after just 3-4 requests since last night — a single successful request proves nothing long-term. Whether bans can be fully avoided is <strong>unproven</strong>; keep usage light and <strong>use alt accounts only</strong>; banned accounts are at your own risk.
   </div>
 
   <div class="card" style="padding:20px;margin-top:14px">
-    <p style="margin:0 0 10px"><strong>Method 1 (recommended) · Log in on your own device</strong>: the tool sends one login request identical to the official android app (over your home network) and the token comes straight back in the response — android-born, matching the bridge's shape.</p>
+    <p style="margin:0 0 10px"><strong>Method 1 · Log in on your own device (requires a physical android fingerprint)</strong>: the tool sends one login request identical to the official android app (over your home network) and the token comes straight back in the response — android-born, matching the bridge's shape. <strong>2026-11-07 test: this path only works if you can produce an android-native Shumei fingerprint, which desktop and iPhone cannot — use Method B instead.</strong></p>
 
     <details style="margin-top:6px">
       <summary>Method A · Desktop (Windows / Mac / Linux, one script)</summary>
