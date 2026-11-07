@@ -152,9 +152,9 @@
       <div style="padding:8px 2px;line-height:1.9">
         <ol>
           <li>快捷指令 App → 新建 → 添加两个「要求输入」（提示语：账号；密码）</li>
-          <li>添加「获取 URL 内容」：URL 填 <code>https://chat.deepseek.com/api/v0/users/login</code>，方式选 <strong>POST</strong>，头部加三条：<code>content-type: application/json</code>、<code>referer: https://chat.deepseek.com/sign_in</code>、<code>user-agent: Dalvik/2.1.0 (Linux; U; Android 14; Pixel 7)</code></li>
-          <li>请求体选 JSON，字段：<code>email</code> 或 <code>mobile</code>（账号含 @ 用 email，否则用 mobile）、<code>password</code>、<code>area_code</code> 填 <code>+86</code>、<code>device_id</code>（可选指纹）、<code>os</code> 填 <code>android</code></li>
-          <li>添加「获取词典值」→ 路径 <code>data.biz_data.user.token</code>，再接「拷贝至剪贴板」</li>
+          <li>添加「获取 URL 内容」：URL 栏填 <code>https://chat.deepseek.com/api/v0/users/login</code>，方式选 <strong>POST</strong>，展开「头部」，<strong>键和值是两个格子，分开填</strong>（冒号左边进键、右边进值，不要带冒号连粘）：<table><tr><th>键</th><th>值</th></tr><tr><td><code>content-type</code></td><td><code>application/json</code></td></tr><tr><td><code>referer</code></td><td><code>https://chat.deepseek.com/sign_in</code></td></tr><tr><td><code>user-agent</code></td><td><code>Dalvik/2.1.0 (Linux; U; Android 14; Pixel 7)</code></td></tr></table></li>
+          <li>展开「请求体」，类型选 <strong>JSON</strong>，同样<strong>一行一个键、键和值分开填</strong>：<table><tr><th>键</th><th>值</th></tr><tr><td><code>email</code>（账号含 @ 用 email，手机号改用 <code>mobile</code>）</td><td>选变量 → 你的「账号」输入</td></tr><tr><td><code>password</code></td><td>选变量 → 你的「密码」输入</td></tr><tr><td><code>area_code</code></td><td><code>+86</code>（选「文本」类型）</td></tr><tr><td><code>device_id</code>（可选）</td><td>设备指纹，见下方说明</td></tr><tr><td><code>os</code></td><td><code>android</code></td></tr></table></li>
+          <li>添加「获取词典值」：键填 <code>data.biz_data.user.token</code>，<strong>词典来源选变量 →「URL 内容」的结果</strong>，再接「拷贝至剪贴板」（拷贝的对象是词典值的输出）。若返回为空，说明登录被拒，查看请求结果里的报错字段</li>
           <li>运行 → 令牌进剪贴板 → 贴到下方表单</li>
         </ol>
         <p class="hint">手机发请求不受浏览器 CORS 限制，且走的是你自己的移动网络，IP 天然干净。</p>
