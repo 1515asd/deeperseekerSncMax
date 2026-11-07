@@ -668,6 +668,20 @@ def set_token_fingerprint(token_id, fingerprint):
     conn.close()
 
 
+def get_token_fingerprint_by_value(token):
+    """[v90.2] 按令牌字符串查备档数美指纹（只读，全包裹：任何存储异常
+    返回 None，绝不影响请求路径）。供对话请求填充 shumei_device_id 用。"""
+    try:
+        conn = get_db()
+        row = conn.execute(
+            "SELECT device_fingerprint FROM tokens WHERE token = ?", (token,)
+        ).fetchone()
+        conn.close()
+        return (row[0] or None) if row else None
+    except Exception:
+        return None
+
+
 def classify_fingerprint(fp):
     """[v90.1] 数美指纹格式判定（纯本地字符串检查，不发任何请求）。
 
@@ -3707,6 +3721,21 @@ async def _send_message_once(chat_id, auth_token, message, parent_message_id, th
     }
     if parent_message_id:
         json_data["parent_message_id"] = parent_message_id
+    # [v90.2] 2026-11-07 协议变更：completion 请求体必须携带 shumei_device_id
+    # 键。不带该键时，续聊请求（带 parent_message_id）会被以 biz_code 26
+    # "invalid message id" 秒拒（秒回空回复）；带上——哪怕是 null——所有轮
+    # 次放行且上下文完整（当日 A/B 实测锤死；官方网页端本身就发这个键）。
+    # 只在备档指纹是安卓格式（上游唯一认可的"真设备 id"格式）时发备档值，
+    # 其余一律降级为 null（实测 null 同样放行），未备档/网页格式令牌除拒绝
+    # 消失外行为与之前完全一致。查询只读且全包裹，存储异常降级为 null，
+    # 不会波及请求路径。
+    try:
+        _shumei_fp = get_token_fingerprint_by_value(auth_token)
+    except Exception:
+        _shumei_fp = None
+    if classify_fingerprint(_shumei_fp) != "android":
+        _shumei_fp = None
+    json_data["shumei_device_id"] = _shumei_fp
 
     _resp_ct = ""
     non_sse_tail = []  # [v82 诊断] 非 data: 行的原文尾巴

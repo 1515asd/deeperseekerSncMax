@@ -110,13 +110,13 @@
 <p style="margin-top:10px"><button class="btn-sm btn-ghost" onclick="probeTokens(this)">检测令牌（问上游真实状态）</button></p>
 <div id="probe-result" class="hint" style="line-height:1.9;margin-top:8px"></div>
 <details style="margin-top:12px">
-  <summary>补录 / 更新某个令牌的设备指纹（可选 · 仅备档，不发请求）</summary>
+  <summary>补录 / 更新某个令牌的设备指纹（可选）</summary>
   <form id="fp-form" onsubmit="return submitFingerprint(event)" style="display:flex;gap:10px;flex-wrap:wrap;margin-top:8px">
     <input type="text" id="fp-token-id" placeholder="令牌 ID（池表格第一列）" style="width:180px">
     <input type="text" id="fp-value" placeholder="数美设备指纹（约 89 字符）" style="flex:1;min-width:280px">
     <button type="submit" class="btn-sm">保存指纹</button>
   </form>
-  <p class="hint" style="margin:6px 0 0">指纹只在本面板备档并做格式检查（安卓原生格式 / 网页格式 / 未填），不会随任何请求发出去。留空保存即清除。</p>
+  <p class="hint" style="margin:6px 0 0">本面板备档并做格式检查（安卓原生格式 / 网页格式 / 未填）。<strong>2026-11-07 起官方要求对话请求携带 shumei_device_id 字段</strong>（官方网页端本来就带的字段）：备档了安卓原生格式指纹的令牌，对话时会把这个指纹作为该字段发出；未备档或非安卓格式的发 null（实测同样能通过）。留空保存即清除。</p>
 </details>
 <div class="warning" style="margin-top:12px;line-height:1.7">
   <strong>令牌什么时候会过期？</strong>不固定，由 DeepSeek 服务端决定，这边无法预知。过期后客户端会报 <code>401</code> 或 <code>503 No tokens available</code>。<br>

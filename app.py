@@ -53,9 +53,18 @@ def _dup_record(sig, body):
     # 它会让 dup-guard 在窗口内把失败提示原样回放，用户重发同一条消息
     # 永远拿不到真正的重试（2026-10-31 23:57 线上实锤）。
     try:
-        _c = (((body or {}).get("choices") or [{}])[0].get("message") or {}).get("content") or ""
+        _m = (((body or {}).get("choices") or [{}])[0].get("message") or {})
+        _c = _m.get("content") or ""
         if _c.strip().startswith("（上游"):
             _dup_dbg(f"record sig={str(sig)[:16]} SKIPPED (failure notice)")
+            return
+        # [v90.2] "成功"但正文为零的完成同样不缓存。2026-11-07 线上实锤：
+        # 上游拒绝续聊轮时仍返回格式完整但正文为空的 completion，被缓存后
+        # 窗口内客户端每次重试都原样回放同一条空回复，会话看起来假死数分钟。
+        # 不缓存它，同签名重试就会真正重新执行（工具调用轮保持旧行为：其
+        # message 按设计就是 tool_calls + 空 content）。
+        if not _c.strip() and not _m.get("tool_calls"):
+            _dup_dbg(f"record sig={str(sig)[:16]} SKIPPED (empty answer)")
             return
     except Exception:
         pass
@@ -3093,7 +3102,7 @@ async def v1_admin_stats(request: Request):
         cookies_valid = False
     probe = await _deep_health_probe()
     return JSONResponse({
-        "version": "v90.1",
+        "version": "v90.2",
         "active_tokens": active,
         "total_tokens": len(tokens),
         "sessions": sessions,
