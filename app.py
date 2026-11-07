@@ -193,6 +193,9 @@ from functions import (
     UpstreamBizError,
     UpstreamError,
     UpstreamMutedError,
+    add_native_token,
+    login_account,
+    relogin_native,
     cookie_file_path,
     data_dir,
     add_token,
@@ -737,6 +740,13 @@ async def _mark_upstream_failure(e, token_id):
     else:
         await _db(mark_limited, token_id, _upstream_http_code(e),
                   _is_biz_auth_error(e))
+        # [v89.12] try bridge-login self-healing on auth-shaped invalidation
+        # (40003/401) — native tokens only (non-native returns after one
+        # credential lookup), with the 6h throttle and per-token dedup built
+        # into relogin_native; 429s and other failures never trigger it.
+        if _is_biz_auth_error(e):
+            with suppress(Exception):
+                asyncio.create_task(relogin_native(token_id))
 
 
 def _api_error_response(e, is_anthropic=False):
@@ -3192,7 +3202,7 @@ async def v1_admin_stats(request: Request):
         cookies_valid = False
     probe = await _deep_health_probe()
     return JSONResponse({
-        "version": "v89.11",
+        "version": "v89.12",
         "active_tokens": active,
         "total_tokens": len(tokens),
         "sessions": sessions,
@@ -3220,6 +3230,35 @@ async def tokens_add(request: Request):
     if auth_token:
         await _db(add_token, auth_token, alias)
     return HTMLResponse("<meta http-equiv='refresh' content='0;url=/dashboard'>")
+
+
+@app.post("/tokens/login")
+async def tokens_login(request: Request):
+    """[v89.12] Bridge-native login (optional): account + password via the
+    android protocol, session token joins the pool with a native marker.
+    Failure reasons echoed via query params; passwords never logged and
+    never returned."""
+    try:
+        get_current_admin(request)
+    except HTTPException:
+        return HTMLResponse("<meta http-equiv='refresh' content='0;url=/login'>")
+    ctype = request.headers.get("content-type", "")
+    if ctype.startswith("application/x-www-form-urlencoded"):
+        form = _parse_urlencoded_form(await request.body())
+    else:
+        form = await request.form()
+    account = (form.get("account") or "").strip()
+    password = form.get("password") or ""
+    alias = (form.get("alias") or "").strip() or None
+    if not account or not password:
+        return HTMLResponse("<meta http-equiv='refresh' content='0;url=/dashboard?login=empty'>")
+    result = await login_account(account, password)
+    if result.get("ok"):
+        await _db(add_native_token, result["token"], account, password, alias)
+        return HTMLResponse("<meta http-equiv='refresh' content='0;url=/dashboard?login=ok'>")
+    reason = result.get("reason") or "fail"
+    return HTMLResponse(
+        f"<meta http-equiv='refresh' content='0;url=/dashboard?login=fail&reason={reason}'>")
 
 
 @app.post("/tokens/{token_id}/delete")

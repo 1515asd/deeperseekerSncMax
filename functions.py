@@ -11,6 +11,7 @@ import threading
 import sqlite3
 import string
 import time
+import uuid
 from datetime import datetime, timedelta, timezone
 
 import aiohttp
@@ -202,6 +203,16 @@ def init_db():
     # quarantine path — zero contact with normal request handling.
     if "quarantine_reason" not in existing_cols:
         conn.execute("ALTER TABLE tokens ADD COLUMN quarantine_reason TEXT")
+    # [v89.12] bridge-native login (optional module) metadata columns: native
+    # tokens record their source account and password (for auto re-login).
+    # Passwords live only in the local DB — never logged, never returned.
+    # Missing/empty columns keep the module fully inert.
+    if "account" not in existing_cols:
+        conn.execute("ALTER TABLE tokens ADD COLUMN account TEXT")
+    if "password" not in existing_cols:
+        conn.execute("ALTER TABLE tokens ADD COLUMN password TEXT")
+    if "last_login" not in existing_cols:
+        conn.execute("ALTER TABLE tokens ADD COLUMN last_login REAL")
     # [v89.6] Feature toggles (read/written from the admin dashboard):
     # a single key-value table. First toggle: effort_enhance — the prompt
     # enhancement (effort instructions) master switch, defaulting to ON
@@ -681,6 +692,183 @@ def delete_token(token_id):
 
 
 # ==============================================================================
+# [v89.12] Bridge-native login (optional module)
+#
+# Background: since November, upstream revokes whole sessions when a
+# browser-born token is used from another environment — the token dies within
+# minutes and the browser session gets logged out too. The only way out is
+# sessions born inside the bridge: android-protocol login (sandbox-verified:
+# the request shape is accepted, wrong passwords reach the password check).
+#
+# Red lines:
+#   * fully inert until a native account is added — zero requests, byte-
+#     identical behavior
+#   * auto re-login is conservatively throttled: never attempted within
+#     DEEPSEEKER_RELOGIN_MIN_INTERVAL (default 6h => max ~4/day) — better no
+#     self-healing than a "re-login machine" rhythm
+#   * device_id is deterministically derived per account (uuid5, zero
+#     storage, restart-stable): one account, one stable "device"
+#   * community docs claim device_id must be a real SMSdk fingerprint
+#     (empty/random may hit RISK_DEVICE_DETECTED, biz_code=11); our
+#     wrong-password probes never reached that layer — first real account
+#     will tell, and risk_device results are reported honestly and stop
+#     auto-retry
+# ==============================================================================
+
+_RELOGIN_MIN_INTERVAL = float(os.getenv("DEEPSEEKER_RELOGIN_MIN_INTERVAL", "21600"))
+_relogin_inflight: set = set()
+
+
+def _login_device_uuid(account):
+    return str(uuid.uuid5(uuid.NAMESPACE_URL, "deeperseeker-native:" + account))
+
+
+async def login_account(account, password):
+    """[v89.12] Bridge-native login of one account; structured result
+    (never contains the password).
+
+    account is email or mobile (told apart by @). Request shape = the
+    official android app login: android header set + os=android + sign_in
+    referer. Upstream business rejections (bad password / banned /
+    risk-device) are reported as-is; network failures return
+    reason="network"."""
+    if "@" in account:
+        email, mobile = account, None
+    else:
+        email, mobile = None, account
+    _fail = lambda r, d="": {"ok": False, "reason": r, "detail": d,
+                             "token": None, "muted": None, "mute_until": None}
+    session = await get_session()
+    try:
+        async with session.post(
+            UPSTREAM_BASES[0] + "/api/v0/users/login",
+            headers={**get_headers(None),
+                     "referer": "https://chat.deepseek.com/sign_in"},
+            json={
+                "email": email, "mobile": mobile, "password": password,
+                "area_code": "+86", "device_id": _login_device_uuid(account),
+                "os": "android",
+            },
+            timeout=aiohttp.ClientTimeout(total=15),
+        ) as resp:
+            body = await resp.json(content_type=None)
+    except Exception as exc:
+        return _fail("network", str(exc)[:200])
+    code = body.get("code") if isinstance(body, dict) else None
+    data = body.get("data") if isinstance(body, dict) else None
+    if code != 0 or not isinstance(data, dict):
+        return _fail("unexpected", str(body)[:200])
+    biz = data.get("biz_code")
+    if biz not in (None, 0):
+        reason_map = {2: "bad_credentials", 10: "banned", 11: "risk_device"}
+        return _fail(reason_map.get(biz, f"biz_{biz}"),
+                     str(data.get("biz_msg") or "")[:200])
+    user = (data.get("biz_data") or {}).get("user") or {}
+    token = user.get("token")
+    if not token:
+        return _fail("no_token", "login accepted but no token in response")
+    chat = user.get("chat") or {}
+    return {"ok": True, "reason": None, "detail": None, "token": token,
+            "muted": chat.get("is_muted") == 1,
+            "mute_until": chat.get("mute_until")}
+
+
+def add_native_token(token, account, password, alias=None):
+    """[v89.12] Pool insert for bridge-logged-in tokens: same pool, same
+    scheduler, plus account/password/last_login metadata (auto re-login)."""
+    conn = get_db()
+    if not conn.execute("SELECT 1 FROM tokens WHERE id = 1").fetchone():
+        next_id = 1
+    else:
+        row = conn.execute("""
+            SELECT min(t1.id + 1)
+            FROM tokens t1
+            LEFT JOIN tokens t2 ON t1.id + 1 = t2.id
+            WHERE t2.id IS NULL
+        """).fetchone()
+        next_id = row[0] if row and row[0] else 1
+    conn.execute(
+        "INSERT INTO tokens (id, alias, token, status, account, password, last_login) "
+        "VALUES (?, ?, ?, 'ACTIVE', ?, ?, ?)",
+        (next_id, alias, token, account, password, time.time()),
+    )
+    conn.commit()
+    conn.close()
+
+
+def update_native_token(token_id, new_token):
+    """[v89.12] In-place token replacement after a successful re-login;
+    rotation state reset."""
+    conn = get_db()
+    conn.execute(
+        "UPDATE tokens SET token = ?, status = 'ACTIVE', rate_limited_until = NULL, "
+        "consecutive_403 = 0, quarantine_reason = NULL, last_login = ? WHERE id = ?",
+        (new_token, time.time(), token_id),
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_native_credentials(token_id):
+    """[v89.12] Re-login credentials for native tokens; None for non-native
+    rows (no account/password) — auto re-login only touches explicitly
+    added accounts."""
+    conn = get_db()
+    row = conn.execute(
+        "SELECT account, password, last_login FROM tokens WHERE id = ?", (token_id,)
+    ).fetchone()
+    conn.close()
+    if row and row[0] and row[1]:
+        return {"account": row[0], "password": row[1], "last_login": row[2] or 0.0}
+    return None
+
+
+async def relogin_native(token_id):
+    """[v89.12] Conservative auto re-login: never inside the throttle window;
+    outcomes recorded honestly.
+
+    Success -> update_native_token in place (seamless pool self-healing);
+    bad password / banned / risk-device -> logged as-is (banned quarantines
+    the row, risk-device stops auto-retry); network/unexpected -> status quo,
+    retried next trigger within throttle. Concurrency dedup: one re-login
+    task per token at a time."""
+    if token_id in _relogin_inflight:
+        return
+    _relogin_inflight.add(token_id)
+    try:
+        creds = await asyncio.to_thread(get_native_credentials, token_id)
+        if not creds:
+            return  # non-native: module inert
+        now = time.time()
+        if now - creds["last_login"] < _RELOGIN_MIN_INTERVAL:
+            logger.info("[relogin] token #%s within %.0fs of last login, skipping",
+                        token_id, _RELOGIN_MIN_INTERVAL)
+            return
+        result = await login_account(creds["account"], creds["password"])
+        if result.get("ok"):
+            await asyncio.to_thread(update_native_token, token_id, result["token"])
+            logger.info("[relogin] token #%s self-healed via bridge login (account %s***)",
+                        token_id, str(creds["account"])[:3])
+            if result.get("muted"):
+                logger.warning("[relogin] token #%s new session is muted (until %s)",
+                               token_id, result.get("mute_until"))
+        elif result.get("reason") == "banned":
+            await asyncio.to_thread(
+                mark_quarantined, token_id, "account banned (bridge login)")
+        elif result.get("reason") in ("bad_credentials", "risk_device", "no_token"):
+            logger.warning("[relogin] token #%s bridge login rejected (%s: %s) — "
+                           "left as-is, please check the account manually",
+                           token_id, result.get("reason"),
+                           result.get("detail") or "")
+        else:
+            logger.warning("[relogin] token #%s bridge login failed (%s), "
+                           "will retry within throttle next trigger",
+                           token_id, result.get("reason"))
+    finally:
+        _relogin_inflight.discard(token_id)
+
+
+# ==============================================================================
 # B3 (Stage 1 audit) — token pool scheduler v2
 #
 # The old pool selected ACTIVE tokens with ORDER BY RANDOM() and, when every
@@ -1002,12 +1190,12 @@ def get_pool_view():
     conn = get_db()
     rows = conn.execute(
         "SELECT id, alias, status, rate_limited_until, last_used, consecutive_403, token, "
-        "quarantine_reason FROM tokens ORDER BY id"
+        "quarantine_reason, account FROM tokens ORDER BY id"
     ).fetchall()
     conn.close()
 
     view = []
-    for tid, alias, status, until, last_used, streak, token, q_reason in rows:
+    for tid, alias, status, until, last_used, streak, token, q_reason, account in rows:
         streak = streak or 0
         token_head = f"{(token or '')[:8]}…{((token or '')[-4:] if len(token or '') > 12 else '')}" if token else "—"
         # [v89.6] Quarantine classification: the dashboard separates
@@ -1057,6 +1245,10 @@ def get_pool_view():
             "cooldown": cooldown,
             "can_restore": status == "QUARANTINED",
         }
+        # [v89.12] native marker for bridge-logged-in tokens (dashboard badge);
+        # browser tokens carry no field — display unchanged.
+        if account:
+            entry["native"] = True
         if reason_kind:
             entry["reason_kind"] = reason_kind
             entry["reason"] = str(q_reason or "")

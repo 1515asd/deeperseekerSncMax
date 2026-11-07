@@ -135,6 +135,20 @@
     </form>
   </div>
 
+  <details style="margin-top:12px">
+    <summary>Bridge-native login (optional): let accounts log in inside the bridge — tokens are created and self-heal automatically</summary>
+    <div class="card" style="padding:20px;margin-top:8px">
+      <div class="hint" style="margin-bottom:10px">Since November, upstream revokes whole sessions that get used from a different environment — browser-extracted tokens die the moment the bridge uses them. <strong>Bridge-native login lets sessions be born inside the bridge</strong>; invalidated tokens re-login automatically (conservatively throttled: at least 6 hours apart). Passwords are stored only in the local database and never logged. Delete the account's old token before adding it here.</div>
+      <div id="login-result" class="hint" style="margin-bottom:8px;display:none"></div>
+      <form method="post" action="/tokens/login" style="display:flex;gap:10px;flex-wrap:wrap">
+        <input type="text" name="alias" placeholder="Alias (optional)" style="width:160px">
+        <input type="text" name="account" placeholder="Email or phone number" style="flex:1;min-width:200px" autocomplete="off">
+        <input type="password" name="password" placeholder="Password" style="flex:1;min-width:160px" autocomplete="new-password">
+        <button type="submit">Log in and join pool</button>
+      </form>
+    </div>
+  </details>
+
   <details>
     <summary>How do I get a token? Pick any one of the three methods</summary>
     <div style="padding:4px 2px 14px">
@@ -243,7 +257,7 @@ async function refreshPool() {
         note = KIND_NOTE.other + (t.reason ? ' Reason: ' + t.reason : '');
       }
       const tr = document.createElement('tr');
-      tr.innerHTML = `<td>${t.id}</td><td>${esc(t.label)}</td>`
+      tr.innerHTML = `<td>${t.id}</td><td>${esc(t.label)}${t.native ? ' <span class="badge b-blue">native</span>' : ''}</td>`
         + `<td><code>${esc(t.token_head || '—')}</code></td>`
         + `<td><span class="badge ${badge}">${esc(stLabel)}</span></td>`
         + `<td style="white-space:normal;min-width:220px">${esc(note)}</td><td>${t.in_flight}</td>`
@@ -364,6 +378,21 @@ async function checkLink() {
 }
 
 refreshPool(); refreshUsage(); refreshDeep(); refreshEffort();
+// [v89.12] bridge login result echo (redirected back from /tokens/login)
+(function () {
+  const q = new URLSearchParams(location.search);
+  const lr = q.get('login');
+  if (!lr) return;
+  const box = document.getElementById('login-result');
+  const REASON = {bad_credentials: 'Wrong account or password (PASSWORD_OR_USER_NAME_IS_WRONG)',
+    banned: 'Account banned upstream (USER_IS_BANNED)',
+    risk_device: 'Upstream rejected the login from this device (RISK_DEVICE_DETECTED) — device fingerprint checks are stricter than expected; the account itself is fine',
+    network: 'Network request failed, try again later', no_token: 'Upstream response anomaly (no token returned)',
+    unexpected: 'Upstream response format anomaly', empty: 'Both account and password are required'};
+  if (lr === 'ok') { box.textContent = '✅ Login OK — token added to the pool (native badge); it will re-login automatically when invalidated'; box.style.display = 'block'; }
+  else { box.textContent = '❌ Login failed: ' + (REASON[q.get('reason')] || (q.get('reason') || 'unknown reason')); box.style.display = 'block'; }
+  history.replaceState(null, '', location.pathname);
+})();
 setInterval(refreshPool, 10000);
 setInterval(refreshUsage, 10000);
 setInterval(refreshDeep, 30000);
