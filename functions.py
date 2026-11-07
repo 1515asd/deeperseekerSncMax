@@ -4029,6 +4029,8 @@ async def _send_message_once(chat_id, auth_token, message, parent_message_id, th
     # [v58] Accumulate non-thinking prose so FINISHED can judge whether only
     # unparsed tool markup remains
     body_acc = []
+    # [v90.3] One-switch revert: DEEPSEEKER_FRAGMENT_FIX=0 restores v90.2 parsing.
+    _fragment_fix = os.getenv("DEEPSEEKER_FRAGMENT_FIX", "1") != "0"
     # [v63] The first-byte budget is now defined before the POST (S8): the
     # budget's design intent was always "from sending the request to seeing
     # the first byte" (original comment: during prefill the upstream "does not
@@ -4179,7 +4181,18 @@ async def _send_message_once(chat_id, auth_token, message, parent_message_id, th
                             yield fragment.get("content", "")
                 return
 
-            if data.get("p") == "response/fragments" and data.get("o") == "APPEND":
+            # [v90.3] Upstream now splits a thinking reply into THINK / RESPONSE
+            # fragments. When reasoning finishes it sends a whole-fragment
+            # snapshot (p=response/fragments, o absent/None) carrying
+            # [THINK(full text already streamed), RESPONSE(first body char)] --
+            # the cut signal that closes the think box and starts the body. The
+            # old parser only accepted o=="APPEND", so this event was dropped,
+            # <think> stayed open until FINISHED and every body char after it
+            # was swallowed into the think box -> client got reasoning + EMPTY
+            # answer. Handle that snapshot in this same existing branch.
+            _frag_op = data.get("o")
+            _snapshot = _fragment_fix and _frag_op is None
+            if data.get("p") == "response/fragments" and (_frag_op == "APPEND" or _snapshot):
                 fragments = data.get("v")
                 if isinstance(fragments, list):
                     for fragment in fragments:
@@ -4193,6 +4206,8 @@ async def _send_message_once(chat_id, auth_token, message, parent_message_id, th
                             body_acc.append(fragment.get("content", "") or "")
                             yield fragment.get("content", "")
                         elif fragment.get("type") == "THINK":
+                            if _snapshot:
+                                continue  # snapshot: full reasoning already streamed, don't re-emit
                             if not think_open:
                                 yield "\n<think>"
                                 think_open = True
@@ -4210,10 +4225,19 @@ async def _send_message_once(chat_id, auth_token, message, parent_message_id, th
             v = data.get("v")
             if isinstance(v, str) and v:
                 got_output = True
-                got_body = True
                 _last_emit[0] = time.time()
-                body_acc.append(v)
-                yield v
+                # [v90.3] While the think box is open a bare-string chunk is
+                # reasoning, not body. The old code marked it got_body / pushed
+                # to body_acc unconditionally, so FINISHED saw "body present"
+                # and never fired auto-continue -> silent empty response. After
+                # the box closes (and for the entire no-thinking path) behavior
+                # is byte-for-byte identical to before.
+                if think_open and _fragment_fix:
+                    yield v
+                else:
+                    got_body = True
+                    body_acc.append(v)
+                    yield v
 
         async def _consume_sse_line(decoded_line: str):
             if not decoded_line.startswith("data: "):
