@@ -193,9 +193,6 @@ from functions import (
     UpstreamBizError,
     UpstreamError,
     UpstreamMutedError,
-    add_native_token,
-    login_account,
-    relogin_native,
     cookie_file_path,
     data_dir,
     add_token,
@@ -740,13 +737,6 @@ async def _mark_upstream_failure(e, token_id):
     else:
         await _db(mark_limited, token_id, _upstream_http_code(e),
                   _is_biz_auth_error(e))
-        # [v89.12] try bridge-login self-healing on auth-shaped invalidation
-        # (40003/401) — native tokens only (non-native returns after one
-        # credential lookup), with the 6h throttle and per-token dedup built
-        # into relogin_native; 429s and other failures never trigger it.
-        if _is_biz_auth_error(e):
-            with suppress(Exception):
-                asyncio.create_task(relogin_native(token_id))
 
 
 def _api_error_response(e, is_anthropic=False):
@@ -3202,7 +3192,7 @@ async def v1_admin_stats(request: Request):
         cookies_valid = False
     probe = await _deep_health_probe()
     return JSONResponse({
-        "version": "v89.13",
+        "version": "v90.0",
         "active_tokens": active,
         "total_tokens": len(tokens),
         "sessions": sessions,
@@ -3232,40 +3222,6 @@ async def tokens_add(request: Request):
     return HTMLResponse("<meta http-equiv='refresh' content='0;url=/dashboard'>")
 
 
-@app.post("/tokens/login")
-async def tokens_login(request: Request):
-    """[v89.12] Bridge-native login (optional): account + password via the
-    android protocol, session token joins the pool with a native marker.
-    Failure reasons echoed via query params; passwords never logged and
-    never returned."""
-    try:
-        get_current_admin(request)
-    except HTTPException:
-        return HTMLResponse("<meta http-equiv='refresh' content='0;url=/login'>")
-    ctype = request.headers.get("content-type", "")
-    if ctype.startswith("application/x-www-form-urlencoded"):
-        form = _parse_urlencoded_form(await request.body())
-    else:
-        form = await request.form()
-    account = (form.get("account") or "").strip()
-    password = form.get("password") or ""
-    alias = (form.get("alias") or "").strip() or None
-    # [v89.13] Optional Shumei device fingerprint: what the real android
-    # app's login body carries; random UUIDs get rejected with
-    # RISK_DEVICE_DETECTED. Persisted and reused by auto re-login.
-    device_id = (form.get("device_id") or "").strip() or None
-    if not account or not password:
-        return HTMLResponse("<meta http-equiv='refresh' content='0;url=/dashboard?login=empty'>")
-    result = await login_account(account, password, device_id)
-    if result.get("ok"):
-        await _db(add_native_token, result["token"], account, password,
-                  alias, device_id)
-        return HTMLResponse("<meta http-equiv='refresh' content='0;url=/dashboard?login=ok'>")
-    reason = result.get("reason") or "fail"
-    return HTMLResponse(
-        f"<meta http-equiv='refresh' content='0;url=/dashboard?login=fail&reason={reason}'>")
-
-
 @app.post("/tokens/{token_id}/delete")
 async def tokens_delete(token_id: int, request: Request):
     try:
@@ -3282,18 +3238,15 @@ async def root(request: Request):
 
 
 async def _deep_health_probe():
-    """[v89.10] End-to-end upstream liveness check — read-only (GET users/current).
+    """[v77 P0-9 port] One end-to-end upstream round trip (incl. PoW): create an empty chat session.
 
-    History (v77~v89.8): this probe created a real empty upstream chat
-    session via create_new_chat. Confirmed on 2026-11-06: the dashboard
-    polls /v1/admin/stats every 30s, i.e. every 30s it conjured an empty
-    session that was never used and never deleted — a high-frequency
-    empty-session pattern that matches DeepSeek's November session-revocation
-    risk triggers, and lines up with tokens being revoked within minutes
-    while the dashboard is open. It now uses the v89.7 read-only probe
-    probe_token_mute (GET users/current: zero sessions, zero messages,
-    zero PoW) — equivalent health information (alive/muted/invalid) with
-    zero anomalous upstream traffic."""
+    Cost: one empty upstream session per call — the most honest probe this
+    bridge can run, because session creation is exactly the hop that breaks
+    first when PoW/client version/account dies. The probe never sends messages
+    and never reports token material. State-aware token pick: goes through
+    pick_token(), skipping quarantined and cooling-down rows (the old
+    grab-the-first-row approach misreported degradation and sent upstream
+    traffic to credentials known to be dead)."""
     token_id = await _db(pick_token)
     auth_token = None
     if token_id is not None:
@@ -3307,16 +3260,15 @@ async def _deep_health_probe():
                 "reason": "no ACTIVE token in pool"}
     started = time.perf_counter()
     try:
-        _pr = await probe_token_mute(auth_token)
+        await create_new_chat(auth_token)
     except Exception as e:
         logger.warning("Deep health probe failed: %s", e)
         return {"upstream_reachable": False, "pow_ok": False,
                 "latency_ms": round((time.perf_counter() - started) * 1000, 1),
                 "reason": "upstream error"}
-    alive = _pr.get("verdict") in ("ok", "muted")  # muted = credentials still valid
-    return {"upstream_reachable": alive, "pow_ok": alive,
+    return {"upstream_reachable": True, "pow_ok": True,
             "latency_ms": round((time.perf_counter() - started) * 1000, 1),
-            "reason": "" if alive else f"token verdict: {_pr.get('verdict')}"}
+            "session_created": True}
 
 
 @app.get("/health")

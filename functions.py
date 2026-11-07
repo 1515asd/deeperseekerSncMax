@@ -11,7 +11,6 @@ import threading
 import sqlite3
 import string
 import time
-import uuid
 from datetime import datetime, timedelta, timezone
 
 import aiohttp
@@ -203,24 +202,6 @@ def init_db():
     # quarantine path — zero contact with normal request handling.
     if "quarantine_reason" not in existing_cols:
         conn.execute("ALTER TABLE tokens ADD COLUMN quarantine_reason TEXT")
-    # [v89.12] bridge-native login (optional module) metadata columns: native
-    # tokens record their source account and password (for auto re-login).
-    # Passwords live only in the local DB — never logged, never returned.
-    # Missing/empty columns keep the module fully inert.
-    if "account" not in existing_cols:
-        conn.execute("ALTER TABLE tokens ADD COLUMN account TEXT")
-    if "password" not in existing_cols:
-        conn.execute("ALTER TABLE tokens ADD COLUMN password TEXT")
-    if "last_login" not in existing_cols:
-        conn.execute("ALTER TABLE tokens ADD COLUMN last_login REAL")
-    # [v89.13] native token's login device fingerprint (Shumei SMSdk 89-char
-    # base64). Community evidence: the login body's device_id must be a real
-    # device fingerprint — random UUIDs are rejected with RISK_DEVICE_DETECTED
-    # (biz_code=11). Provided once in the dashboard, persisted, and reused by
-    # auto re-login; when absent it falls back to the deterministic uuid5
-    # (may be rejected; reported honestly as risk_device).
-    if "device_id" not in existing_cols:
-        conn.execute("ALTER TABLE tokens ADD COLUMN device_id TEXT")
     # [v89.6] Feature toggles (read/written from the admin dashboard):
     # a single key-value table. First toggle: effort_enhance — the prompt
     # enhancement (effort instructions) master switch, defaulting to ON
@@ -700,198 +681,6 @@ def delete_token(token_id):
 
 
 # ==============================================================================
-# [v89.12] Bridge-native login (optional module)
-#
-# Background: since November, upstream revokes whole sessions when a
-# browser-born token is used from another environment — the token dies within
-# minutes and the browser session gets logged out too. The only way out is
-# sessions born inside the bridge: android-protocol login (sandbox-verified:
-# the request shape is accepted, wrong passwords reach the password check).
-#
-# Red lines:
-#   * fully inert until a native account is added — zero requests, byte-
-#     identical behavior
-#   * auto re-login is conservatively throttled: never attempted within
-#     DEEPSEEKER_RELOGIN_MIN_INTERVAL (default 6h => max ~4/day) — better no
-#     self-healing than a "re-login machine" rhythm
-#   * [v89.13] the login body's device_id should be a real Shumei (SMSdk)
-#     device fingerprint — community evidence: random/fabricated UUIDs
-#     (exactly what the v89.12 uuid5 was) are rejected with
-#     RISK_DEVICE_DETECTED (biz_code=11). The dashboard form accepts an
-#     optional fingerprint (fetched once via SMSdk.getDeviceId() in any
-#     browser, no login needed), persisted per account and reused verbatim
-#     by auto re-login; uuid5 remains the fallback, and risk_device results
-#     are reported honestly and stop auto-retry
-#   * the x-device-id header stays a UUID (device UUID in the header and the
-#     Shumei fingerprint in the body are two distinct things; the real client
-#     sends both, in different shapes)
-# ==============================================================================
-
-_RELOGIN_MIN_INTERVAL = float(os.getenv("DEEPSEEKER_RELOGIN_MIN_INTERVAL", "21600"))
-_relogin_inflight: set = set()
-
-
-def _login_device_uuid(account):
-    return str(uuid.uuid5(uuid.NAMESPACE_URL, "deeperseeker-native:" + account))
-
-
-async def login_account(account, password, device_id=None):
-    """[v89.12] Bridge-native login of one account; structured result
-    (never contains the password or the fingerprint).
-
-    account is email or mobile (told apart by @). Request shape = the
-    official android app login: android header set + os=android + sign_in
-    referer + x-device-id header. [v89.13] The body's device_id prefers the
-    caller-provided Shumei device fingerprint (what the real android app
-    carries; random UUIDs are rejected with RISK_DEVICE_DETECTED per ds_core
-    testing), falling back to the deterministic uuid5 when absent. The
-    x-device-id header is always a UUID (separate from the body fingerprint).
-    Upstream business rejections (bad password / banned / risk-device) are
-    reported as-is; network failures return reason="network"."""
-    if "@" in account:
-        email, mobile = account, None
-    else:
-        email, mobile = None, account
-    device_uuid = _login_device_uuid(account)
-    _fail = lambda r, d="": {"ok": False, "reason": r, "detail": d,
-                             "token": None, "muted": None, "mute_until": None}
-    session = await get_session()
-    try:
-        async with session.post(
-            UPSTREAM_BASES[0] + "/api/v0/users/login",
-            headers={**get_headers(None),
-                     "referer": "https://chat.deepseek.com/sign_in",
-                     "x-device-id": device_uuid, "x-device-model": ""},
-            json={
-                "email": email, "mobile": mobile, "password": password,
-                "area_code": "+86", "device_id": device_id or device_uuid,
-                "os": "android",
-            },
-            timeout=aiohttp.ClientTimeout(total=15),
-        ) as resp:
-            body = await resp.json(content_type=None)
-    except Exception as exc:
-        return _fail("network", str(exc)[:200])
-    code = body.get("code") if isinstance(body, dict) else None
-    data = body.get("data") if isinstance(body, dict) else None
-    if code != 0 or not isinstance(data, dict):
-        return _fail("unexpected", str(body)[:200])
-    biz = data.get("biz_code")
-    if biz not in (None, 0):
-        reason_map = {2: "bad_credentials", 10: "banned", 11: "risk_device"}
-        return _fail(reason_map.get(biz, f"biz_{biz}"),
-                     str(data.get("biz_msg") or "")[:200])
-    user = (data.get("biz_data") or {}).get("user") or {}
-    token = user.get("token")
-    if not token:
-        return _fail("no_token", "login accepted but no token in response")
-    chat = user.get("chat") or {}
-    return {"ok": True, "reason": None, "detail": None, "token": token,
-            "muted": chat.get("is_muted") == 1,
-            "mute_until": chat.get("mute_until")}
-
-
-def add_native_token(token, account, password, alias=None, device_id=None):
-    """[v89.12] Pool insert for bridge-logged-in tokens: same pool, same
-    scheduler, plus account/password/last_login/device_id metadata
-    (auto re-login)."""
-    conn = get_db()
-    if not conn.execute("SELECT 1 FROM tokens WHERE id = 1").fetchone():
-        next_id = 1
-    else:
-        row = conn.execute("""
-            SELECT min(t1.id + 1)
-            FROM tokens t1
-            LEFT JOIN tokens t2 ON t1.id + 1 = t2.id
-            WHERE t2.id IS NULL
-        """).fetchone()
-        next_id = row[0] if row and row[0] else 1
-    conn.execute(
-        "INSERT INTO tokens (id, alias, token, status, account, password, "
-        "last_login, device_id) VALUES (?, ?, ?, 'ACTIVE', ?, ?, ?, ?)",
-        (next_id, alias, token, account, password, time.time(), device_id),
-    )
-    conn.commit()
-    conn.close()
-
-
-def update_native_token(token_id, new_token):
-    """[v89.12] In-place token replacement after a successful re-login;
-    rotation state reset."""
-    conn = get_db()
-    conn.execute(
-        "UPDATE tokens SET token = ?, status = 'ACTIVE', rate_limited_until = NULL, "
-        "consecutive_403 = 0, quarantine_reason = NULL, last_login = ? WHERE id = ?",
-        (new_token, time.time(), token_id),
-    )
-    conn.commit()
-    conn.close()
-
-
-def get_native_credentials(token_id):
-    """[v89.12] Re-login credentials for native tokens; None for non-native
-    rows (no account/password) — auto re-login only touches explicitly
-    added accounts."""
-    conn = get_db()
-    row = conn.execute(
-        "SELECT account, password, last_login, device_id FROM tokens WHERE id = ?",
-        (token_id,),
-    ).fetchone()
-    conn.close()
-    if row and row[0] and row[1]:
-        return {"account": row[0], "password": row[1],
-                "last_login": row[2] or 0.0, "device_id": row[3] or None}
-    return None
-
-
-async def relogin_native(token_id):
-    """[v89.12] Conservative auto re-login: never inside the throttle window;
-    outcomes recorded honestly.
-
-    Success -> update_native_token in place (seamless pool self-healing);
-    bad password / banned / risk-device -> logged as-is (banned quarantines
-    the row, risk-device stops auto-retry); network/unexpected -> status quo,
-    retried next trigger within throttle. Concurrency dedup: one re-login
-    task per token at a time."""
-    if token_id in _relogin_inflight:
-        return
-    _relogin_inflight.add(token_id)
-    try:
-        creds = await asyncio.to_thread(get_native_credentials, token_id)
-        if not creds:
-            return  # non-native: module inert
-        now = time.time()
-        if now - creds["last_login"] < _RELOGIN_MIN_INTERVAL:
-            logger.info("[relogin] token #%s within %.0fs of last login, skipping",
-                        token_id, _RELOGIN_MIN_INTERVAL)
-            return
-        result = await login_account(
-            creds["account"], creds["password"], creds.get("device_id"),
-        )
-        if result.get("ok"):
-            await asyncio.to_thread(update_native_token, token_id, result["token"])
-            logger.info("[relogin] token #%s self-healed via bridge login (account %s***)",
-                        token_id, str(creds["account"])[:3])
-            if result.get("muted"):
-                logger.warning("[relogin] token #%s new session is muted (until %s)",
-                               token_id, result.get("mute_until"))
-        elif result.get("reason") == "banned":
-            await asyncio.to_thread(
-                mark_quarantined, token_id, "account banned (bridge login)")
-        elif result.get("reason") in ("bad_credentials", "risk_device", "no_token"):
-            logger.warning("[relogin] token #%s bridge login rejected (%s: %s) — "
-                           "left as-is, please check the account manually",
-                           token_id, result.get("reason"),
-                           result.get("detail") or "")
-        else:
-            logger.warning("[relogin] token #%s bridge login failed (%s), "
-                           "will retry within throttle next trigger",
-                           token_id, result.get("reason"))
-    finally:
-        _relogin_inflight.discard(token_id)
-
-
-# ==============================================================================
 # B3 (Stage 1 audit) — token pool scheduler v2
 #
 # The old pool selected ACTIVE tokens with ORDER BY RANDOM() and, when every
@@ -1213,12 +1002,12 @@ def get_pool_view():
     conn = get_db()
     rows = conn.execute(
         "SELECT id, alias, status, rate_limited_until, last_used, consecutive_403, token, "
-        "quarantine_reason, account FROM tokens ORDER BY id"
+        "quarantine_reason FROM tokens ORDER BY id"
     ).fetchall()
     conn.close()
 
     view = []
-    for tid, alias, status, until, last_used, streak, token, q_reason, account in rows:
+    for tid, alias, status, until, last_used, streak, token, q_reason in rows:
         streak = streak or 0
         token_head = f"{(token or '')[:8]}…{((token or '')[-4:] if len(token or '') > 12 else '')}" if token else "—"
         # [v89.6] Quarantine classification: the dashboard separates
@@ -1268,10 +1057,6 @@ def get_pool_view():
             "cooldown": cooldown,
             "can_restore": status == "QUARANTINED",
         }
-        # [v89.12] native marker for bridge-logged-in tokens (dashboard badge);
-        # browser tokens carry no field — display unchanged.
-        if account:
-            entry["native"] = True
         if reason_kind:
             entry["reason_kind"] = reason_kind
             entry["reason"] = str(q_reason or "")
@@ -3297,82 +3082,6 @@ def _take_prefetched_pow(auth_token, target_path="/api/v0/chat/completion"):
     return p
 
 
-# ── HIF risk-control token (v89.8) ──────────────────────────────────────
-# Community packet capture (2026-10-07, ds-free-api #97/#112) proved the
-# official client attaches an x-hif-leim header to /chat/completion
-# requests — a short-lived token issued by hif-leim.deepseek.com (response
-# header x-hif-ttl, default 600s). Every third-party proxy omitted this
-# header; since the November 2026 risk-control tightening, a missing header
-# lets the upstream identify a non-official client with zero behavioral
-# statistics — matching the instant-mute wave. Official behavior: poll on
-# startup, re-fetch per TTL, and on poll failure simply send without the
-# header — this implementation mirrors that one-to-one:
-#   * cached per x-hif-ttl, treated as expired 30s before the deadline
-#   * a failed fetch backs off 60s and returns None: the caller degrades to
-#     sending without the header — exactly the historical behavior, zero
-#     new risk
-#   * never sends a stale token (expired = dropped), never blocks requests
-# The endpoint is unauthenticated, needs no account token, and generates
-# zero account-side traffic.
-_HIF_QUERY_URL = os.getenv("DEEPSEEKER_HIF_URL", "https://hif-leim.deepseek.com/query")
-# [v89.11] Default OFF. Community capture (artyom08-dev) proves the android
-# app never sends x-hif-leim (it is a web-frontend header); carrying it on an
-# android-profile client creates a hybrid identity — an inconsistency signal
-# in itself. The Nov 2 environment checks sit only on the browser/login path,
-# so nothing web-flavored is needed on the android path. Re-enable with
-# DEEPSEEKER_HIF_ENABLED=1 if ever needed.
-_HIF_ENABLED = os.getenv("DEEPSEEKER_HIF_ENABLED", "0").strip().lower() not in ("0", "false", "off")
-_HIF_DEFAULT_TTL = 600.0    # official default when x-hif-ttl is absent
-_HIF_REFRESH_MARGIN = 30.0  # treat as expired 30s early — a stale token never goes on a request
-_HIF_FAIL_BACKOFF = 60.0    # retry backoff after a failed fetch
-_HIF_FETCH_TIMEOUT = 5.0    # network budget: degrade rather than slow the chat
-_hif_cache: dict = {"value": None, "expire_at": 0.0, "retry_at": 0.0}
-_hif_lock = asyncio.Lock()
-
-
-async def get_hif_token():
-    """[v89.8] Fetch the x-hif-leim risk-control token; returns None on any
-    failure and the caller degrades to sending without the header (exactly
-    what the real client does when its poll fails). Cache hits cost zero
-    network and zero wait."""
-    if not _HIF_ENABLED:
-        return None
-    now = time.time()
-    if _hif_cache["value"] and now < _hif_cache["expire_at"]:
-        return _hif_cache["value"]  # fast path: lock-free
-    if now < _hif_cache["retry_at"]:
-        return None  # inside backoff: degrade, never send a stale token
-    async with _hif_lock:
-        now = time.time()  # time advanced while waiting for the lock
-        if _hif_cache["value"] and now < _hif_cache["expire_at"]:
-            return _hif_cache["value"]  # double-check: another request refreshed it
-        if now < _hif_cache["retry_at"]:
-            return None
-        try:
-            session = await get_session()
-            async with session.get(
-                _HIF_QUERY_URL,
-                timeout=aiohttp.ClientTimeout(total=_HIF_FETCH_TIMEOUT),
-            ) as resp:
-                ttl = resp.headers.get("x-hif-ttl")
-                try:
-                    ttl = float(ttl)
-                except (TypeError, ValueError):
-                    ttl = _HIF_DEFAULT_TTL
-                js = await resp.json(content_type=None)
-                value = ((js.get("data") or {}).get("biz_data") or {}).get("value")
-            if value:
-                _hif_cache["value"] = value
-                _hif_cache["expire_at"] = now + max(ttl - _HIF_REFRESH_MARGIN, 1.0)
-                _hif_cache["retry_at"] = 0.0
-                return value
-            logger.warning("[hif] risk-control endpoint replied without a value, retrying in 60s")
-        except Exception as exc:
-            logger.warning("[hif] failed to fetch risk-control token (degrading to no header): %s", exc)
-        _hif_cache["retry_at"] = time.time() + _HIF_FAIL_BACKOFF
-        return None
-
-
 async def warmup_pool(max_tokens=3):
     """[v57 ported from v35] Startup warmup: moves ~30s of cold-start cost to
     the startup phase.
@@ -3429,21 +3138,6 @@ async def warmup_pool(max_tokens=3):
                 )
     except Exception as exc:
         logger.warning("[warmup] mute scan failed: %s", exc)
-    # [v89.8] The official client polls the hif-leim risk-control token on
-    # startup; prefetch once so the first chat request already carries it.
-    # Failure only logs: runtime retries with backoff and degrades to
-    # sending without the header (= historical behavior) — startup is never
-    # affected.
-    try:
-        if _HIF_ENABLED:
-            if await get_hif_token():
-                logger.info("[warmup] hif risk-control token prefetched")
-            else:
-                logger.warning("[warmup] hif risk-control token not prefetched (runtime retries automatically, degrading to no header)")
-        else:
-            logger.info("[warmup] hif disabled (pure android profile, no x-hif-leim header)")
-    except Exception as exc:
-        logger.warning("[warmup] hif prefetch error: %s", exc)
     logger.info("[warmup] all done in %.1fs, PoW pool %d entries", time.time() - t0, len(_POW_PREFETCH))
 
 
@@ -4217,13 +3911,6 @@ async def _send_message_once(chat_id, auth_token, message, parent_message_id, th
         # consumed one — refill in the background for the next turn
         asyncio.create_task(_prefetch_pow(auth_token, "/api/v0/chat/completion"))
     headers = get_headers(auth_token, _pow)
-    # [v89.8] The official client sends x-hif-leim on completion requests (a
-    # missing header is direct proof of a non-official client since Nov 2026).
-    # On failure degrade to sending without it (= historical behavior);
-    # never block, never send a stale token.
-    _hif = await get_hif_token()
-    if _hif:
-        headers["x-hif-leim"] = _hif
     # [v82] DeepSeek protocol change on the evening of 2026-10-31:
     # parent_message_id no longer accepts 0 (biz_code 26 "invalid message
     # id"). Different access points showed inconsistent tolerance for null —
