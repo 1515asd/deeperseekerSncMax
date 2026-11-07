@@ -135,13 +135,13 @@
 <section>
   <h2>添加账号</h2>
   <div class="warning" style="line-height:1.8">
-    <strong>⚠️ 使用模型说明（2026-11 起）：令牌出生在你自己的设备上，使用在服务器。</strong><br>
-    11 月起上游执行「跨环境会话吊销」：浏览器里提取的令牌拿到服务器使用，会被判定为会话盗用并<strong>整体吊销</strong>（频繁封号）。所以请<strong>不要再从浏览器提取令牌</strong>，改用下面的方式一：在自己设备上运行登录工具，让服务器把令牌直接发给你。<br>
-    <strong>风险提示：</strong>新模型能否完全避免封号<strong>尚无定论</strong>，需要使用一段时间观察。请<strong>使用小号</strong>，账号被封无法承担责任。
+    <strong>⚠️ 使用模型说明（2026-11-07 实测更新）：令牌出生在你自己的设备上，使用在服务器。</strong><br>
+    11 月起上游风控大幅收紧，今天的真机实测结论：<strong>安卓协议登录现在必须携带安卓真机数美 SDK 生成的设备指纹</strong>（约 89 字符），不填、乱填、或用浏览器取到的短格式一律被拒（RISK_DEVICE_DETECTED）——所以<strong>没有安卓设备的用户（含 iPhone）走不了安卓协议登录</strong>；<strong>邮箱登录在新设备上会强制邮箱验证码</strong>。实测全程可跑通的路径：<strong>Safari 完整登录（含邮箱验证码）→ javascript 书签从页面取令牌</strong>（见下方方法 B）。<br>
+    <strong>风险提示：</strong>第三方实测反馈「昨晚起 3-4 次请求即掉令牌」，单次请求能通不代表长期可用；能否完全避免封号<strong>尚无定论</strong>，请控制使用强度、<strong>只用小号</strong>，账号被封无法承担责任。
   </div>
 
   <div class="card" style="padding:20px;margin-top:14px">
-    <p style="margin:0 0 10px"><strong>方式一（推荐）· 在自己设备上登录</strong>：用登录工具向 DeepSeek 发送一次官方安卓 App 同款登录请求（走你自己的家庭网络），令牌随登录结果直接返回——出生即安卓，与桥的使用形态一致。</p>
+    <p style="margin:0 0 10px"><strong>方式一 · 在自己设备上登录（需要安卓真机指纹）</strong>：用登录工具向 DeepSeek 发送一次官方安卓 App 同款登录请求（走你自己的家庭网络），令牌随登录结果直接返回——出生即安卓，与桥的使用形态一致。<strong>2026-11-07 实测：此路必须能提供安卓真机的数美指纹，电脑/iPhone 取不到，取不到就用方法 B。</strong></p>
 
     <details style="margin-top:6px">
       <summary>方法 A · 电脑（Windows / Mac / Linux，跑一次脚本）</summary>
