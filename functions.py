@@ -3100,7 +3100,13 @@ def _take_prefetched_pow(auth_token, target_path="/api/v0/chat/completion"):
 # The endpoint is unauthenticated, needs no account token, and generates
 # zero account-side traffic.
 _HIF_QUERY_URL = os.getenv("DEEPSEEKER_HIF_URL", "https://hif-leim.deepseek.com/query")
-_HIF_ENABLED = os.getenv("DEEPSEEKER_HIF_ENABLED", "1").strip().lower() not in ("0", "false", "off")
+# [v89.11] Default OFF. Community capture (artyom08-dev) proves the android
+# app never sends x-hif-leim (it is a web-frontend header); carrying it on an
+# android-profile client creates a hybrid identity — an inconsistency signal
+# in itself. The Nov 2 environment checks sit only on the browser/login path,
+# so nothing web-flavored is needed on the android path. Re-enable with
+# DEEPSEEKER_HIF_ENABLED=1 if ever needed.
+_HIF_ENABLED = os.getenv("DEEPSEEKER_HIF_ENABLED", "0").strip().lower() not in ("0", "false", "off")
 _HIF_DEFAULT_TTL = 600.0    # official default when x-hif-ttl is absent
 _HIF_REFRESH_MARGIN = 30.0  # treat as expired 30s early — a stale token never goes on a request
 _HIF_FAIL_BACKOFF = 60.0    # retry backoff after a failed fetch
@@ -3214,10 +3220,13 @@ async def warmup_pool(max_tokens=3):
     # sending without the header (= historical behavior) — startup is never
     # affected.
     try:
-        if await get_hif_token():
-            logger.info("[warmup] hif risk-control token prefetched")
+        if _HIF_ENABLED:
+            if await get_hif_token():
+                logger.info("[warmup] hif risk-control token prefetched")
+            else:
+                logger.warning("[warmup] hif risk-control token not prefetched (runtime retries automatically, degrading to no header)")
         else:
-            logger.warning("[warmup] hif risk-control token not prefetched (runtime retries automatically, degrading to no header)")
+            logger.info("[warmup] hif disabled (pure android profile, no x-hif-leim header)")
     except Exception as exc:
         logger.warning("[warmup] hif prefetch error: %s", exc)
     logger.info("[warmup] all done in %.1fs, PoW pool %d entries", time.time() - t0, len(_POW_PREFETCH))
