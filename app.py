@@ -59,9 +59,21 @@ def _dup_record(sig, body):
     # and the user would never get a real retry by resending the same message
     # (confirmed in production 2026-10-31 23:57).
     try:
-        _c = (((body or {}).get("choices") or [{}])[0].get("message") or {}).get("content") or ""
+        _m = (((body or {}).get("choices") or [{}])[0].get("message") or {})
+        _c = _m.get("content") or ""
         if _c.strip().startswith("(The upstream"):
             _dup_dbg(f"record sig={str(sig)[:16]} SKIPPED (failure notice)")
+            return
+        # [v90.2] A "successful" completion with zero visible content is not
+        # cached either. 2026-11-07 production evidence: when the upstream
+        # rejects a follow-up turn it still returns a well-formed completion
+        # whose content is empty; caching it made every client retry within
+        # the window replay the same empty answer and the session looked
+        # dead for minutes. Not caching it means a same-signature retry is
+        # executed again for real (tool-call turns keep the old behavior:
+        # their message carries tool_calls with empty content by design).
+        if not _c.strip() and not _m.get("tool_calls"):
+            _dup_dbg(f"record sig={str(sig)[:16]} SKIPPED (empty answer)")
             return
     except Exception:
         pass
@@ -3208,7 +3220,7 @@ async def v1_admin_stats(request: Request):
         cookies_valid = False
     probe = await _deep_health_probe()
     return JSONResponse({
-        "version": "v90.1",
+        "version": "v90.2",
         "active_tokens": active,
         "total_tokens": len(tokens),
         "sessions": sessions,

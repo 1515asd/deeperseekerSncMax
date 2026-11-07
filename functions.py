@@ -697,6 +697,23 @@ def set_token_fingerprint(token_id, fingerprint):
     conn.close()
 
 
+def get_token_fingerprint_by_value(token):
+    """[v90.2] Look up a token's recorded Shumei fingerprint by token string.
+
+    Used by the completion path to fill shumei_device_id. Read-only and
+    fully wrapped: any DB problem returns None so the request path is never
+    touched by storage errors."""
+    try:
+        conn = get_db()
+        row = conn.execute(
+            "SELECT device_fingerprint FROM tokens WHERE token = ?", (token,)
+        ).fetchone()
+        conn.close()
+        return (row[0] or None) if row else None
+    except Exception:
+        return None
+
+
 def classify_fingerprint(fp):
     """[v90.1] Fingerprint format classifier (local string check only,
     no requests).
@@ -3980,6 +3997,23 @@ async def _send_message_once(chat_id, auth_token, message, parent_message_id, th
     }
     if parent_message_id:
         json_data["parent_message_id"] = parent_message_id
+    # [v90.2] 2026-11-07 protocol change: the completion body must carry a
+    # shumei_device_id key. Without the key, follow-up turns (requests with
+    # parent_message_id) are rejected with biz_code 26 "invalid message id"
+    # (instant empty reply); with the key present — even null — every turn
+    # passes and context stays intact (verified by A/B against the live
+    # backend the same day; the official web client sends this key too).
+    # We send the token's recorded fingerprint only when it is android-class
+    # (the only format upstream treats as a real device id); everything else
+    # degrades to null, which is proven to pass. The lookup is wrapped so a
+    # storage problem can never break the request path.
+    try:
+        _shumei_fp = get_token_fingerprint_by_value(auth_token)
+    except Exception:
+        _shumei_fp = None
+    if classify_fingerprint(_shumei_fp) != "android":
+        _shumei_fp = None
+    json_data["shumei_device_id"] = _shumei_fp
 
     _resp_ct = ""
     non_sse_tail = []  # [v82 diagnostics] raw tail of non-"data:" lines
