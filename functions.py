@@ -213,6 +213,14 @@ def init_db():
         conn.execute("ALTER TABLE tokens ADD COLUMN password TEXT")
     if "last_login" not in existing_cols:
         conn.execute("ALTER TABLE tokens ADD COLUMN last_login REAL")
+    # [v89.13] native token's login device fingerprint (Shumei SMSdk 89-char
+    # base64). Community evidence: the login body's device_id must be a real
+    # device fingerprint — random UUIDs are rejected with RISK_DEVICE_DETECTED
+    # (biz_code=11). Provided once in the dashboard, persisted, and reused by
+    # auto re-login; when absent it falls back to the deterministic uuid5
+    # (may be rejected; reported honestly as risk_device).
+    if "device_id" not in existing_cols:
+        conn.execute("ALTER TABLE tokens ADD COLUMN device_id TEXT")
     # [v89.6] Feature toggles (read/written from the admin dashboard):
     # a single key-value table. First toggle: effort_enhance — the prompt
     # enhancement (effort instructions) master switch, defaulting to ON
@@ -706,13 +714,17 @@ def delete_token(token_id):
 #   * auto re-login is conservatively throttled: never attempted within
 #     DEEPSEEKER_RELOGIN_MIN_INTERVAL (default 6h => max ~4/day) — better no
 #     self-healing than a "re-login machine" rhythm
-#   * device_id is deterministically derived per account (uuid5, zero
-#     storage, restart-stable): one account, one stable "device"
-#   * community docs claim device_id must be a real SMSdk fingerprint
-#     (empty/random may hit RISK_DEVICE_DETECTED, biz_code=11); our
-#     wrong-password probes never reached that layer — first real account
-#     will tell, and risk_device results are reported honestly and stop
-#     auto-retry
+#   * [v89.13] the login body's device_id should be a real Shumei (SMSdk)
+#     device fingerprint — community evidence: random/fabricated UUIDs
+#     (exactly what the v89.12 uuid5 was) are rejected with
+#     RISK_DEVICE_DETECTED (biz_code=11). The dashboard form accepts an
+#     optional fingerprint (fetched once via SMSdk.getDeviceId() in any
+#     browser, no login needed), persisted per account and reused verbatim
+#     by auto re-login; uuid5 remains the fallback, and risk_device results
+#     are reported honestly and stop auto-retry
+#   * the x-device-id header stays a UUID (device UUID in the header and the
+#     Shumei fingerprint in the body are two distinct things; the real client
+#     sends both, in different shapes)
 # ==============================================================================
 
 _RELOGIN_MIN_INTERVAL = float(os.getenv("DEEPSEEKER_RELOGIN_MIN_INTERVAL", "21600"))
@@ -723,19 +735,24 @@ def _login_device_uuid(account):
     return str(uuid.uuid5(uuid.NAMESPACE_URL, "deeperseeker-native:" + account))
 
 
-async def login_account(account, password):
+async def login_account(account, password, device_id=None):
     """[v89.12] Bridge-native login of one account; structured result
-    (never contains the password).
+    (never contains the password or the fingerprint).
 
     account is email or mobile (told apart by @). Request shape = the
     official android app login: android header set + os=android + sign_in
-    referer. Upstream business rejections (bad password / banned /
-    risk-device) are reported as-is; network failures return
-    reason="network"."""
+    referer + x-device-id header. [v89.13] The body's device_id prefers the
+    caller-provided Shumei device fingerprint (what the real android app
+    carries; random UUIDs are rejected with RISK_DEVICE_DETECTED per ds_core
+    testing), falling back to the deterministic uuid5 when absent. The
+    x-device-id header is always a UUID (separate from the body fingerprint).
+    Upstream business rejections (bad password / banned / risk-device) are
+    reported as-is; network failures return reason="network"."""
     if "@" in account:
         email, mobile = account, None
     else:
         email, mobile = None, account
+    device_uuid = _login_device_uuid(account)
     _fail = lambda r, d="": {"ok": False, "reason": r, "detail": d,
                              "token": None, "muted": None, "mute_until": None}
     session = await get_session()
@@ -743,10 +760,11 @@ async def login_account(account, password):
         async with session.post(
             UPSTREAM_BASES[0] + "/api/v0/users/login",
             headers={**get_headers(None),
-                     "referer": "https://chat.deepseek.com/sign_in"},
+                     "referer": "https://chat.deepseek.com/sign_in",
+                     "x-device-id": device_uuid, "x-device-model": ""},
             json={
                 "email": email, "mobile": mobile, "password": password,
-                "area_code": "+86", "device_id": _login_device_uuid(account),
+                "area_code": "+86", "device_id": device_id or device_uuid,
                 "os": "android",
             },
             timeout=aiohttp.ClientTimeout(total=15),
@@ -773,9 +791,10 @@ async def login_account(account, password):
             "mute_until": chat.get("mute_until")}
 
 
-def add_native_token(token, account, password, alias=None):
+def add_native_token(token, account, password, alias=None, device_id=None):
     """[v89.12] Pool insert for bridge-logged-in tokens: same pool, same
-    scheduler, plus account/password/last_login metadata (auto re-login)."""
+    scheduler, plus account/password/last_login/device_id metadata
+    (auto re-login)."""
     conn = get_db()
     if not conn.execute("SELECT 1 FROM tokens WHERE id = 1").fetchone():
         next_id = 1
@@ -788,9 +807,9 @@ def add_native_token(token, account, password, alias=None):
         """).fetchone()
         next_id = row[0] if row and row[0] else 1
     conn.execute(
-        "INSERT INTO tokens (id, alias, token, status, account, password, last_login) "
-        "VALUES (?, ?, ?, 'ACTIVE', ?, ?, ?)",
-        (next_id, alias, token, account, password, time.time()),
+        "INSERT INTO tokens (id, alias, token, status, account, password, "
+        "last_login, device_id) VALUES (?, ?, ?, 'ACTIVE', ?, ?, ?, ?)",
+        (next_id, alias, token, account, password, time.time(), device_id),
     )
     conn.commit()
     conn.close()
@@ -815,11 +834,13 @@ def get_native_credentials(token_id):
     added accounts."""
     conn = get_db()
     row = conn.execute(
-        "SELECT account, password, last_login FROM tokens WHERE id = ?", (token_id,)
+        "SELECT account, password, last_login, device_id FROM tokens WHERE id = ?",
+        (token_id,),
     ).fetchone()
     conn.close()
     if row and row[0] and row[1]:
-        return {"account": row[0], "password": row[1], "last_login": row[2] or 0.0}
+        return {"account": row[0], "password": row[1],
+                "last_login": row[2] or 0.0, "device_id": row[3] or None}
     return None
 
 
@@ -844,7 +865,9 @@ async def relogin_native(token_id):
             logger.info("[relogin] token #%s within %.0fs of last login, skipping",
                         token_id, _RELOGIN_MIN_INTERVAL)
             return
-        result = await login_account(creds["account"], creds["password"])
+        result = await login_account(
+            creds["account"], creds["password"], creds.get("device_id"),
+        )
         if result.get("ok"):
             await asyncio.to_thread(update_native_token, token_id, result["token"])
             logger.info("[relogin] token #%s self-healed via bridge login (account %s***)",
