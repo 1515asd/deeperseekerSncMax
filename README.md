@@ -38,7 +38,7 @@ Based on upstream [`AmanCode22/deeperseeker`](https://github.com/AmanCode22/deep
 
 Free-tier setups come down to three roads — **tokens** (log in yourself, paste into your own panel: your data, your control, but tokens need re-extracting), **browser** (a page stays open as the sender: the truest form, but your device must be always-on), and **community projects** (third-party public bridges: zero setup, but shared pools crowd, privacy is out of your hands, and they can vanish anytime). What they share: no official API key, all ride the free web tier, all bound by upstream risk control, and all deserve a throwaway account.
 
-![Tokens · Browser · Community projects — comparison](docs/comparison.png)
+![Tokens · Browser · Community projects — comparison](docs/comparison-en.png)
 
 ## Where to follow updates
 
