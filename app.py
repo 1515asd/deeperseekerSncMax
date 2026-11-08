@@ -2675,7 +2675,7 @@ async def _page_chat_response(request, messages, model, stream, tools,
         prompt = (lt or "").strip()
         if not prompt:
             return _api_error_response(e, is_anthropic=anthropic_wrap)
-        logger.warning("page mode: packed prompt over autosend limit, degraded to "
+        logger.warning("page mode: prompt over input limit, degraded to "
                        "last user message only (%d chars) — multi-turn memory now "
                        "lives in the page's own chat", len(prompt))
         try:

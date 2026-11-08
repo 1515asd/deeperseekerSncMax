@@ -3158,7 +3158,7 @@ class _SseStreamFinished(Exception):
 class _SseStreamInterrupted(Exception):
     """上游流在收到 FINISHED 之前异常结束（断流/断连/上游提前关闭）。
 
-    [v62] reason/detail 载体：让 send_message 的续写循环按中断原因选择
+    [v62] reason/detail 通道：让 send_message 的续写循环按中断原因选择
     重投提示词——畸形工具调用场景改用带诊断的提示词（告诉模型错在哪、
     附原始调用、给正确格式），其余场景仍用通用的 _CONTINUE_PROMPT。
     默认参数保证既有裸抛（stall/断流/no_body）零改动、行为不变。"""
