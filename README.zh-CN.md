@@ -4,9 +4,9 @@
 
 **自托管的 DeepSeek 网关，原生支持 OpenAI 与 Anthropic API 标准。**
 
-[![License: MIT](https://img.shields.io/github/license/1515asd/SncMax.svg)](LICENSE)
-[![Last Commit](https://img.shields.io/github/last-commit/1515asd/SncMax/main.svg)](https://github.com/1515asd/SncMax/commits/main)
-[![Stars](https://img.shields.io/github/stars/1515asd/SncMax.svg)](https://github.com/1515asd/SncMax/stargazers)
+[![License: MIT](https://img.shields.io/github/license/1515asd/deeperseeker-SncMax.svg)](LICENSE)
+[![Last Commit](https://img.shields.io/github/last-commit/1515asd/deeperseeker-SncMax/main.svg)](https://github.com/1515asd/deeperseeker-SncMax/commits/main)
+[![Stars](https://img.shields.io/github/stars/1515asd/deeperseeker-SncMax.svg)](https://github.com/1515asd/deeperseeker-SncMax/stargazers)
 ![Release](https://img.shields.io/badge/release-Snc1-2ea44f.svg)
 
 把任何兼容 OpenAI / Anthropic 的客户端指向本服务即可使用——流式输出、工具调用、超长上下文会话管理开箱即用。
@@ -41,8 +41,8 @@
 
 ## 更新在哪看
 
-- **开发线（main）**：[提交历史](https://github.com/1515asd/SncMax/commits/main)
-- **英文稳定线（english）**：[提交历史](https://github.com/1515asd/SncMax/commits/english)
+- **开发线（main）**：[提交历史](https://github.com/1515asd/deeperseeker-SncMax/commits/main)
+- **英文稳定线（english）**：[提交历史](https://github.com/1515asd/deeperseeker-SncMax/commits/english)
 
 | 版本 | 日期 | 内容 |
 |---|---|---|
@@ -74,7 +74,7 @@
 - **令牌池不怕容器重建** — 免费平台说重建就重建，令牌表定时加密备份、启动时发现池子空了自动恢复
 - **重复调用有闸门** — 同一命令被原样重发时自动注入事实备注，死循环在发生时才被介入，正常请求零打扰
 - **面板状态说人话** — 每个令牌的正常 / 冷却 / 禁言 / 过期状态配大白话说明，「恢复」按钮永远安全
-- **两条语言线** — `main` 附中文文档，[`english`](https://github.com/1515asd/SncMax/tree/english) 线全英文，代码一致
+- **两条语言线** — `main` 附中文文档，[`english`](https://github.com/1515asd/deeperseeker-SncMax/tree/english) 线全英文，代码一致
 
 ## 旧对话恢复（协议变更前开始的对话）
 
@@ -90,7 +90,7 @@
 本地运行：
 
 ```bash
-git clone https://github.com/1515asd/SncMax.git
+git clone https://github.com/1515asd/deeperseeker-SncMax.git
 cd SncMax
 python3 -m venv env && source env/bin/activate
 pip install -r requirements.txt
