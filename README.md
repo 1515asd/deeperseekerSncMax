@@ -4,9 +4,9 @@
 
 **Self-hosted DeepSeek gateway that speaks the OpenAI & Anthropic API standards.**
 
-[![License: MIT](https://img.shields.io/github/license/1515asd/deeperseeker-SncMax.svg)](LICENSE)
-[![Last Commit](https://img.shields.io/github/last-commit/1515asd/deeperseeker-SncMax/main.svg)](https://github.com/1515asd/deeperseeker-SncMax/commits/main)
-[![Stars](https://img.shields.io/github/stars/1515asd/deeperseeker-SncMax.svg)](https://github.com/1515asd/deeperseeker-SncMax/stargazers)
+[![License: MIT](https://img.shields.io/github/license/1515asd/deeperseekerSncMax.svg)](LICENSE)
+[![Last Commit](https://img.shields.io/github/last-commit/1515asd/deeperseekerSncMax/main.svg)](https://github.com/1515asd/deeperseekerSncMax/commits/main)
+[![Stars](https://img.shields.io/github/stars/1515asd/deeperseekerSncMax.svg)](https://github.com/1515asd/deeperseekerSncMax/stargazers)
 ![Release](https://img.shields.io/badge/release-Snc1-2ea44f.svg)
 
 Point any OpenAI/Anthropic-compatible client at this server and it just works —
@@ -42,8 +42,8 @@ Free-tier setups come down to three roads — **tokens** (log in yourself, paste
 
 ## Where to follow updates
 
-- **Dev line (main)**: [commit history](https://github.com/1515asd/deeperseeker-SncMax/commits/main)
-- **English stable line (english)**: [commit history](https://github.com/1515asd/deeperseeker-SncMax/commits/english)
+- **Dev line (main)**: [commit history](https://github.com/1515asd/deeperseekerSncMax/commits/main)
+- **English stable line (english)**: [commit history](https://github.com/1515asd/deeperseekerSncMax/commits/english)
 
 | Version | Date | Notes |
 |---|---|---|
@@ -75,7 +75,7 @@ The basics — free web tier to standard API, multi-account rotation, long-conte
 - **Token pool survives container rebuilds** — encrypted periodic backup plus automatic restore on empty start
 - **A gate against duplicate calls** — factual annotations injected only while a real loop is happening; normal requests untouched
 - **Panel states in plain words** — every token state explained, the "Restore" button is always safe
-- **Two language lines** — `main` ships Chinese docs; [`english`](https://github.com/1515asd/deeperseeker-SncMax/tree/english) is fully English with identical code
+- **Two language lines** — `main` ships Chinese docs; [`english`](https://github.com/1515asd/deeperseekerSncMax/tree/english) is fully English with identical code
 
 ## Recovering old conversations (started before the protocol change)
 
@@ -91,7 +91,7 @@ Sessions started before 2026-10-31 had their server-side state invalidated by th
 Local run:
 
 ```bash
-git clone https://github.com/1515asd/deeperseeker-SncMax.git
+git clone https://github.com/1515asd/deeperseekerSncMax.git
 cd SncMax
 python3 -m venv env && source env/bin/activate
 pip install -r requirements.txt
