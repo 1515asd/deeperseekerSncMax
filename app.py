@@ -3551,13 +3551,17 @@ async def root(request: Request):
 
 
 async def _deep_health_probe():
-    """[v77 P0-9 移植] 一次端到端上游往返（含 PoW）：创建空聊天会话。
+    """[Snc1.1] 端到端上游存活检查——只读形态（GET users/current）。
 
-    成本：每次调用一个空上游会话——这是本桥能跑的最诚实的探针，因为
-    会话创建正是 PoW/客户端版本/账号死亡时最先断的那一跳。探针从不发
-    消息，也绝不报告 token 材料。状态感知选号：走 pick_token()，跳过
-    隔离与冷却中的行（旧式抓第一行的做法会误报降级、还会把上游流量
-    送进已知死亡的凭据）。"""
+    历史（v77~v89.8，v90.0 基线重建时一度回退）：本探针通过
+    create_new_chat 真实创建一个空上游会话。仪表盘每 30s 轮询
+    /v1/admin/stats，等于每 30s 凭空创建一个从不使用、从不删除的
+    空会话——「高频创建空会话」正是 11 月会话吊销风控的特征信号，
+    与令牌「仪表盘开着就秒死」的时间线吻合（社区 2026-11-07 再次
+    独立报告同一现象）。现改回 v89.7 的只读探针 probe_token_mute
+    （GET users/current，零会话、零消息、零 PoW），健康信息等价
+    （能区分存活/禁言/作废），异常上游流量归零。状态感知选号：
+    走 pick_token()，跳过隔离与冷却中的行。"""
     token_id = await _db(pick_token)
     auth_token = None
     if token_id is not None:
@@ -3571,15 +3575,16 @@ async def _deep_health_probe():
                 "reason": "no ACTIVE token in pool"}
     started = time.perf_counter()
     try:
-        await create_new_chat(auth_token)
+        _pr = await probe_token_mute(auth_token)
     except Exception as e:
         logger.warning("Deep health probe failed: %s", e)
         return {"upstream_reachable": False, "pow_ok": False,
                 "latency_ms": round((time.perf_counter() - started) * 1000, 1),
                 "reason": "upstream error"}
-    return {"upstream_reachable": True, "pow_ok": True,
+    alive = _pr.get("verdict") in ("ok", "muted")  # 禁言=凭据仍有效
+    return {"upstream_reachable": alive, "pow_ok": alive,
             "latency_ms": round((time.perf_counter() - started) * 1000, 1),
-            "session_created": True}
+            "reason": "" if alive else f"token verdict: {_pr.get('verdict')}"}
 
 
 @app.get("/health")
