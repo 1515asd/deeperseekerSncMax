@@ -373,9 +373,11 @@ for _alias in ("xhigh", "ultra", "extreme"):
 
 
 def _with_effort(prompt):
-    # [v89.6] 第二道闸（belt-and-suspenders）：主开关关闭时，即使有零散
-    # 代码设置了 request_effort，指令也不附加——「真关得掉」在构建侧
-    # 再兜一层。get_effort_enhance 走内存缓存，正常构建路径零额外 I/O。
+    # [v89.6] Second gate (belt-and-suspenders): when the master switch is
+    # off, no stray code setting request_effort can attach the instruction —
+    # "it can truly be turned off" is enforced once more at build time.
+    # get_effort_enhance uses the in-memory cache: zero extra I/O on the
+    # normal build path.
     instruction = ""
     if _effort_enhance_enabled():
         instruction = EFFORT_INSTRUCTIONS.get(request_effort.get() or "")
@@ -385,7 +387,8 @@ def _with_effort(prompt):
 
 
 def _effort_enhance_enabled():
-    # 延迟导入避免模块加载环（functions 也反向引用本模块）。
+    # Late import avoids a module-load cycle (functions also imports this
+    # module in reverse).
     from functions import get_effort_enhance
     return get_effort_enhance()
 

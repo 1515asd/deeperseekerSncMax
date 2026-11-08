@@ -6,6 +6,7 @@ import os
 import random
 import re
 import secrets
+import hashlib
 import sqlite3
 import time
 import calendar
@@ -51,7 +52,28 @@ def _dup_dbg(msg):
         pass
 
 
-def _dup_record(sig, body):
+def _dup_tail_key(messages):
+    """[v90.4] dup-guard key tail: hash of the request's last message.
+
+    sig only covers up to the last assistant message (it is the session-mapping
+    key; find_session depends on that). Stateless callers (history + new
+    question each time, without the previous answer) are indistinguishable on
+    sig alone — consecutive different questions would be misjudged as retries
+    and replay the old answer. Narrowed to the comment's original intent
+    ("the exact same message list"): key = sig + last-message hash. Normal
+    clients that resend history already differ on sig (zero impact); an
+    identical-body retry is still caught. Hash truncated to 16 hex chars so
+    the in-memory LRU does not grow with message length."""
+    if not messages:
+        return ""
+    last = messages[-1] if isinstance(messages[-1], dict) else {}
+    blob = json.dumps(
+        {"role": last.get("role", ""), "content": last.get("content", "")},
+        ensure_ascii=False, default=str, sort_keys=True)
+    return hashlib.sha256(blob.encode("utf-8", "ignore")).hexdigest()[:16]
+
+
+def _dup_record(sig, body, tail_key=""):
     # [v83] Failure-closing notices ("(upstream ... retried N times without
     # producing any content)" etc.) are not cached: they are yielded to the
     # client to tell the user what happened, not a valid answer — caching them
@@ -77,17 +99,17 @@ def _dup_record(sig, body):
             return
     except Exception:
         pass
-    _DUP_CACHE[sig] = {"ts": time.time(), "body": body}
+    _DUP_CACHE[(sig, tail_key)] = {"ts": time.time(), "body": body}
     while len(_DUP_CACHE) > _DUP_CACHE_MAX:
         _DUP_CACHE.pop(next(iter(_DUP_CACHE)))
 
 
-def _dup_lookup(sig):
-    ent = _DUP_CACHE.get(sig)
+def _dup_lookup(sig, tail_key=""):
+    ent = _DUP_CACHE.get((sig, tail_key))
     if not ent:
         return None
     if time.time() - ent["ts"] > int(os.getenv("DEEPSEEKER_DUP_WINDOW", "120")):
-        _DUP_CACHE.pop(sig, None)
+        _DUP_CACHE.pop((sig, tail_key), None)
         return None
     return ent["body"]
 
@@ -200,6 +222,16 @@ security = HTTPBasic()
 
 
 import official_api
+try:  # private extension module: not shipped in the public repo; when absent,
+      # page-mode paths deactivate automatically, everything else is unaffected
+    import page_chat_pipeline
+except ImportError:  # pragma: no cover
+    page_chat_pipeline = None
+
+
+def _page_mode_on():
+    return page_chat_pipeline is not None and page_chat_pipeline.page_mode_enabled()
+
 from functions import (
     CookieGenerationError,
     UpstreamBizError,
@@ -208,6 +240,10 @@ from functions import (
     cookie_file_path,
     data_dir,
     add_token,
+    add_api_key,
+    list_api_keys,
+    delete_api_key,
+    set_api_key_disabled,
     count_tokens,
     create_new_chat,
     delete_token,
@@ -228,6 +264,7 @@ from functions import (
     record_usage,
     restore_token,
     usage_by_day_key,
+    mask_api_key,
     get_pool_view,
     probe_token_mute,
     _format_mute_until,
@@ -297,6 +334,9 @@ def _resolve_api_key():
 
 
 API_KEY, _api_key_generated = _resolve_api_key()
+# [Snc1] extra client keys added from the panel (api_keys table), in-memory
+# cache; loaded after init_db in lifespan
+_API_KEYS = {}
 ADMIN_USER = os.getenv("DEEPSEEKER_ADMIN_USER", "admin")
 ADMIN_PASSWORD = os.getenv("DEEPSEEKER_ADMIN_PASSWORD", "admin")
 
@@ -460,6 +500,7 @@ async def _db(fn, *args, **kwargs):
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await _db(init_db)
+    _refresh_api_keys()  # [Snc1] load panel-added client keys after init_db
     _install_key_access_formatter()
     # [v57 ported from v35] Warmup: wasm compilation + upstream TLS + PoW pool. 30s cap; failure does not block startup.
     try:
@@ -513,7 +554,11 @@ app.add_middleware(RecovererMiddleware)
 
 
 SESSIONS = {}
-SESSION_TTL = 7 * 24 * 3600
+# [Snc1] Remember-me: the project settles on 5 days (the old 7-day TTL rode a
+# session cookie that died with the browser — felt like "logged out on
+# refresh"). See _admin_session_persist/_admin_session_resume.
+SESSION_TTL = 5 * 24 * 3600
+_ADMIN_SESS_PREFIX = "admin_sess_"
 # B12 (Stage 1 audit): NOTE — SESSIONS (and _login_fails below) are per-process
 # admin state: they reset on restart and are not shared across workers. This
 # service is single-worker by design (uvicorn workers=1); a shared store
@@ -675,7 +720,15 @@ def _release_chat_lock_stream(gen, owner, slot=None):
 
 def get_current_admin(request: Request):
     sid = request.cookies.get("session_id")
-    if not sid or sid not in SESSIONS or time.time() - SESSIONS[sid] > SESSION_TTL:
+    now = time.time()
+    if sid and sid not in SESSIONS:
+        # [Snc1] Remember-me: in-memory miss (after a service restart) ->
+        # restore the timestamp from the settings table. Reads the DB once on
+        # miss and back-fills memory; hits cost zero DB overhead.
+        ts = _admin_session_resume(sid)
+        if ts is not None:
+            SESSIONS[sid] = ts
+    if not sid or sid not in SESSIONS or now - SESSIONS[sid] > SESSION_TTL:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED)
     SESSIONS[sid] = time.time()
     origin = request.headers.get("origin", "")
@@ -697,8 +750,27 @@ def get_api_key(request: Request):
 
 
 def check_key(request: Request):
+    """[Snc1] Multi-Key auth: the default key (env/generated) always works;
+    panel-added keys live in the api_keys table — loaded at startup and
+    refreshed on change into an in-memory dict (O(1) lookup; high-entropy
+    random keys leave no timing side channel). Disabled keys are invalid."""
     key = get_api_key(request)
-    return secrets.compare_digest(key.encode("utf-8"), API_KEY.encode("utf-8"))
+    if not key:
+        return False
+    if secrets.compare_digest(key.encode("utf-8"), API_KEY.encode("utf-8")):
+        return True
+    ent = _API_KEYS.get(key)
+    return ent is not None and not ent["disabled"]
+
+
+def _refresh_api_keys():
+    """[Snc1] Reload panel-added keys from the DB into memory. Called at
+    startup and whenever the panel adds/removes/toggles a key."""
+    try:
+        global _API_KEYS
+        _API_KEYS = {k["key"]: k for k in list_api_keys()}
+    except Exception:
+        logger.exception("load api_keys failed")
 
 
 def _upstream_http_code(exc):
@@ -1304,7 +1376,7 @@ async def handle_chat(
         # usually deletes the previous reply first, changing the message list
         # → different signature → unaffected.
         if not is_anthropic:
-            cached_body = _dup_lookup(sig)
+            cached_body = _dup_lookup(sig, _dup_tail_key(messages))
             _dup_dbg(f"lookup sig={str(sig)[:16]} hit={cached_body is not None} cache_n={len(_DUP_CACHE)}")
             if cached_body is not None:
                 logger.warning(
@@ -1492,7 +1564,7 @@ async def handle_chat(
             # [v74] Record the completed result: same-signature retries within
             # the window replay it instead of executing again
             if isinstance(_resp, dict) and "choices" in _resp:
-                _dup_record(sig, _resp)
+                _dup_record(sig, _resp, _dup_tail_key(messages))
                 _dup_dbg(f"record sig={str(sig)[:16]}")
             return _resp
     except asyncio.CancelledError:
@@ -1993,7 +2065,7 @@ async def stream_response(gen, model, messages, token_id, session_id, sig, tools
                     "id": cid, "object": "chat.completion", "created": created, "model": model,
                     "choices": [{"index": 0, "message": ast_msg,
                                  "finish_reason": "tool_calls" if parsed_tools else "stop"}],
-                })
+                }, _dup_tail_key(messages))
             except Exception:
                 pass
             try:
@@ -2623,6 +2695,155 @@ async def _official_chat_response(body, model, stream, tools, request):
     return StreamingResponse(_gen(), media_type="text/event-stream")
 
 
+def _pseudo_anthropic_stream(result: dict, model_name: str):
+    """[Snc1] Page mode · pseudo anthropic event stream: builds a minimal valid
+    anthropic SSE sequence from an aggregated result. Event shapes align with
+    stream_anthropic_response (message_start -> thinking block -> text block ->
+    message_delta -> message_stop) so /v1/messages stream=True clients consume
+    it unchanged."""
+    msg_id = f"msg_{uuid.uuid4().hex[:24]}"
+    message = result["choices"][0]["message"]
+    usage = result.get("usage", {})
+    yield ("event: message_start\ndata: " + json.dumps({
+        "type": "message_start",
+        "message": {"id": msg_id, "type": "message", "role": "assistant",
+                    "content": [], "model": model_name, "stop_reason": None,
+                    "stop_sequence": None,
+                    "usage": {"input_tokens": usage.get("prompt_tokens", 0),
+                              "output_tokens": 1}}}) + "\n\n")
+    idx = 0
+    think = message.get("reasoning_content")
+    if think:
+        yield ("event: content_block_start\ndata: " + json.dumps({
+            "type": "content_block_start", "index": idx,
+            "content_block": {"type": "thinking"}}) + "\n\n")
+        yield ("event: content_block_delta\ndata: " + json.dumps({
+            "type": "content_block_delta", "index": idx,
+            "delta": {"type": "thinking_delta", "thinking": think}}) + "\n\n")
+        yield ("event: content_block_stop\ndata: " + json.dumps({
+            "type": "content_block_stop", "index": idx}) + "\n\n")
+        idx += 1
+    text = message.get("content") or ""
+    yield ("event: content_block_start\ndata: " + json.dumps({
+        "type": "content_block_start", "index": idx,
+        "content_block": {"type": "text", "text": ""}}) + "\n\n")
+    if text:
+        yield ("event: content_block_delta\ndata: " + json.dumps({
+            "type": "content_block_delta", "index": idx,
+            "delta": {"type": "text_delta", "text": text}}) + "\n\n")
+    yield ("event: content_block_stop\ndata: " + json.dumps({
+        "type": "content_block_stop", "index": idx}) + "\n\n")
+    yield ("event: message_delta\ndata: " + json.dumps({
+        "type": "message_delta",
+        "delta": {"stop_reason": "end_turn", "stop_sequence": None},
+        "usage": {"output_tokens": usage.get("completion_tokens", 0)}}) + "\n\n")
+    yield "event: message_stop\ndata: " + json.dumps({"type": "message_stop"}) + "\n\n"
+
+
+# ── [Snc1] page mode ────────────────────────────────────────────────────
+# A steadier, cheaper, zero-disguise sending path (optional; the
+# DEEPSEEKER_PAGE_MODE switch). With the switch off or the module missing,
+# the main path runs exactly as before — zero regression surface; failures
+# error out explicitly, never a silent fallback.
+async def _page_chat_response(request, messages, model, stream, tools,
+                              scope="", json_mode=False, search=False,
+                              thinking=False, req_model=None, anthropic_wrap=False):
+    _request_tools.set(tools or [])  # same source as handle_chat: effort/tool inference
+    prompt = await build_prompt(messages, tools or [], model, is_first_message=True)
+
+    def _json_suffix(p):
+        if json_mode:
+            # [v73] JSON mode: prompt-level constraint (verbatim from handle_chat)
+            return p + (
+                "\n\n[OUTPUT FORMAT · MANDATORY]\n"
+                "Respond with ONE valid JSON value (object, array, string, number or boolean) and NOTHING else.\n"
+                "No markdown fences, no explanations, no text before or after the JSON.\n"
+                "If you still need tool results, call tools first; once data is sufficient, output ONLY the final JSON."
+            )
+        return p
+
+    # Attachments are rejected explicitly, never silently dropped — to send
+    # files, disable page mode and use the main path.
+    for _m in messages:
+        _c = _m.get("content") if isinstance(_m, dict) else None
+        if isinstance(_c, list) and any(
+                isinstance(p, dict) and str(p.get("type", "")) in
+                ("image_url", "image", "document", "file", "input_image", "input_file")
+                for p in _c):
+            return _api_error_response(
+                page_chat_pipeline.PageChatError(
+                    400, "page mode: requests with file/image parts are not "
+                    "supported (page mode carries text only). Disable "
+                    "page mode or drop the attachment."),
+                is_anthropic=anthropic_wrap)
+
+    # Overlong requests degrade explicitly, never silently truncated:
+    # "last user message only" (multi-turn memory is carried by the page's own
+    # session) plus a warning log — degradations are always discoverable in
+    # the log; a 400 is raised only if still overlong after the fallback.
+    try:
+        url = page_chat_pipeline.build_autosend_url(
+            _json_suffix(prompt), search=bool(search), thinking=bool(thinking))
+    except page_chat_pipeline.PageChatError as e:
+        if e.status != 400:
+            return _api_error_response(e, is_anthropic=anthropic_wrap)
+        last_user = next((m for m in reversed(messages)
+                          if str(m.get("role", "")).lower() == "user"), None)
+        lt = last_user.get("content") if last_user else ""
+        if isinstance(lt, list):
+            lt = " ".join(p.get("text", "") for p in lt if isinstance(p, dict) and p.get("text"))
+        prompt = (lt or "").strip()
+        if not prompt:
+            return _api_error_response(e, is_anthropic=anthropic_wrap)
+        logger.warning("page mode: prompt over input limit, degraded to "
+                       "last user message only (%d chars) — multi-turn memory now "
+                       "lives in the page's own chat", len(prompt))
+        try:
+            url = page_chat_pipeline.build_autosend_url(
+                _json_suffix(prompt), search=bool(search), thinking=bool(thinking))
+        except page_chat_pipeline.PageChatError as e2:
+            # Still overlong after the fallback: explicit 400 (no truncation,
+            # no silence) — a PageChatError must never escape as a 500.
+            return _api_error_response(e2, is_anthropic=anthropic_wrap)
+
+    token = await _db(get_auth_token)
+    if not token:
+        return JSONResponse({"error": "No auth token. Add via dashboard."}, status_code=401)
+    page_chat_pipeline.register_intent(url, prompt)
+    logger.info("page mode: intent registered (url %d chars)", len(url))
+
+    try:
+        reply_text, think_text = await page_chat_pipeline.poll_reply(
+            token, prompt, timeout_s=page_chat_pipeline.page_timeout())
+    except page_chat_pipeline.PageChatError as e:
+        return _api_error_response(e, is_anthropic=anthropic_wrap)
+
+    if json_mode:
+        reply_text, _json_ok = _json_mode_coerce(reply_text)
+    text = (f"<think>{think_text}</think>" if think_text else "") + reply_text
+    result = format_response(text, model, messages, tools)
+    with suppress(Exception):
+        await _db(record_usage, scope, "page", model,
+                  result["usage"]["prompt_tokens"], result["usage"]["completion_tokens"])
+    if stream and anthropic_wrap:
+        # anthropic clients expect an event stream (message_start /
+        # content_block_* / message_stop) — OpenAI chunk frames would be a
+        # shape mismatch. Page mode has no upstream chunk stream, so the
+        # minimal valid event sequence is generated from the aggregated result.
+        if not isinstance(result, dict) or "choices" not in result:
+            return result
+        return StreamingResponse(
+            _pseudo_anthropic_stream(result, req_model or model),
+            media_type="text/event-stream")
+    if stream:
+        return StreamingResponse(_pseudo_stream(result, model), media_type="text/event-stream")
+    if anthropic_wrap:
+        if not isinstance(result, dict) or "choices" not in result:
+            return result
+        return format_anthropic_response(result, req_model)
+    return result
+
+
 @app.post("/v1/chat/completions")
 async def chat_completions(request: Request):
     # NOTE (Stage 1 minor list): `stop` and `max_tokens` are accepted but
@@ -2643,6 +2864,13 @@ async def chat_completions(request: Request):
     # requests it; zero impact on normal requests
     resp_fmt = body.get("response_format") or {}
     json_mode = isinstance(resp_fmt, dict) and resp_fmt.get("type") in ("json_object", "json_schema")
+    # [Snc1] when enabled, use the steadier sending path.
+    # No silent fallback — a page-mode failure is a failure, never a quiet
+    # drop back to the token approach.
+    if _page_mode_on():
+        return await _page_chat_response(request, messages, model, stream, tools,
+                                         scope=get_api_key(request), json_mode=json_mode,
+                                         search=search, thinking=thinking)
     return await handle_chat(messages, model, thinking, search, stream, tools, scope=get_api_key(request), json_mode=json_mode)
 
 
@@ -2706,7 +2934,14 @@ async def openai_responses(request: Request):
     stream = body.get("stream", False)
     tools = body.get("tools", None)
 
-    result = await handle_chat(messages, model, thinking, search, stream, tools, scope=get_api_key(request))
+    # [Snc1] page-mode short-circuit (/v1/responses): the return value keeps
+    # handle_chat's shape, so the downstream output conversion is untouched.
+    if _page_mode_on():
+        result = await _page_chat_response(request, messages, model, stream, tools,
+                                           scope=get_api_key(request),
+                                           search=search, thinking=thinking)
+    else:
+        result = await handle_chat(messages, model, thinking, search, stream, tools, scope=get_api_key(request))
 
     if stream:
         return result
@@ -2861,6 +3096,13 @@ async def anthropic_messages(request: Request):
             openai_msgs.insert(0, {"role": "system", "content": f"You MUST return valid JSON adhering strictly to this JSON Schema:\n{json.dumps(json_schema)}"})
 
     req_model = body.get("model")
+    # [Snc1] page-mode short-circuit (/v1/messages): with anthropic_wrap=True
+    # the function handles the same format_anthropic_response finish the old
+    # path performed inline.
+    if _page_mode_on():
+        return await _page_chat_response(request, openai_msgs, model, stream, openai_tools or None,
+                                         scope=get_api_key(request), thinking=thinking,
+                                         req_model=req_model, anthropic_wrap=True)
     if stream:
         return await handle_chat(openai_msgs, model, thinking, False, True, openai_tools or None, is_anthropic=True, req_model=req_model, scope=get_api_key(request))
 
@@ -2948,11 +3190,62 @@ async def login_page(request: Request):
 
 def _prune_admin_sessions():
     """B12: expired dashboard sessions used to stay in memory until restart.
-    Called opportunistically on login so the dict tracks live sessions only."""
+    Called opportunistically on login so the dict tracks live sessions only.
+    [Snc1] also prunes persisted sessions in the settings table (remember-me,
+    5 days — see SESSION_TTL)."""
     now = time.time()
     expired = [sid for sid, ts in SESSIONS.items() if now - ts > SESSION_TTL]
     for sid in expired:
         SESSIONS.pop(sid, None)
+        _admin_session_delete(sid)
+
+
+def _admin_session_persist(sid: str, ts: float):
+    """[Snc1] Remember-me: persist a dashboard session into the settings
+    table (key=admin_sess_<sid>).
+
+    Sessions used to live only in the in-memory dict — a service restart
+    invalidated them all while the cookie was still sitting in the browser,
+    so the dashboard demanded a fresh login ("logged out on refresh").
+    Persisted, sessions survive restarts; validity is still decided solely
+    by SESSION_TTL (5 days) — no second clock."""
+    try:
+        conn = get_db()  # _PooledConn: use directly, close = return handle
+        conn.execute(
+            "INSERT INTO settings (key, value) VALUES (?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            (_ADMIN_SESS_PREFIX + sid, repr(ts)))
+        conn.commit()
+    except Exception:
+        pass  # persistence failure never blocks login: worst case falls back
+              # to the old behavior (re-login after restart)
+
+
+def _admin_session_resume(sid: str):
+    """[Snc1] On memory miss, restore the session timestamp from the settings
+    table; returns None when invalid/expired."""
+    try:
+        conn = get_db()
+        row = conn.execute(
+            "SELECT value FROM settings WHERE key = ?",
+            (_ADMIN_SESS_PREFIX + sid,)).fetchone()
+        ts = float(row["value"]) if row else None
+        if ts is not None and time.time() - ts > SESSION_TTL:
+            _admin_session_delete(sid)
+            return None
+        return ts
+    except Exception:
+        return None
+
+
+def _admin_session_delete(sid: str):
+    try:
+        conn = get_db()
+        conn.execute("DELETE FROM settings WHERE key = ?",
+                     (_ADMIN_SESS_PREFIX + sid,))
+        conn.commit()
+    except Exception:
+        pass
 
 
 def _parse_urlencoded_form(raw: bytes) -> dict:
@@ -3012,8 +3305,14 @@ async def login_submit(request: Request):
         _login_fails["count"] = 0
         sid = str(uuid.uuid4())
         SESSIONS[sid] = time.time()
+        _admin_session_persist(sid, SESSIONS[sid])  # [Snc1] survives restarts
         resp = HTMLResponse("<meta http-equiv='refresh' content='0;url=/dashboard'>")
-        resp.set_cookie("session_id", sid, httponly=True, samesite="lax")
+        # [Snc1] max_age=SESSION_TTL (5 days): used to be a session cookie that
+        # died with the browser; combined with persistence, refreshes and
+        # restarts keep you logged in for 5 days. Duration is project-set —
+        # no user-facing toggle (the security window stays server-side).
+        resp.set_cookie("session_id", sid, httponly=True, samesite="lax",
+                        max_age=SESSION_TTL)
         return resp
     _login_fails["count"] += 1
     if _login_fails["count"] >= 5:
@@ -3026,6 +3325,7 @@ async def login_submit(request: Request):
 async def logout(request: Request):
     sid = request.cookies.get("session_id")
     SESSIONS.pop(sid, None)
+    _admin_session_delete(sid)  # [Snc1] logout clears memory and persistence
     resp = HTMLResponse("<meta http-equiv='refresh' content='0;url=/login'>")
     resp.delete_cookie("session_id")
     return resp
@@ -3038,7 +3338,12 @@ async def dashboard(request: Request):
     except HTTPException:
         return HTMLResponse("<meta http-equiv='refresh' content='0;url=/login'>")
     tokens = await _db(get_tokens)
-    return templates.TemplateResponse(request, "dashboard.html", {"tokens": tokens})
+    # [Snc1] endpoint info ships with the template (the admin panel is already
+    # allowed to see its own key — no extra endpoint, no front-end fetch; the
+    # key supports show/hide toggling client-side).
+    return templates.TemplateResponse(request, "dashboard.html",
+                                      {"tokens": tokens, "api_key": API_KEY,
+                                       "extra_keys": await _db(list_api_keys)})
 
 
 @app.post("/v1/pool/restore")
@@ -3121,9 +3426,13 @@ async def v1_pool(request: Request):
 
 
 @app.get("/v1/pool/probe")
-async def v1_pool_probe(request: Request):
+async def v1_pool_probe(request: Request, token_id: int = None):
     """[v89.7] Probe each token's real upstream status (admin, manual trigger,
     no credential fields).
+
+    [v90.5] Single-token probing: ?token_id=N probes only that token from the
+    pool (used by the dashboard's inline "Check" button); with no argument the
+    whole pool is probed, identical to the old behavior.
 
     GET /api/v0/users/current per token (no PoW, read-only):
       * ok      — token valid, account not muted
@@ -3142,6 +3451,10 @@ async def v1_pool_probe(request: Request):
     except HTTPException:
         return HTMLResponse("<meta http-equiv='refresh' content='0;url=/login'>")
     tokens = await _db(get_tokens)
+    if token_id is not None:
+        tokens = [t for t in tokens if t["id"] == token_id]
+        if not tokens:
+            return JSONResponse({"error": f"no token #{token_id}"}, status_code=404)
     pool_view = {t["id"]: t for t in await _db(get_pool_view)}
     report = []
     for t in tokens:
@@ -3190,6 +3503,93 @@ def _count_sessions():
         return conn.execute("SELECT COUNT(*) FROM sessions").fetchone()[0]
     finally:
         conn.close()
+
+
+def _admin_guard(request: Request):
+    """[Snc1] Small helper for the JSON admin endpoints: bounces the caller to
+    the login page when not an authenticated admin, else returns None."""
+    try:
+        get_current_admin(request)
+        return None
+    except HTTPException:
+        return HTMLResponse("<meta http-equiv='refresh' content='0;url=/login'>")
+
+
+@app.get("/v1/keys")
+async def v1_keys_list(request: Request):
+    denied = _admin_guard(request)
+    if denied:
+        return denied
+    rows = await _db(list_api_keys)
+    return JSONResponse({"keys": rows, "primary": mask_api_key(API_KEY)})
+
+
+@app.post("/v1/keys/add")
+async def v1_keys_add(request: Request):
+    denied = _admin_guard(request)
+    if denied:
+        return denied
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "bad json"}, status_code=400)
+    key = (body.get("key") or "").strip() or ("dsk-" + secrets.token_urlsafe(24))
+    alias = (body.get("alias") or "").strip()
+    if not key.startswith("dsk-") and len(key) < 16:
+        return JSONResponse({"error": "key too short (min 16 chars, dsk- prefix recommended)"}, status_code=400)
+    # Whitelist: the panel front-end inlines the key into an onclick attribute;
+    # anything outside [A-Za-z0-9_-] (quotes, angle brackets, ...) would slip
+    # past the escaping layer — reject at the source.
+    if not re.fullmatch(r"[A-Za-z0-9_\-]{8,}", key):
+        return JSONResponse({"error": "key may only contain letters, digits, underscore, hyphen"}, status_code=400)
+    if key in _API_KEYS or secrets.compare_digest(key.encode(), API_KEY.encode()):
+        return JSONResponse({"error": "this key already exists"}, status_code=409)
+    await _db(add_api_key, key, alias)
+    _refresh_api_keys()
+    logger.info("admin: api key added (%s)", mask_api_key(key))
+    return JSONResponse({"ok": True, "key": key})
+
+
+@app.post("/v1/keys/delete")
+async def v1_keys_delete(request: Request):
+    denied = _admin_guard(request)
+    if denied:
+        return denied
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "bad json"}, status_code=400)
+    key = (body.get("key") or "").strip()
+    await _db(delete_api_key, key)
+    _refresh_api_keys()
+    return JSONResponse({"ok": True})
+
+
+@app.post("/v1/keys/toggle")
+async def v1_keys_toggle(request: Request):
+    denied = _admin_guard(request)
+    if denied:
+        return denied
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "bad json"}, status_code=400)
+    key = (body.get("key") or "").strip()
+    disabled = bool(body.get("disabled"))
+    await _db(set_api_key_disabled, key, disabled)
+    _refresh_api_keys()
+    return JSONResponse({"ok": True, "disabled": disabled})
+
+
+@app.get("/page_mode/pending")
+async def page_mode_pending(request: Request):
+    """[Snc1] Companion pick-up point: 404 when not enabled; auth matches the
+    other endpoints."""
+    if not _page_mode_on():
+        return JSONResponse({"error": "page mode disabled"}, status_code=404)
+    if not check_key(request):
+        return JSONResponse({"error": "Invalid API key"}, status_code=401)
+    return JSONResponse({"pending": page_chat_pipeline.take_pending()})
 
 
 @app.get("/v1/admin/stats")

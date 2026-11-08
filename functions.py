@@ -118,6 +118,13 @@ def get_db():
         conn.row_factory = sqlite3.Row
         try:
             conn.execute("PRAGMA journal_mode=WAL")
+            # NORMAL under WAL: commits no longer fsync (measured 1.66ms ->
+            # 0.01ms — the main lever of the speed push). WAL stays intact on
+            # process crash; only a full power loss can drop the last commit —
+            # acceptable for sessions/usage/rolling caches. The source of truth
+            # for conversations lives on the official side; a lost turn is just
+            # re-sent next round.
+            conn.execute("PRAGMA synchronous=NORMAL")
         except Exception:
             pass
         _DB_TLS.conn = conn
@@ -240,6 +247,19 @@ def init_db():
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_usage_day_key ON usage(day, key_alias)"
     )
+    # [Snc1] Multi-Key support: the default key (DEEPSEEKER_API_KEY/generated)
+    # always works; this table stores extra client keys added from the panel.
+    # Plaintext storage is the same security level as the pool's auth_token
+    # (the panel is the only holder); usage stats bucket by masked key, so
+    # multi-Key needs no usage schema change.
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS api_keys (
+            key TEXT PRIMARY KEY,
+            alias TEXT NOT NULL DEFAULT '',
+            created_ts REAL NOT NULL,
+            disabled INTEGER NOT NULL DEFAULT 0
+        );
+    """)
     existing_session_cols = {row[1] for row in conn.execute("PRAGMA table_info(sessions)").fetchall()}
     if "last_used" not in existing_session_cols:
         conn.execute("ALTER TABLE sessions ADD COLUMN last_used REAL")
@@ -1175,6 +1195,45 @@ def record_usage(key_alias, surface, model, in_tokens, out_tokens, ts=None):
             max(0, int(out_tokens or 0)),
         ),
     )
+    conn.commit()
+    conn.close()
+
+
+# ============ [Snc1] Multi-Key management (extra client credentials added
+# from the panel) ============
+
+def list_api_keys():
+    conn = get_db()
+    rows = conn.execute(
+        "SELECT key, alias, created_ts, disabled FROM api_keys "
+        "ORDER BY created_ts ASC").fetchall()
+    conn.close()
+    return [{"key": r["key"], "alias": r["alias"],
+             "created_ts": r["created_ts"], "disabled": bool(r["disabled"])}
+            for r in rows]
+
+
+def add_api_key(key, alias=""):
+    conn = get_db()
+    conn.execute(
+        "INSERT INTO api_keys (key, alias, created_ts, disabled) VALUES (?, ?, ?, 0) "
+        "ON CONFLICT(key) DO UPDATE SET alias=excluded.alias, disabled=0",
+        (str(key), str(alias or ""), time.time()))
+    conn.commit()
+    conn.close()
+
+
+def delete_api_key(key):
+    conn = get_db()
+    conn.execute("DELETE FROM api_keys WHERE key = ?", (str(key),))
+    conn.commit()
+    conn.close()
+
+
+def set_api_key_disabled(key, disabled):
+    conn = get_db()
+    conn.execute("UPDATE api_keys SET disabled = ? WHERE key = ?",
+                 (1 if disabled else 0, str(key)))
     conn.commit()
     conn.close()
 

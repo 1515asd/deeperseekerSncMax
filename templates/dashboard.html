@@ -2,313 +2,298 @@
 {% block title %}Dashboard - DeeperSeeker{% endblock %}
 {% block content %}
 <style>
-  :root{
-    --font:-apple-system,BlinkMacSystemFont,"SF Pro","Helvetica Neue",Helvetica,Arial,sans-serif;
-    --blue:#007aff;--blue-h:#0045b7;--green:#28cd41;--orange:#ff9500;--red:#ff3b30;--gray:#8e8e93;
-    --bg:#f5f5f7;--card:#ffffff;--glass:hsla(0,0%,100%,.8);
-    --p1:rgba(0,0,0,.85);--p2:rgba(0,0,0,.5);--p3:rgba(0,0,0,.25);--div:rgba(0,0,0,.12);
-    --sh-card:inset 0 0 0 1px rgba(255,255,255,.05),0 0 0 .5px rgba(0,0,0,.12),0 4px 24px rgba(0,0,0,.08);
-    --sh-hover:0 12px 48px rgba(0,0,0,.16);
-    --r-sm:9px;--r-md:12px;--r-lg:17px;--r-full:1000px;
-    --tr:.2s ease-out;
-  }
-  @media(prefers-color-scheme:dark){:root{
-    --blue:#0a84ff;--blue-h:#47c1ff;--green:#32d74b;--orange:#ff9f0a;--red:#ff453a;--gray:#98989d;
-    --bg:#151515;--card:#1f1f1f;--glass:rgba(30,30,30,.8);
-    --p1:rgba(255,255,255,.85);--p2:rgba(255,255,255,.55);--p3:rgba(255,255,255,.25);--div:rgba(255,255,255,.1);
-    --sh-card:inset 0 0 0 1px rgba(255,255,255,.05),0 0 0 .5px rgba(0,0,0,.4),0 4px 24px rgba(0,0,0,.35);
-    --sh-hover:0 12px 48px rgba(0,0,0,.55);
-  }}
-  *{box-sizing:border-box}
-  body{background:var(--bg);color:var(--p1);font-family:var(--font);font-size:14px;line-height:1.4;
-       -webkit-font-smoothing:antialiased;margin:0}
-  nav{position:sticky;top:0;z-index:100;background:var(--glass);
-      -webkit-backdrop-filter:saturate(240%) blur(60px);backdrop-filter:saturate(240%) blur(60px);
-      border-bottom:.5px solid var(--div);padding:14px 30px;display:flex;align-items:center;gap:16px}
-  nav a{color:var(--blue);text-decoration:none;font-size:14px}
-  nav a:hover{opacity:.75}
-  nav .brand{margin-left:auto;color:var(--p2);font-weight:600;letter-spacing:-.01em}
-  main{max-width:1120px;margin:0 auto;padding:34px 30px 60px}
-  h1{font-size:26px;font-weight:700;letter-spacing:-.02em;margin:0 0 6px;display:flex;align-items:center;gap:12px}
-  .sub{color:var(--p2);font-size:13px;margin:0 0 26px}
-  h2{font-size:17px;font-weight:700;letter-spacing:-.01em;margin:34px 0 14px;display:flex;align-items:center;gap:12px;flex-wrap:wrap}
-  .cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(158px,1fr));gap:14px}
-  .card{background:var(--card);border-radius:var(--r-lg);box-shadow:var(--sh-card);padding:18px 20px;
-        transition:transform var(--tr),box-shadow var(--tr)}
+  h1{font-size:28px;font-weight:700;letter-spacing:-.022em;margin:0 0 4px}
+  .sub{color:var(--p2);font-size:13px;margin:0 0 28px}
+  h2{font-size:19px;font-weight:700;letter-spacing:-.015em;margin:40px 0 14px;
+     display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+  .sec{margin-left:auto;font-weight:400;font-size:12px;display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+  /* Overview cards: staggered entrance (HIG: 40ms step) */
+  .cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:14px}
+  .card{background:var(--card);border-radius:var(--r-l);box-shadow:var(--sh);padding:18px 20px;
+        transition:transform .25s var(--ease),box-shadow .25s var(--ease);
+        animation:cardIn .5s var(--ease) both}
   .card:hover{transform:translateY(-2px);box-shadow:var(--sh-hover)}
+  @keyframes cardIn{from{opacity:0;transform:translateY(12px)}to{opacity:1;transform:none}}
   .card .num{font-size:28px;font-weight:700;letter-spacing:-.02em;font-variant-numeric:tabular-nums;line-height:1.15}
   .card .lbl{color:var(--p2);font-size:12px;margin-top:5px}
-  .c-green .num{color:var(--green)}.c-red .num{color:var(--red)}.c-orange .num{color:var(--orange)}.c-blue .num{color:var(--blue)}
-  .wrap{background:var(--card);border-radius:var(--r-lg);box-shadow:var(--sh-card);overflow:auto}
+  .c-green .num{color:var(--green)}.c-red .num{color:var(--red)}
+  .c-orange .num{color:var(--orange)}.c-blue .num{color:var(--blue)}
+  /* Common surfaces */
+  .wrap{background:var(--card);border-radius:var(--r-l);box-shadow:var(--sh);overflow:auto;
+        animation:cardIn .5s var(--ease) both}
   table{border-collapse:collapse;width:100%;font-size:13px}
-  th,td{padding:11px 18px;text-align:left;border-bottom:.5px solid var(--div);white-space:nowrap}
+  th,td{padding:12px 18px;text-align:left;border-bottom:.5px solid var(--div-2);white-space:nowrap}
   th{color:var(--p2);font-weight:600;font-size:12px}
-  tbody tr{transition:background var(--tr)}
-  tbody tr:hover{background:rgba(var(--blue-rgb,0,122,255),.04)}
+  tbody tr{transition:background .15s var(--ease)}
+  tbody tr:hover{background:var(--blue-soft)}
   tbody tr:last-child td{border-bottom:0}
-  .badge{display:inline-flex;align-items:center;padding:3px 10px;border-radius:var(--r-full);font-size:12px;font-weight:600}
+  /* Badges */
+  .badge{display:inline-flex;align-items:center;padding:3px 10px;border-radius:var(--r-full);
+         font-size:12px;font-weight:600}
   .b-ok{color:var(--green);background:rgba(40,205,65,.14)}
   .b-warn{color:var(--orange);background:rgba(255,149,0,.14)}
   .b-err{color:var(--red);background:rgba(255,59,48,.14)}
-  .b-blue{color:var(--blue);background:rgba(10,132,255,.16)}
-  .b-idle{color:var(--p2);background:var(--div)}
-  button,.btn{background:var(--blue);color:#fff;border:0;border-radius:var(--r-sm);padding:8px 18px;cursor:pointer;
-              font-size:13px;font-weight:600;font-family:var(--font);transition:background var(--tr),transform var(--tr)}
+  .b-blue{color:var(--blue);background:var(--blue-soft)}
+  .b-idle{color:var(--p2);background:var(--div-2)}
+  /* Buttons: pill (apple.com language); >=36px hit area (old btn-sm was too small, fixed) */
+  button,.btn{background:var(--blue);color:#fff;border:0;border-radius:var(--r-full);
+      padding:9px 20px;cursor:pointer;font-size:13px;font-weight:600;font-family:var(--font);
+      transition:background .2s var(--ease),transform .12s var(--ease),opacity .2s var(--ease)}
   button:hover{background:var(--blue-h)}
-  button:active{transform:scale(.97)}
-  .btn-sm{padding:4px 12px;font-size:12px;border-radius:7px}
-  .btn-danger{background:var(--red)}.btn-danger:hover{opacity:.85}
-  .btn-ghost{background:var(--div);color:var(--p1)}.btn-ghost:hover{opacity:.8}
-  input[type=text],input[type=password]{background:var(--card);border:.5px solid var(--div);color:var(--p1);
-        border-radius:var(--r-sm);padding:9px 12px;font-size:13px;font-family:var(--font);transition:border var(--tr),box-shadow var(--tr)}
-  input:focus{outline:0;border-color:var(--blue);box-shadow:0 0 0 3.5px rgba(0,122,255,.22)}
+  button:active{transform:scale(.96)}
+  button:disabled{opacity:.5;cursor:default;transform:none}
+  .btn-sm{padding:6px 14px;font-size:12px;min-height:28px}
+  .btn-danger{background:var(--red)}.btn-danger:hover{opacity:.85;background:var(--red)}
+  .btn-ghost{background:var(--div-2);color:var(--p1)}.btn-ghost:hover{background:var(--div);opacity:1}
+  input[type=text],input[type=password]{background:var(--card-2);border:.5px solid var(--div);color:var(--p1);
+      border-radius:var(--r-m);padding:10px 14px;font-size:13px;font-family:var(--font);
+      transition:border-color .2s var(--ease),box-shadow .2s var(--ease)}
+  input:focus{outline:0;border-color:var(--blue);box-shadow:0 0 0 4px var(--blue-soft)}
   .hint,.meta{color:var(--p2);font-size:12px}
-  .warning{background:rgba(255,149,0,.1);border:.5px solid rgba(255,149,0,.35);border-radius:var(--r-md);
-           padding:12px 16px;font-size:13px;color:var(--p1);margin:12px 0}
-  details{background:var(--card);border-radius:var(--r-lg);box-shadow:var(--sh-card);padding:6px 20px;margin-top:12px}
+  .warning{background:rgba(255,149,0,.09);border:.5px solid rgba(255,149,0,.35);border-radius:var(--r-m);
+           padding:12px 16px;font-size:13px;margin:12px 0}
+  details{background:var(--card);border-radius:var(--r-l);box-shadow:var(--sh);padding:6px 20px;
+          margin-top:12px;animation:cardIn .5s var(--ease) both}
   summary{cursor:pointer;color:var(--blue);font-size:14px;font-weight:600;padding:10px 0;list-style:none}
   summary::-webkit-details-marker{display:none}
-  summary::before{content:"›";display:inline-block;margin-right:8px;transition:transform var(--tr);color:var(--p2)}
+  summary::before{content:"›";display:inline-block;margin-right:8px;transition:transform .25s var(--ease);color:var(--p2)}
   details[open] summary::before{transform:rotate(90deg)}
-  code{background:var(--div);border-radius:5px;padding:2px 7px;font-size:12px;word-break:break-all}
-  pre{background:var(--div);border-radius:var(--r-md);padding:12px 14px;font-size:12px;overflow:auto}
+  code{background:var(--div-2);border-radius:5px;padding:2px 7px;font-size:12px;word-break:break-all}
+  pre{background:var(--div-2);border-radius:var(--r-m);padding:12px 14px;font-size:12px;overflow:auto}
   pre code{background:none;padding:0}
   a{color:var(--blue);text-decoration:none}a:hover{opacity:.75}
-  .dot{display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:8px;animation:pulse 2s ease-in-out infinite}
+  .dot{display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:8px;
+       animation:pulse 2s ease-in-out infinite}
   @keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
-  .sec{margin-left:auto;font-weight:400;font-size:12px;display:flex;gap:8px;align-items:center;flex-wrap:wrap}
   .info-card p{margin:9px 0;font-size:13px}
-  @media(max-width:640px){main{padding:22px 18px}th,td{white-space:normal;padding:9px 12px;font-size:12px}nav{padding:12px 18px}}
+  /* Key rows */
+  .key-row{display:flex;align-items:center;gap:10px;padding:10px 0;border-bottom:.5px solid var(--div-2);flex-wrap:wrap}
+  .key-row:last-child{border-bottom:0}
+  .key-val{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12.5px;
+           background:var(--card-2);border-radius:8px;padding:7px 12px;flex:1;min-width:200px;
+           word-break:break-all;transition:opacity .25s var(--ease)}
+  .key-val.masked{letter-spacing:2px}
+  .chart-card{padding:20px}
+  .chart-legend{display:flex;gap:16px;margin-top:10px;font-size:12px;color:var(--p2)}
+  .chart-legend i{display:inline-block;width:10px;height:10px;border-radius:3px;margin-right:5px;vertical-align:-1px}
+  .toast{position:fixed;bottom:28px;left:50%;transform:translateX(-50%) translateY(16px);
+         background:var(--p1);color:var(--bg);padding:10px 22px;border-radius:var(--r-full);
+         font-size:13px;opacity:0;pointer-events:none;z-index:200;
+         transition:opacity .25s var(--ease),transform .25s var(--ease)}
+  .toast.show{opacity:1;transform:translateX(-50%)}
+  /* Mobile: <720px tables become cards, action buttons enlarged */
+  @media (max-width:720px){
+    main{padding:20px 16px 48px}nav{padding:10px 16px}
+    #pool thead{display:none}
+    #pool tr{display:block;background:var(--card-2);border-radius:var(--r-m);margin:10px 8px;padding:6px 0}
+    #pool td{display:flex;justify-content:space-between;align-items:center;white-space:normal;
+             padding:7px 14px;border-bottom:.5px solid var(--div-2)}
+    #pool td:last-child{border-bottom:0;gap:8px}
+    #pool td::before{content:attr(data-l);color:var(--p2);font-size:12px;font-weight:600;flex-shrink:0;margin-right:12px}
+    #pool td:last-child::before{display:none}
+    th,td{font-size:12px}
+  }
 </style>
 
-<h1>DeeperSeeker <span id="ver" class="badge b-idle">…</span></h1>
-<p class="sub">Data refreshes every 10s · deep upstream probe every 30s · <span id="ts">—</span></p>
+<h1>Dashboard</h1>
+<p class="sub">Data refreshes every 10 seconds · upstream deep check every 30 seconds · <span id="ts">—</span></p>
 
+<h2>Overview</h2>
 <div class="cards">
-  <div class="card c-green"><div class="num" id="c-active">—</div><div class="lbl">Active tokens</div></div>
-  <div class="card"><div class="num" id="c-tokens">—</div><div class="lbl">Total tokens</div></div>
-  <div class="card c-orange"><div class="num" id="c-flight">—</div><div class="lbl">In-flight requests</div></div>
-  <div class="card c-blue"><div class="num" id="c-req">—</div><div class="lbl">Today's requests</div></div>
-  <div class="card c-blue"><div class="num" id="c-tok">—</div><div class="lbl">Today's tokens</div></div>
-  <div class="card"><div class="num" id="c-sess">—</div><div class="lbl">Session mappings</div></div>
+  <div class="card c-green" style="animation-delay:.03s"><div class="num" id="c-active">—</div><div class="lbl">Active tokens</div></div>
+  <div class="card" style="animation-delay:.07s"><div class="num" id="c-tokens">—</div><div class="lbl">Total tokens</div></div>
+  <div class="card c-orange" style="animation-delay:.11s"><div class="num" id="c-flight">—</div><div class="lbl">In-flight requests</div></div>
+  <div class="card c-blue" style="animation-delay:.15s"><div class="num" id="c-req">—</div><div class="lbl">Requests today</div></div>
+  <div class="card c-blue" style="animation-delay:.19s"><div class="num" id="c-tok">—</div><div class="lbl">Tokens today</div></div>
+  <div class="card" style="animation-delay:.23s"><div class="num" id="c-sess">—</div><div class="lbl">Active session mappings</div></div>
 </div>
 
-<h2>Upstream health<span class="sec">Deep probe (real end-to-end round-trip incl. PoW) <button class="btn-sm btn-ghost" onclick="refreshDeep()">Probe now</button></span></h2>
+<h2>Usage trend<span class="sec">Last 14 days · aggregated live from details</span></h2>
+<div class="wrap chart-card">
+  <svg id="chart" viewBox="0 0 720 180" width="100%" preserveAspectRatio="none" role="img" aria-label="14-day usage bar chart"></svg>
+  <div class="chart-legend">
+    <span><i style="background:var(--blue)"></i>Requests</span>
+    <span><i style="background:var(--green)"></i>Output tokens</span>
+    <span id="chart-empty" class="hint" style="display:none">No calls recorded yet</span>
+  </div>
+</div>
+
+<h2>Upstream health<span class="sec">Deep check (real end-to-end round trip, incl. PoW) <button class="btn-sm btn-ghost" onclick="refreshDeep()">Probe now</button></span></h2>
 <div class="cards">
   <div class="card" id="d-up"><div class="num">…</div><div class="lbl">Upstream reachable / PoW</div></div>
   <div class="card c-blue"><div class="num" id="d-lat">—</div><div class="lbl">End-to-end latency (ms)</div></div>
-  <div class="card"><div class="num" id="d-cookie">—</div><div class="lbl">Backup cookie</div></div>
+  <div class="card"><div class="num" id="d-cookie">—</div><div class="lbl">Backup cookies</div></div>
 </div>
 
-<h2>Token pool<span class="sec"><span class="badge b-ok">Active</span> <span class="badge b-blue">Cooling down</span> <span class="badge b-warn">Muted (confirmed)</span> <span class="badge b-warn">Likely muted</span> <span class="badge b-err">Likely expired</span> <span class="badge b-err">Quarantined</span></span></h2>
+<h2>Token pool<span class="sec"><span class="badge b-ok">Healthy</span> <span class="badge b-blue">Rate-limited</span> <span class="badge b-warn">Muted (confirmed)</span> <span class="badge b-warn">Muted (suspected)</span> <span class="badge b-err">Expired (suspected)</span> <span class="badge b-err">Other quarantine</span></span></h2>
 <div class="wrap">
 <table id="pool">
-  <thead><tr><th>ID</th><th>Alias</th><th>Token</th><th>Status</th><th>What this means</th><th>In-flight</th><th>Last used</th><th>Cooldown</th><th>Fingerprint</th><th>Actions</th></tr></thead>
+  <thead><tr><th>ID</th><th>Alias</th><th>Token</th><th>Status</th><th>Notes</th><th>In-flight</th><th>Last used</th><th>Cooldown left</th><th>Fingerprint</th><th>Actions</th></tr></thead>
   <tbody></tbody>
 </table>
 </div>
-<p style="margin-top:10px"><button class="btn-sm btn-ghost" onclick="probeTokens(this)">Probe tokens (ask upstream for real status)</button></p>
+<p style="margin-top:12px;display:flex;gap:10px;flex-wrap:wrap">
+  <button class="btn-sm btn-ghost" onclick="probeTokens(this)">Check all tokens (ask upstream for real status)</button>
+</p>
 <div id="probe-result" class="hint" style="line-height:1.9;margin-top:8px"></div>
-<details style="margin-top:12px">
-  <summary>Record / update a token's device fingerprint (optional · record only, no requests)</summary>
+<details>
+  <summary>Record / update a token's device fingerprint (optional, for display only)</summary>
   <form id="fp-form" onsubmit="return submitFingerprint(event)" style="display:flex;gap:10px;flex-wrap:wrap;margin-top:8px">
-    <input type="text" id="fp-token-id" placeholder="Token ID (first column in the pool)" style="width:180px">
-    <input type="text" id="fp-value" placeholder="Shumei device fingerprint (~89 chars)" style="flex:1;min-width:280px">
-    <button type="submit" class="btn-sm">Save fingerprint</button>
+    <input type="text" id="fp-token-id" placeholder="Token ID (first column of pool table)" style="width:180px">
+    <input type="text" id="fp-value" placeholder="Device fingerprint (optional)" style="flex:1;min-width:260px">
+    <button type="submit" class="btn-sm">Save</button>
   </form>
-  <p class="hint" style="margin:6px 0 0">The fingerprint is only stored in this dashboard with a format check (android-native / web / unfilled) — it is never sent with any request. Saving an empty value clears it.</p>
+  <p class="hint" style="margin:6px 0 0">This is <strong>record-keeping only</strong>: the panel logs and annotates the format so you can tell tokens apart. <strong>Leaving it empty is perfectly fine</strong> — chat requests carry the protocol-required fields as usual (upstream doesn't target this either), and filling it or not makes no difference. Save with it empty to clear.</p>
 </details>
-<div class="warning" style="margin-top:12px;line-height:1.7">
-  <strong>When do tokens expire?</strong> Unpredictably — DeepSeek's server decides, and there is no way to know in advance. Expired tokens surface as <code>401</code> or <code>503 No tokens available</code> on the client.<br>
-  <strong>Can't tell expired from muted?</strong> Press the "Probe tokens" button above — it asks DeepSeek directly for each token's real status (healthy / muted until X / invalidated), no manual testing needed. You can also log into <a href="https://chat.deepseek.com" target="_blank">chat.deepseek.com</a> with that account: a re-login prompt = expired; a mute notice when sending = muted; normal chatting = false positive, just press "Restore".<br>
-  <strong>Safe to try:</strong> the "Restore" button is always safe — a truly dead token simply re-quarantines automatically, no harm done.
+<div class="warning" style="line-height:1.7">
+  <strong>When do tokens expire?</strong> No fixed schedule — DeepSeek's server decides, and there's no way to know in advance. After expiry clients report <code>401</code> or <code>503 No tokens available</code>.<br>
+  <strong>Can't tell expired from muted?</strong> Hit "Check all tokens" to ask DeepSeek each token's real status. You can also sign in at <a href="https://chat.deepseek.com" target="_blank">chat.deepseek.com</a> to verify: the site asks you to log in again = expired; sending a message pops a mute notice = muted; chat works fine = false positive, just hit "Restore".<br>
+  <strong>Feel free to try:</strong> the "Restore" button is safe — if the token is really dead it gets quarantined again automatically, no harm done.
 </div>
 
-<h2>Usage statistics<span class="sec">By day × API key</span></h2>
+<h2>Usage stats<span class="sec">By day × by Key</span></h2>
 <div class="wrap">
 <table id="usage">
-  <thead><tr><th>Date</th><th>Key</th><th>Channel</th><th>Requests</th><th>Input tokens</th><th>Output tokens</th></tr></thead>
+  <thead><tr><th>Date</th><th>Key</th><th>Surface</th><th>Requests</th><th>Input tokens</th><th>Output tokens</th></tr></thead>
   <tbody></tbody>
 </table>
 </div>
 
 <section>
-  <h2>Add an account</h2>
-  <div class="warning" style="line-height:1.8">
-    <strong>⚠️ Usage model (updated after real-device testing on 2026-11-07): tokens are born on your own device, used on the server.</strong><br>
-    Upstream risk control tightened sharply this November. Today's real-device test found: the <strong>android-protocol login now hard-requires a fingerprint produced by the Shumei SDK on a physical android phone</strong> (~89 chars) — omitted, fabricated, or browser-SDK short ids all get RISK_DEVICE_DETECTED, so <strong>users without an android device (iPhone included) cannot use the android-protocol login</strong>; and <strong>email logins on new devices now force an email OTP</strong>. The path that ran end to end in testing: <strong>complete Safari login (email OTP included) → javascript bookmarklet pulls the token from the page</strong> (see Method B below).<br>
-    <strong>Risk disclaimer:</strong> third parties report tokens dying after just 3-4 requests since last night — a single successful request proves nothing long-term. Whether bans can be fully avoided is <strong>unproven</strong>; keep usage light and <strong>use alt accounts only</strong>; banned accounts are at your own risk.
-  </div>
-
-  <div class="card" style="padding:20px;margin-top:14px">
-    <p style="margin:0 0 10px"><strong>Method 1 · Log in on your own device (requires a physical android fingerprint)</strong>: the tool sends one login request identical to the official android app (over your home network) and the token comes straight back in the response — android-born, matching the bridge's shape. <strong>2026-11-07 test: this path only works if you can produce an android-native Shumei fingerprint, which desktop and iPhone cannot — use Method B instead.</strong></p>
-
-    <details style="margin-top:6px">
-      <summary>Method A · Desktop (Windows / Mac / Linux, one script)</summary>
-      <div style="padding:8px 2px;line-height:1.9">
-        <ol>
-          <li>Install Python (python.org, check "Add to PATH")</li>
-          <li>Download <code>tools/login_once.py</code> from the repository</li>
-          <li>Run <code>python login_once.py</code>, follow the prompts (account, password, optional device fingerprint)</li>
-          <li>Paste the printed token into the form below</li>
-        </ol>
-        <p class="hint">Corporate/campus networks and VPNs may get WAF-challenged (the script detects and tells you) — use home broadband or mobile hotspot.</p>
-      </div>
-    </details>
-
-    <details style="margin-top:6px">
-      <summary>Method B · iPhone / iPad (no computer needed, tested working: Safari login + bookmarklet)</summary>
-      <div style="padding:8px 2px;line-height:1.9">
-        <p style="margin:0 0 8px"><strong>Why not Shortcuts?</strong> The old Shortcuts recipe imitated the android app's login, but upstream now requires the login request to carry a <strong>device fingerprint produced by the android-native Shumei SDK</strong> (an ~89-char string only an android phone can generate). The fingerprint that Safari's web SDK produces is a different format and gets rejected no matter what (<code>RISK_DEVICE_DETECTED</code>). So Shortcuts is retired; the path below was fully tested end to end on a real iPhone on 2026-11-07:</p>
-        <ol>
-          <li>Open <code>chat.deepseek.com</code> in <strong>Safari</strong> and log in normally with the account and password. First login on a new device asks for <strong>email verification</strong>: DeepSeek emails you a code, enter it from your mailbox, then the login completes. That's the official flow — just follow it</li>
-          <li>Once logged in and you can see the chat page, <strong>don't close the tab</strong>. Tap the share button → "Add Bookmark" and save a bookmark</li>
-          <li>Open the bookmarks list → "Edit" → tap the bookmark → replace the <strong>URL</strong> field entirely with this (copy the whole thing, every character):<br><code>javascript:prompt('Your token',JSON.parse(localStorage.getItem('userToken')).value)</code><br>Save</li>
-          <li>Go back to the <code>chat.deepseek.com</code> tab (you must be on that page) and <strong>tap the bookmark</strong>. A dialog pops up with your token — select all and copy</li>
-          <li>Paste the token into the "Paste the token" form below. Done</li>
-        </ol>
-        <p class="hint">Notes: step 4 only works while the chat.deepseek.com tab is open; if the dialog shows null or errors, the page isn't logged in (go back to step 1) or JavaScript is disabled (Settings → Safari → Advanced → enable JavaScript). The token comes from a complete official login on your own phone (email OTP included) — it is your account's key, don't share it. Same risk disclaimer as ever: the session is web-born, we can't yet promise it survives the risk wave long-term; use an alt account.</p>
-      </div>
-    </details>
-
-    <details style="margin-top:6px">
-      <summary>Method C · Android (Termux / HTTP Shortcuts)</summary>
-      <div style="padding:8px 2px;line-height:1.9">
-        <p><strong>Terminal (recommended):</strong> install Termux → <code>pkg install curl -y</code> → download <code>tools/deepseek-login.sh</code> → <code>bash deepseek-login.sh</code>.</p>
-        <p><strong>GUI (alternative):</strong> install the open-source HTTP Shortcuts app → Import → from cURL command, paste the curl block from <code>tools/deepseek-login.sh</code>, fill in your account/password (preferably as variables) → home-screen widget.</p>
-      </div>
-    </details>
-
-    <details style="margin-top:6px">
-      <summary>Device fingerprint (updated 2026-11-07 after real testing: only an android device can produce a valid one)</summary>
-      <div class="hint" style="padding:8px 2px;line-height:1.9">
-        The real android app carries a <strong>Shumei SDK (android-native) device fingerprint</strong> (~89-char base64) at login. Same-day full test results:
-        <ul style="margin:6px 0">
-          <li>The login request now <strong>requires</strong> the <code>device_id</code> field — omit it and you get a 422 rejection before the account is even checked</li>
-          <li>Empty / fabricated random values → <code>RISK_DEVICE_DETECTED</code> (biz_code 11)</li>
-          <li><strong>Fingerprints from the browser Shumei SDK (~31-char short ids) are rejected too (11)</strong> — including ones taken via desktop Chrome or iPhone Safari. The old "F12 in a browser" recipe is therefore <strong>retired</strong></li>
-        </ul>
-        Conclusion: <strong>without a physical android device there is no way to produce a fingerprint that passes the check</strong>, which is why the panel now recommends the "Safari web login + bookmarklet" path (Method B). Users who do have an android phone can still use Method A: open chat.deepseek.com in the phone's browser (no login), run <code>SMSdk.getDeviceId()</code> in the page console (if it prints undefined, wait a few seconds and run it again), and feed that fingerprint to the login tool.
-      </div>
-    </details>
-  </div>
-
-  <div class="card" style="padding:20px;margin-top:12px">
-    <p style="margin:0 0 10px"><strong>Paste the token</strong>: paste the token printed by the login tool (no quotes). A token equals your DeepSeek account — only paste it into your own dashboard.<br>
-    <span class="hint">The device fingerprint is an <strong>optional</strong> record: the panel only stores it and checks its format, it <strong>never</strong> sends it with any request. Fill it if you have a Shumei fingerprint from an android device or the login tool (~89 chars); a short web fingerprint can also be stored (it will be labeled "web format" — known to fail android login, kept for the record).</span></p>
-    <form method="post" action="/tokens/add" style="display:flex;gap:10px;flex-wrap:wrap">
-      <input type="text" name="alias" placeholder="Alias (optional, e.g. alt-1)" style="width:200px">
-      <input type="text" name="auth_token" placeholder="Paste the token from the login tool" style="flex:1;min-width:280px">
-      <input type="text" name="device_fingerprint" placeholder="Shumei device fingerprint (optional, record only)" style="flex:1;min-width:280px">
-      <button type="submit">Add token</button>
+  <h2>API Keys<span class="sec">Client credentials · the default Key never expires</span></h2>
+  <div class="wrap" style="padding:16px 20px">
+    <div class="key-row">
+      <span class="badge b-blue">Primary Key</span>
+      <span class="key-val masked" id="primary-key">{{ api_key }}</span>
+      <button class="btn-sm btn-ghost" onclick="toggleKeyVis(this, '#primary-key')">Show</button>
+      <button class="btn-sm btn-ghost" onclick="copyText(document.getElementById('primary-key').textContent)">Copy</button>
+    </div>
+    <div id="extra-keys"></div>
+    <form onsubmit="return addKey(event)" style="display:flex;gap:10px;flex-wrap:wrap;margin-top:12px">
+      <input type="text" id="new-key-alias" placeholder="Alias (e.g. Client A)" style="width:200px">
+      <input type="text" id="new-key-value" placeholder="Leave empty to auto-generate a random dsk- Key" style="flex:1;min-width:240px">
+      <button type="submit" class="btn-sm">Add Key</button>
     </form>
-    <p class="hint" style="margin:8px 0 0">Token lifetime is unpredictable — when one dies, run the tool again and replace it. The "Probe tokens" button shows each token's real status (healthy / muted until X / invalidated).</p>
+    <p class="hint" style="margin:8px 0 0">Hand each client/device its own Key: if one leaks, disable or delete it alone without touching the others; usage stats are broken down by Key so you can trace consumption. The primary Key comes from the environment (or is auto-generated on first start) and cannot be deleted.</p>
   </div>
 </section>
 
-
 <section>
   <h2>Endpoint info</h2>
-  <div class="card info-card" style="padding:20px">
-    <p>OpenAI-compatible endpoint: <code id="ep-openai">…</code></p>
-    <p>Anthropic-compatible endpoint: <code id="ep-anthropic">…</code></p>
-    <p>Default model: <code>deepseek-v4.1-flash</code> (other exposed models can be requested per call)</p>
-    <p class="hint">Point any OpenAI / Anthropic-compatible client (Claude Code, Cherry Studio, Open WebUI, etc.) at either address above and it just works.</p>
+  <div class="wrap info-card" style="padding:20px">
+    <div class="key-row"><span style="font-weight:600;min-width:120px">OpenAI endpoint</span><code id="ep-openai">…</code>
+      <button class="btn-sm btn-ghost" onclick="copyText(document.getElementById('ep-openai').textContent)">Copy</button></div>
+    <div class="key-row"><span style="font-weight:600;min-width:120px">Anthropic endpoint</span><code id="ep-anthropic">…</code>
+      <button class="btn-sm btn-ghost" onclick="copyText(document.getElementById('ep-anthropic').textContent)">Copy</button></div>
+    <p>Default model: <code>deepseek-v4.1-flash</code> (other exposed models can be set in the request body)</p>
     <p><button class="btn-sm btn-ghost" onclick="checkLink()">Check link</button> <span id="link-result" class="hint">Not checked</span></p>
-    <p class="hint">This check verifies the "dashboard → upstream" link (incl. PoW). For the client API, the most truthful check is simply sending one message from your client.</p>
+    <p class="hint">This check verifies the "panel → upstream" link (incl. PoW). Real client-side API availability is measured by actually sending a message.</p>
   </div>
 </section>
 
 <section>
   <h2>Feature toggles</h2>
-  <div class="card info-card" style="padding:20px">
+  <div class="wrap info-card" style="padding:20px">
     <p style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin:0">
-      <strong>Prompt enhancement</strong>
+      <strong>Prompt boost</strong>
       <span id="effort-state" class="badge b-idle">…</span>
       <button id="effort-btn" class="btn-sm btn-ghost" onclick="toggleEffort()">…</button>
     </p>
-    <p class="hint" style="margin-top:10px">What it does: when a client request carries an effort tier (e.g. reasoning_effort=max), an extra "think carefully, verify from multiple angles, double-check" instruction is attached so answers come out deeper — at the cost of slightly more latency and tokens. <strong>When off</strong>, replies follow the model's default behavior exactly (identical to the previous release). Takes effect immediately, no restart needed.</p>
+    <p class="hint" style="margin-top:10px">When a client request asks for "high-intensity thinking" (e.g. reasoning_effort=max), an instruction is added telling the model to take its time, verify from multiple angles and check step by step — deeper answers, a bit slower, more tokens. <strong>When off</strong>, the model answers entirely its own way. Takes effect immediately, no restart needed.</p>
   </div>
 </section>
 
+<section>
+  <h2>Add an account</h2>
+  <div class="warning" style="line-height:1.8">
+    <strong>✨ This release takes a brand-new approach: the sending part has moved.</strong><br>
+    After half a day of work, the author turned the earlier abstract problem fully concrete — one change of angle, and the long-standing pains around login, disconnects and empty replies are eliminated at the method level instead of being patched one by one. <strong>All you need to do: log in to DeepSeek normally in your browser, grab the token and paste it into the panel.</strong><br>
+    <strong>The usual risk note:</strong> keep usage intensity in check and <strong>use burner accounts only</strong> — no one can be held responsible for banned accounts.
+  </div>
+  <div class="wrap" style="padding:20px">
+    <details style="margin-top:6px" open>
+      <summary>Recommended · browser login + bookmarklet to grab the token (works on desktop, iPhone and Android, verified)</summary>
+      <div style="padding:8px 2px;line-height:1.9">
+        <ol>
+          <li>Open <code>chat.deepseek.com</code> in <strong>Safari / Chrome</strong> and sign in normally with your account. The first time you may be asked for <strong>email verification</strong>: copy the code in and continue — that's the official flow</li>
+          <li>Once signed in, <strong>don't close the page</strong>.
+            <ul style="margin:4px 0">
+              <li><strong>Desktop</strong>: run <code>JSON.parse(localStorage.getItem("userToken")).value</code> in the F12 console, copy the output</li>
+              <li><strong>iPhone / iPad</strong>: tap Safari's "Share" at the bottom → "Add Bookmark" to save any page → "Edit" in the bookmark list → replace that bookmark's <strong>URL</strong> with:<br><code>javascript:prompt('Your token',JSON.parse(localStorage.getItem('userToken')).value)</code><br>then go back to chat.deepseek.com (you must be on that page), tap the bookmark, and the popup holds your token</li>
+            </ul>
+          <li>Paste the token into the "Paste token" form below — done</li>
+        </ol>
+        <p class="hint">iPhone bookmark doesn't pop anything = sign-in didn't succeed (back to step 1) or Safari JavaScript is off (Settings → Safari → Advanced → enable). Your token is the key to your account — only paste it into your own panel.</p>
+      </div>
+    </details>
+    <div style="background:var(--card-2);border-radius:var(--r-m);padding:16px;margin-top:12px">
+      <p style="margin:0 0 10px"><strong>Paste token</strong>: paste the token you grabbed here (no quotes). The token is equivalent to your DeepSeek account.</p>
+      <form method="post" action="/tokens/add" style="display:flex;gap:10px;flex-wrap:wrap">
+        <input type="text" name="alias" placeholder="Alias (optional, e.g. alt-1)" style="width:200px">
+        <input type="text" name="auth_token" placeholder="Paste the token you grabbed" style="flex:1;min-width:260px">
+        <input type="text" name="device_fingerprint" placeholder="Device fingerprint (optional)" style="flex:1;min-width:260px">
+        <button type="submit">Add token</button>
+      </form>
+      <p class="hint" style="margin:8px 0 0">The fingerprint field is <strong>optional</strong>: it's for display and record-keeping only, leaving it empty is perfectly fine, upstream doesn't target it — feel free to skip. Tokens don't last forever; grab a fresh one and swap it in when one dies.</p>
+    </div>
+    <details style="margin-top:6px">
+      <summary>Appendix · desktop script login (Windows / Mac / Linux, run one script)</summary>
+      <div style="padding:8px 2px;line-height:1.9">
+        <ol>
+          <li>Install Python (python.org, tick Add to PATH)</li>
+          <li>Download the login script: <code>tools/login_once.py</code> (in the repo, right-click → save as)</li>
+          <li>Run <code>python login_once.py</code> and enter your account and password when prompted</li>
+          <li>Copy the token it prints and paste it into the "Paste token" form above</li>
+        </ol>
+        <p class="hint">On corporate/campus networks or a VPN the WAF may block the script (it detects and warns by itself); switch to a home connection or a phone hotspot.</p>
+      </div>
+    </details>
+    <details style="margin-top:6px">
+      <summary>Appendix · Android (Termux / HTTP Shortcuts)</summary>
+      <div style="padding:8px 2px;line-height:1.9">
+        <p><strong>Command line:</strong> Termux → <code>pkg install curl -y</code> → download <code>tools/deepseek-login.sh</code> → <code>bash deepseek-login.sh</code>.</p>
+        <p><strong>GUI:</strong> HTTP Shortcuts → import the curl snippet from a cURL command, change the account and password to yours (App variables recommended) → home-screen widget for one-tap login.</p>
+      </div>
+    </details>
+    <details style="margin-top:6px">
+      <summary>Appendix · about the device fingerprint (optional, display only)</summary>
+      <div class="hint" style="padding:8px 2px;line-height:1.9">
+        Upstream's <strong>login endpoint</strong> validates device fingerprints for Android-protocol logins (only the format produced by the Android native SDK is accepted; the short browser format gets rejected) — that only affects the choice of login method. <strong>The fingerprint field in the panel has nothing to do with it</strong>: it's display/record-keeping only, and the panel never sends any request with it. <strong>Leaving it empty is perfectly fine, upstream doesn't target it — feel free to skip.</strong>
+      </div>
+    </details>
+  </div>
+</section>
+
+<div class="toast" id="toast">Copied</div>
 <script>
 const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 const fmt = n => (n ?? 0).toLocaleString();
-
-async function refreshPool() {
-  try {
-    const pool = await fetch('/v1/pool').then(r => r.json());
-    const tb = document.querySelector('#pool tbody'); tb.innerHTML = '';
-    let flight = 0;
-    // [v89.6] Five color-coded states + human-readable notes: the backend
-    // classifies via reason_kind, the frontend only maps presentation.
-    const KIND_LABEL = {muted: 'Muted (confirmed)', expired: 'Likely expired', restricted: 'Likely muted', other: 'Quarantined'};
-    const KIND_BADGE = {muted: 'b-warn', expired: 'b-err', restricted: 'b-warn', other: 'b-err'};
-    const KIND_NOTE = {
-      muted: 'DeepSeek explicitly says this account is muted (not a guess). See the unmute time in the reason below. The token cannot send messages until then — no action needed; press "Restore" after the mute ends.',
-      expired: 'DeepSeek no longer accepts this token (expired or logged out). Run the login tool again for a fresh one, then replace the old entry — pressing "Restore" will not help.',
-      restricted: 'The account is likely temporarily restricted (muted). Once the mute is lifted, press "Restore" to return it to service; if the account chats fine on the website, it was a false positive — just press "Restore".',
-      other: 'Quarantined. See the concrete reason below; press "Restore" once the upstream is healthy, or verify first per the guide above.',
-    };
-    for (const t of (pool.pool || [])) {
-      flight += t.in_flight || 0;
-      const kind = t.reason_kind || null;
-      let badge, stLabel, note;
-      if (t.status === 'ACTIVE') {
-        badge = 'b-ok'; stLabel = 'Active'; note = 'In rotation, working normally';
-      } else if (t.status === 'RATE_LIMITED') {
-        badge = 'b-blue'; stLabel = 'Cooling down';
-        note = 'Requests came too fast; pauses briefly and recovers automatically (' + (t.cooldown || '—') + '). No action needed';
-      } else if (kind === 'expired') {
-        badge = KIND_BADGE[kind]; stLabel = KIND_LABEL[kind]; note = KIND_NOTE[kind];
-      } else if (kind === 'restricted') {
-        badge = KIND_BADGE[kind]; stLabel = KIND_LABEL[kind]; note = KIND_NOTE[kind];
-      } else if (kind === 'muted') {
-        badge = KIND_BADGE[kind]; stLabel = KIND_LABEL[kind];
-        note = KIND_NOTE[kind] + (t.reason ? ' Reason: ' + t.reason : '');
-      } else {
-        badge = 'b-err'; stLabel = 'Quarantined';
-        note = KIND_NOTE.other + (t.reason ? ' Reason: ' + t.reason : '');
-      }
-      const tr = document.createElement('tr');
-      // [v90.1] fingerprint column: format badge (display only, no requests)
-      const FP_BADGE = {android: ['b-ok', '✓ android-format'], web: ['b-warn', 'web-format'], unknown: ['b-err', 'unknown-format']};
-      const fpb = t.fingerprint_class ? (FP_BADGE[t.fingerprint_class] || ['b-err', 'unknown-format']) : null;
-      const fpCell = fpb
-        ? `<span class="badge ${fpb[0]}" title="${esc(t.fingerprint_head || '')}">${fpb[1]}</span>`
-        : '<span class="hint">unset</span>';
-      tr.innerHTML = `<td>${t.id}</td><td>${esc(t.label)}</td>`
-        + `<td><code>${esc(t.token_head || '—')}</code></td>`
-        + `<td><span class="badge ${badge}">${esc(stLabel)}</span></td>`
-        + `<td style="white-space:normal;min-width:220px">${esc(note)}</td><td>${t.in_flight}</td>`
-        + `<td>${esc(t.last_used)}</td><td>${esc(t.cooldown)}</td><td>${fpCell}</td>`
-        + `<td>${t.can_restore ? `<button class="btn-sm" onclick="restore(${t.id})">Restore</button> ` : ''}`
-        + `<button class="btn-sm btn-danger" onclick="del(${t.id})">Delete</button></td>`;
-      tb.appendChild(tr);
-    }
-    document.getElementById('c-flight').textContent = fmt(flight);
-    if (!(pool.pool || []).length) tb.innerHTML = '<tr><td colspan="10" class="hint" style="text-align:center;padding:24px">Pool is empty — add your first account under “Add an auth token” below</td></tr>';
-  } catch (e) { console.error('pool', e); }
+let toastTimer;
+function toast(msg){
+  const t = document.getElementById('toast');
+  t.textContent = msg; t.classList.add('show');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => t.classList.remove('show'), 1600);
+}
+async function copyText(s){
+  try { await navigator.clipboard.writeText(s); toast('Copied'); }
+  catch(e) {
+    const ta = document.createElement('textarea'); ta.value = s;
+    document.body.appendChild(ta); ta.select();
+    document.execCommand('copy'); ta.remove(); toast('Copied');
+  }
+}
+function toggleKeyVis(btn, sel){
+  const el = document.querySelector(sel);
+  const hidden = el.classList.toggle('masked');
+  btn.textContent = hidden ? 'Show' : 'Hide';
 }
 
-async function refreshUsage() {
-  try {
-    const u = await fetch('/v1/usage').then(r => r.json());
-    const tb = document.querySelector('#usage tbody'); tb.innerHTML = '';
-    for (const row of (u.usage || [])) {
-      const tr = document.createElement('tr');
-      tr.innerHTML = `<td>${esc(row.day)}</td><td>${esc(row.key)}</td><td>${esc(row.surfaces || '—')}</td>`
-        + `<td>${fmt(row.requests)}</td><td>${fmt(row.input_tokens)}</td><td>${fmt(row.output_tokens)}</td>`;
-      tb.appendChild(tr);
-    }
-    if (!(u.usage || []).length) tb.innerHTML = '<tr><td colspan="6" class="hint" style="text-align:center;padding:24px">No usage recorded yet</td></tr>';
-  } catch (e) { console.error('usage', e); }
-}
-
+/* ── Overview + upstream health ── */
 async function refreshDeep() {
   try {
     const d = await fetch('/v1/admin/stats').then(r => r.json());
-    document.getElementById('ver').textContent = d.version || '';
+    document.getElementById('ver') && (document.getElementById('ver').textContent = d.version || '');
     document.getElementById('c-active').textContent = fmt(d.active_tokens);
     document.getElementById('c-tokens').textContent = fmt(d.total_tokens);
     document.getElementById('c-sess').textContent = fmt(d.sessions);
@@ -322,8 +307,8 @@ async function refreshDeep() {
       card.querySelector('.num').innerHTML = '<span class="dot" style="background:var(--green)"></span>Healthy';
     } else {
       card.className = 'card c-red';
-      card.querySelector('.num').innerHTML = '<span class="dot" style="background:var(--red)"></span>Unreachable';
-      card.querySelector('.lbl').textContent = up.reason ? ('Upstream / PoW · ' + up.reason) : 'Upstream reachable / PoW';
+      card.querySelector('.num').innerHTML = '<span class="dot" style="background:var(--red)"></span>Down';
+      card.querySelector('.lbl').textContent = up.reason ? ('Upstream reachable / PoW · ' + up.reason) : 'Upstream reachable / PoW';
     }
     document.getElementById('d-lat').textContent = up.latency_ms != null ? fmt(up.latency_ms) : '—';
     document.getElementById('d-cookie').textContent = d.cookies_valid ? 'Valid' : 'None / expired';
@@ -331,52 +316,195 @@ async function refreshDeep() {
   } catch (e) { console.error('deep', e); }
 }
 
-async function restore(id) { await fetch('/v1/pool/restore', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({token_id:id})}); refreshPool(); }
-async function del(id) { if (!confirm('Remove this token from the pool?')) return; await fetch(`/tokens/${id}/delete`, {method:'POST'}); refreshPool(); }
+/* ── Usage trend chart: /v1/usage details aggregated by day, pure SVG bars (zero deps, zero animation loops) ── */
+async function refreshChart() {
+  try {
+    const u = await fetch('/v1/usage').then(r => r.json());
+    const byDay = {};
+    for (const row of (u.usage || [])) {
+      const d = byDay[row.day] || (byDay[row.day] = {req: 0, out: 0});
+      d.req += row.requests || 0; d.out += row.output_tokens || 0;
+    }
+    const days = Object.keys(byDay).sort().slice(-14);
+    const svg = document.getElementById('chart');
+    const empty = document.getElementById('chart-empty');
+    if (!days.length) { svg.innerHTML = ''; empty.style.display = 'inline'; return; }
+    empty.style.display = 'none';
+    const maxR = Math.max(...days.map(d => byDay[d].req), 1);
+    const maxT = Math.max(...days.map(d => byDay[d].out), 1);
+    const W = 720, H = 180, pad = 34, bw = Math.min(34, (W - pad*2) / days.length * .62);
+    let s = '';
+    days.forEach((day, i) => {
+      const x = pad + (W - pad*2) * (i + .5) / days.length;
+      const hr = (H - 40) * byDay[day].req / maxR;
+      const ht = (H - 40) * byDay[day].out / maxT;
+      // Bar entrance: CSS animates scaleY only (transform-origin at base, compositor layer)
+      s += `<rect x="${(x - bw/2).toFixed(1)}" y="${(H - 24 - ht).toFixed(1)}" width="${bw.toFixed(1)}" height="${ht.toFixed(1)}" rx="3" fill="var(--green)" opacity=".45" style="transform-origin:${x.toFixed(1)}px ${(H-24).toFixed(1)}px;animation:grow .5s var(--ease) ${i*0.04}s both"/>`
+         + `<rect x="${(x - bw/2).toFixed(1)}" y="${(H - 24 - hr).toFixed(1)}" width="${bw.toFixed(1)}" height="${hr.toFixed(1)}" rx="3" fill="var(--blue)" opacity=".9" style="transform-origin:${x.toFixed(1)}px ${(H-24).toFixed(1)}px;animation:grow .5s var(--ease) ${i*0.04}s both"/>`
+         + `<text x="${x.toFixed(1)}" y="${H - 8}" font-size="10" fill="var(--p3)" text-anchor="middle">${day.slice(5)}</text>`;
+    });
+    s += `<line x1="${pad-10}" y1="${H-24}" x2="${W-pad+10}" y2="${H-24}" stroke="var(--div)" stroke-width=".5"/>`;
+    svg.innerHTML = s + `<style>@keyframes grow{from{transform:scaleY(0)}to{transform:scaleY(1)}}
+      @media (prefers-reduced-motion: reduce){ svg rect{animation:none!important}}</style>`;
+  } catch (e) { console.error('chart', e); }
+}
 
-// [v89.7] Token probe: ask upstream for each token's real status
-// (healthy / muted / invalidated). Confirmed-muted tokens are auto-quarantined
-// and the pool view refreshes; everything else is report-only.
+/* ── Usage details ── */
+async function refreshUsage() {
+  try {
+    const u = await fetch('/v1/usage').then(r => r.json());
+    const tb = document.querySelector('#usage tbody'); tb.innerHTML = '';
+    for (const row of (u.usage || [])) {
+      const tr = document.createElement('tr');
+      tr.innerHTML = `<td>${esc(row.day)}</td><td>${esc(row.key)}</td><td>${esc(row.surfaces || '—')}</td>`
+        + `<td>${fmt(row.requests)}</td><td>${fmt(row.input_tokens)}</td><td>${fmt(row.output_tokens)}</td>`;
+      tb.appendChild(tr);
+    }
+    if (!(u.usage || []).length) tb.innerHTML = '<tr><td colspan="6" class="hint" style="text-align:center;padding:24px">No calls recorded yet</td></tr>';
+  } catch (e) { console.error('usage', e); }
+}
+
+/* ── Token pool (v90.5: + inline single-token check) ── */
+async function refreshPool() {
+  try {
+    const pool = await fetch('/v1/pool').then(r => r.json());
+    const tb = document.querySelector('#pool tbody'); tb.innerHTML = '';
+    let flight = 0;
+    const KIND_LABEL = {muted: 'Muted (confirmed)', expired: 'Expired (suspected)', restricted: 'Muted (suspected)', other: 'Quarantined'};
+    const KIND_BADGE = {muted: 'b-warn', expired: 'b-err', restricted: 'b-warn', other: 'b-err'};
+    const KIND_NOTE = {
+      muted: "Upstream explicitly says this account is muted (not a guess); see the reason column for when it lifts. Messages can't be sent until then — leave it alone; hit \"Restore\" once the mute is over.",
+      expired: 'DeepSeek no longer accepts this token (expired or signed out). Grab a fresh token and add it again (see below); "Restore" won\'t help.',
+      restricted: 'Likely under a temporary posting restriction (mute). Hit "Restore" once it lifts; if the account signs in and chats normally, it was a false positive — just hit "Restore".',
+      other: 'Quarantined. See below for the specific cause; hit "Restore" once upstream is confirmed fine and it rejoins rotation.',
+    };
+    for (const t of (pool.pool || [])) {
+      flight += t.in_flight || 0;
+      const kind = t.reason_kind || null;
+      let badge, stLabel, note;
+      if (t.status === 'ACTIVE') { badge='b-ok'; stLabel='Healthy'; note='In rotation, working normally'; }
+      else if (t.status === 'RATE_LIMITED') { badge='b-blue'; stLabel='Rate-limited'; note='Requests came in too fast just now; it rests and comes back on its own ('+(t.cooldown||'—')+')'; }
+      else if (kind in KIND_LABEL) { badge=KIND_BADGE[kind]; stLabel=KIND_LABEL[kind]; note=KIND_NOTE[kind]+(t.reason?' Reason: '+t.reason:''); }
+      else { badge='b-err'; stLabel='Quarantined'; note=KIND_NOTE.other+(t.reason?' Reason: '+t.reason:''); }
+      const FP_BADGE = {android: ['b-ok','✓ Android format'], web: ['b-warn','Web format'], unknown: ['b-err','Unknown format']};
+      const fpb = t.fingerprint_class ? (FP_BADGE[t.fingerprint_class] || ['b-err','Unknown format']) : null;
+      const fpCell = fpb ? `<span class="badge ${fpb[0]}" title="${esc(t.fingerprint_head||'')}">${fpb[1]}</span>` : '<span class="hint">Not set</span>';
+      const tr = document.createElement('tr');
+      tr.innerHTML = `<td data-l="ID">${t.id}</td><td data-l="Alias">${esc(t.label)}</td>`
+        + `<td data-l="Token"><code>${esc(t.token_head || '—')}</code></td>`
+        + `<td data-l="Status"><span class="badge ${badge}">${esc(stLabel)}</span></td>`
+        + `<td data-l="Notes" style="white-space:normal;min-width:220px">${esc(note)}</td>`
+        + `<td data-l="In-flight">${t.in_flight}</td><td data-l="Last used">${esc(t.last_used)}</td>`
+        + `<td data-l="Cooldown">${esc(t.cooldown)}</td><td data-l="Fingerprint">${fpCell}</td>`
+        + `<td data-l="Actions" style="display:flex;gap:8px;flex-wrap:wrap">`
+        + `<button class="btn-sm btn-ghost" onclick="probeOne(${t.id}, this)">Check</button>`
+        + (t.can_restore ? `<button class="btn-sm" onclick="restore(${t.id})">Restore</button>` : '')
+        + `<button class="btn-sm btn-danger" onclick="del(${t.id})">Delete</button></td>`;
+      tb.appendChild(tr);
+    }
+    document.getElementById('c-flight').textContent = fmt(flight);
+    if (!(pool.pool || []).length) tb.innerHTML = '<tr><td colspan="10" class="hint" style="text-align:center;padding:24px">The pool is empty — add your first account under "Add an account" below</td></tr>';
+  } catch (e) { console.error('pool', e); }
+}
+
+/* Inline single-token check: asks upstream about this one only (?token_id=), result shown in place */
+async function probeOne(id, btn) {
+  const old = btn.textContent;
+  btn.disabled = true; btn.textContent = '…';
+  try {
+    const d = await fetch('/v1/pool/probe?token_id=' + id).then(r => r.json());
+    const p = (d.probes || [])[0];
+    document.getElementById('probe-result').innerHTML = p
+      ? `<div><strong>${esc(p.label)}</strong>: ${esc(p.text)}</div>` : 'No result';
+    refreshPool();
+  } catch (e) { document.getElementById('probe-result').textContent = '❌ Check failed: ' + e; }
+  btn.disabled = false; btn.textContent = old;
+}
+
 async function probeTokens(btn) {
   const el = document.getElementById('probe-result');
-  btn.disabled = true; el.textContent = 'Probing… (asking DeepSeek one by one, a few seconds)';
+  btn.disabled = true; el.textContent = 'Checking… (asks DeepSeek one by one, takes a few seconds)';
   try {
     const d = await fetch('/v1/pool/probe').then(r => r.json());
     const icon = {ok: '✅', warn: '🟠', err: '🔴', idle: '⚪️'};
     el.innerHTML = (d.probes || []).map(p =>
       `<div>${icon[p.cls] || '⚪️'} <strong>${esc(p.label)}</strong> (<code>${esc(p.token_head || '—')}</code>): ${esc(p.text)}</div>`
-      + `<div style="margin:2px 0 10px 26px">🔑 Fingerprint: ${esc(p.fingerprint_text || 'not on record')}</div>`
-    ).join('') || 'The pool is empty — nothing to probe.';
-    if ((d.probes || []).some(p => p.status !== undefined && p.cls === 'warn')) refreshPool();
-  } catch (e) { el.textContent = '❌ Probe request failed: ' + e; }
+      + `<div style="margin:2px 0 10px 26px">🔑 Fingerprint: ${esc(p.fingerprint_text || 'Not recorded')}</div>`
+    ).join('') || 'The pool is empty — no tokens to check.';
+    if ((d.probes || []).some(p => p.cls === 'warn')) refreshPool();
+  } catch (e) { el.textContent = '❌ Check request failed: ' + e; }
   btn.disabled = false;
 }
 
-// [v90.1] record/update fingerprint: POST /tokens/<id>/fingerprint, record-keeping only
+async function restore(id) { await fetch('/v1/pool/restore', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({token_id:id})}); refreshPool(); }
+async function del(id) { if (!confirm('Remove this token from the pool?')) return; await fetch(`/tokens/${id}/delete`, {method:'POST'}); refreshPool(); }
+
+/* ── Fingerprint record-keeping ── */
 async function submitFingerprint(ev) {
   ev.preventDefault();
   const id = document.getElementById('fp-token-id').value.trim();
   const fp = document.getElementById('fp-value').value.trim();
-  if (!id) { alert('Enter the token ID first (the number in the pool table\'s first column)'); return false; }
+  if (!id) { alert('Enter the token ID first (the number in the first column of the pool table)'); return false; }
   try {
     await fetch('/tokens/' + encodeURIComponent(id) + '/fingerprint', {
       method: 'POST', headers: {'Content-Type': 'application/x-www-form-urlencoded'},
       body: 'device_fingerprint=' + encodeURIComponent(fp)
     });
     document.getElementById('fp-value').value = '';
-    refreshPool();
+    refreshPool(); toast('Fingerprint saved');
   } catch (e) { alert('Save failed: ' + e); }
   return false;
 }
 
-// Endpoint URLs follow the origin the dashboard is visited from (no hardcoding)
-(() => {
-  const base = location.origin;
-  document.getElementById('ep-openai').textContent = base + '/v1';
-  document.getElementById('ep-anthropic').textContent = base;
-})();
+/* ── Multi-Key management (v90.5) ── */
+let KEYS = [];
+async function refreshKeys() {
+  try {
+    const d = await fetch('/v1/keys').then(r => r.json());
+    KEYS = d.keys || [];
+    const box = document.getElementById('extra-keys');
+    box.innerHTML = KEYS.map(k => `
+      <div class="key-row">
+        <span class="badge ${k.disabled ? 'b-idle' : 'b-ok'}">${k.disabled ? 'Disabled' : 'Enabled'}</span>
+        <span class="key-val masked" id="ek-${esc(k.key)}" title="${esc(k.alias || '')}">${esc(k.key)}</span>
+        ${k.alias ? `<span class="hint">${esc(k.alias)}</span>` : ''}
+        <button class="btn-sm btn-ghost" onclick="toggleKeyVis(this, '#ek-${esc(k.key)}')">Show</button>
+        <button class="btn-sm btn-ghost" onclick="copyText('${esc(k.key)}')">Copy</button>
+        <button class="btn-sm btn-ghost" onclick="toggleKey('${esc(k.key)}', ${!k.disabled})">${k.disabled ? 'Enable' : 'Disable'}</button>
+        <button class="btn-sm btn-danger" onclick="delKey('${esc(k.key)}')">Delete</button>
+      </div>`).join('') || '<p class="hint" style="margin:8px 0">No extra Keys yet — add one with the form below to give each client its own credential.</p>';
+  } catch (e) { console.error('keys', e); }
+}
+async function addKey(ev) {
+  ev.preventDefault();
+  const alias = document.getElementById('new-key-alias').value.trim();
+  const key = document.getElementById('new-key-value').value.trim();
+  try {
+    const r = await fetch('/v1/keys/add', {method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({key, alias})});
+    const d = await r.json();
+    if (!r.ok) { alert(d.error || 'Add failed'); return false; }
+    document.getElementById('new-key-value').value = '';
+    document.getElementById('new-key-alias').value = '';
+    await refreshKeys();
+    copyText(d.key);
+    toast('Key added and copied');
+  } catch (e) { alert('Add failed: ' + e); }
+  return false;
+}
+async function toggleKey(key, disabled) {
+  await fetch('/v1/keys/toggle', {method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({key, disabled})});
+  refreshKeys();
+}
+async function delKey(key) {
+  if (!confirm('Delete this Key? Clients using it lose access immediately.')) return;
+  await fetch('/v1/keys/delete', {method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({key})});
+  refreshKeys();
+}
 
-// [v89.6] Feature toggle: prompt enhancement (effort instructions).
+/* ── Feature toggles ── */
 async function refreshEffort() {
   try {
     const d = await fetch('/v1/features/effort-enhance').then(r => r.json());
@@ -400,7 +528,7 @@ async function toggleEffort() {
   } catch (e) { console.error('effort toggle', e); }
 }
 
-// [v89.6] API section: link check (reuses the existing deep-probe endpoint).
+/* ── Link check ── */
 async function checkLink() {
   const el = document.getElementById('link-result');
   el.textContent = 'Checking…';
@@ -410,14 +538,22 @@ async function checkLink() {
     if (up.upstream_reachable && up.pow_ok) {
       el.innerHTML = '✅ Link healthy · end-to-end latency ' + esc(String(up.latency_ms ?? '—')) + ' ms';
     } else {
-      el.innerHTML = '❌ Unhealthy' + (up.reason ? ': ' + esc(up.reason) : '') + ' — if a token shows "Likely expired", replace it';
+      el.innerHTML = '❌ Down' + (up.reason ? ': ' + esc(up.reason) : '') + ' — if the token status shows "Expired (suspected)", grab a fresh token';
     }
   } catch (e) { el.textContent = '❌ Check request failed: ' + e; }
 }
 
-refreshPool(); refreshUsage(); refreshDeep(); refreshEffort();
+/* Endpoints follow the current host */
+(() => {
+  const base = location.origin;
+  document.getElementById('ep-openai').textContent = base + '/v1';
+  document.getElementById('ep-anthropic').textContent = base;
+})();
+
+refreshPool(); refreshUsage(); refreshChart(); refreshDeep(); refreshEffort(); refreshKeys();
 setInterval(refreshPool, 10000);
 setInterval(refreshUsage, 10000);
+setInterval(refreshChart, 30000);
 setInterval(refreshDeep, 30000);
 </script>
 {% endblock %}
