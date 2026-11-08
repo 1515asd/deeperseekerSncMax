@@ -58,7 +58,7 @@ Anthropic-flavored clients (e.g. Claude Code) use Base URL `http://your-host:400
 
 ## 3. Dashboard tour
 
-Since v86 one page covers all operations:
+One page covers all operations:
 
 | Area | Plain | Technical |
 |---|---|---|
@@ -84,7 +84,7 @@ Everything auto-refreshes every 10 seconds. Light/dark follows your system theme
 **Technical version**:
 
 1. **Session mapping**: a canonicalized SHA-256 signature over the client message history; a hit reuses the upstream session (incremental send), a miss goes through the full-history-injection first-message path.
-2. **Real message IDs**: since 2026-10-31 DeepSeek broadcasts `response_message_id` at stream start; the server captures it as the next turn's `parent_message_id` — zero guessing anywhere in the chain (v85 removed the legacy +2 increment).
+2. **Real message IDs**: since 2026-10-31 DeepSeek broadcasts `response_message_id` at stream start; the server captures it as the next turn's `parent_message_id` — zero guessing anywhere in the chain (the legacy +2 increment is long gone).
 3. **Summarize-and-rollover**: nearing the memory ceiling (~393K tokens) a handoff summary fires; a rolling summary + the recent tail + the newest message form the new session's first message.
 4. **Failover**: 401/403/429 auto-quarantines the token; a replacement takes over with full context transfer.
 5. **Empty-stream auto-retry**: upstream 502s / silent zero-output streams are treated as interruptions and continued automatically (≤2 retries).
@@ -103,7 +103,7 @@ Everything auto-refreshes every 10 seconds. Light/dark follows your system theme
 
 ### Q: The model stops mid-answer
 
-Since v81b the server auto-continues. If you still hit it, it's usually a transient upstream glitch — resend. Resending the same message won't double-execute (the idempotency replay window only covers **successful** turns; failed turns always retry normally).
+The server auto-continues on its own. If you still hit it, it's usually a transient upstream glitch — resend. Resending the same message won't double-execute (the idempotency replay window only covers **successful** turns; failed turns always retry normally).
 
 ### Q: Is tool calling (function calling) reliable?
 
