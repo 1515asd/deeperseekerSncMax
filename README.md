@@ -18,13 +18,13 @@ streaming, tool calling, and long-context session management out of the box.
 
 </div>
 
-> **Snc1 · Major update**: after half a day of research, the previously abstract problem finally became concrete — one turn of thinking, and **the sending side moved**. The long list of login, disconnect, and empty-reply issues is resolved at the method level, instead of being patched one by one. The implementation stays private; usage stays the same: log in via your browser, grab the token, paste it into the dashboard.
+> **Snc1 · Major update**: after half a day of research, the previously abstract problem finally became concrete — one turn of thinking, and **the sending side moved**. The long list of login, disconnect, and empty-reply issues is resolved at the method level, instead of being patched one by one. Details aren't spelled out here — the code itself is the most complete documentation, so feel free to read the source; the full chain is still fairly complex and hard to summarize, and docs will follow once it settles. Usage stays the same: log in via your browser, grab the token, paste it into the dashboard.
 
 **What did the new approach buy?** In the past, every upstream tremor — captchas, device fingerprints, protocol field changes — meant an emergency release. Under the new approach those verifications happen where they were always meant to happen, so **this project barely needs to deal with them anymore**: whether already shipped or added in the future, most new verifications and policy changes won't reach this side, and the release cadence drops accordingly.
 
 ## What Snc1 brings
 
-- **A new approach** — the sender has been replaced outright, eliminating problems at the source; the old "upstream changes, everything breaks" patch cycle is gone
+- **A new approach** — problems are eliminated at the source; the old "upstream changes, everything breaks" patch cycle is gone
 - **Full-speed burst** — measured ~**63%** reduction in the server's own overhead (7.0ms → 2.6ms per turn); upstream latency is upstream's business, ours is now at the floor
 - **A brand-new panel** — redesigned after Apple's Human Interface Guidelines: graceful low-cost animations, 5-day remember-me, multi-Key management, mobile layout; the old panel is retired
 - **Multi-Key** — add multiple client Keys from the panel, toggle or delete anytime, the default Key always works
@@ -47,8 +47,7 @@ Free-tier setups come down to three roads — **tokens** (log in yourself, paste
 
 | Version | Date | Notes |
 |---|---|---|
-| **Snc1** | 11-08 | **Method + panel generational change (current).** Sender replaced (details private, see note above); full-chain speedup (own overhead -63%); panel rebuilt after Apple HIG: animations, 5-day remember-me, multi-Key, usage charts, mobile cards; fingerprint content demoted to appendix (optional) |
-| v90.5 | 11-08 | Preceding updates: performance close-out (7.0→2.6ms), super panel (remember-me / multi-Key / new UI) |
+| **Snc1** | 11-08 | **Method + panel generational change (current).** Sender replaced (details not spelled out here — the code itself is the most complete documentation; the full chain is still fairly complex and hard to summarize, docs will follow once it settles); full-chain speedup (own overhead -63%); panel rebuilt after Apple HIG: animations, 5-day remember-me, multi-Key, usage charts, mobile cards; fingerprint content demoted to appendix (optional), and absorbs the preceding test-period updates (performance close-out, super panel) |
 | v90.3 | 11-07 | Thinking + body output restored: official now splits a thinking reply into fragments plus a whole-packet snapshot the old parser ignored, swallowing the body into the thinking box. `DEEPSEEKER_FRAGMENT_FIX=0` reverts |
 | v90.2 | 11-07 | Follow-up turns must carry the `shumei_device_id` key (missing = instant empty reply); empty answers no longer cached by the duplicate guard |
 | v90.1 | 11-07 | Device-fingerprint bookkeeping (panel-layer only); Quick-Instructions tutorial replaced by the verified browser-login + bookmarklet route |
@@ -173,4 +172,4 @@ MIT — see [LICENSE](LICENSE). Copyright belongs to upstream author AmanCode22;
 
 ## Appendix · About the device fingerprint (optional, display only)
 
-Upstream's **login endpoint** enforces device-fingerprint validation for the android-protocol login (only android-native SDK output is accepted; short browser-SDK ids are rejected) — this only affects which login route you pick, not how this project runs. The fingerprint field in the panel is **for filing/display only**: it helps you tell tokens apart and is never sent with requests. **Leaving it empty is perfectly fine; there is no official enforcement against it. Feel free to skip it.**
+The fingerprint field in the panel is **for filing/display only**: it helps you tell tokens apart, is never sent with any request, and has nothing to do with how this project runs. **Leaving it empty is perfectly fine; there is no official enforcement against it. Feel free to skip it.**

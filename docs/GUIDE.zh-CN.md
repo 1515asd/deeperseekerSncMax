@@ -58,7 +58,7 @@ Anthropic 兼容客户端（如 Claude Code）用 Base URL `http://你的地址:
 
 ## 三、面板功能速览
 
-新面板（v86 起）是一个页面搞定全部运维：
+新面板是一个页面搞定全部运维：
 
 | 区域 | 人话 | 术语 |
 |---|---|---|
@@ -84,7 +84,7 @@ Anthropic 兼容客户端（如 Claude Code）用 Base URL `http://你的地址:
 **术语版**：
 
 1. **会话映射（session mapping）**：对客户端消息历史做规范化 SHA-256 签名，命中则复用上游会话（增量发送），未命中走首条全量注入路径（full-history injection）。
-2. **真实编号对接（real message ID）**：2026-10-31 起 DeepSeek 在流首广播 `response_message_id`，服务端捕获后作为下一轮 `parent_message_id`，全链路零猜测（v85 移除了旧的 +2 递增）。
+2. **真实编号对接（real message ID）**：2026-10-31 起 DeepSeek 在流首广播 `response_message_id`，服务端捕获后作为下一轮 `parent_message_id`，全链路零猜测（旧的 +2 递增已移除）。
 3. **上下文滚动压缩（summarize-and-rollover）**：逼近记忆上限（约 393K tokens）时触发摘要换血，滚动摘要（rolling summary）+ 最近原文尾巴（tail）+ 最新消息组成新会话首条。
 4. **故障转移（failover）**：401/403/429 自动隔离当前令牌、新令牌接管并完整迁移上下文。
 5. **空流自动续写（empty-stream auto-retry）**：上游 502/静默零输出按中断处理自动续写 ≤2 次。
@@ -103,7 +103,7 @@ Anthropic 兼容客户端（如 Claude Code）用 Base URL `http://你的地址:
 
 ### Q：模型说到一半就停了？
 
-v81b 起会自动续写。如果还遇到，大概率是上游瞬时抖动，重发即可；同一条消息重发不会重复执行（幂等回放窗口保护的是**成功**回合，失败回合照常重试）。
+现版本会自动续写。如果还遇到，大概率是上游瞬时抖动，重发即可；同一条消息重发不会重复执行（幂等回放窗口保护的是**成功**回合，失败回合照常重试）。
 
 ### Q：工具调用（function calling）可靠吗？
 
