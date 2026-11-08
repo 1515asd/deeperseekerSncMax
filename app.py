@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import json
 import logging
 import mimetypes
@@ -47,7 +48,25 @@ def _dup_dbg(msg):
         pass
 
 
-def _dup_record(sig, body):
+def _dup_tail_key(messages):
+    """[v90.4] dup-guard 键补尾：请求末条消息的哈希。
+
+    sig 只算到末条 assistant（会话映射键，find_session 依赖）。无状态调用
+    方（每次只发 历史+新问、不带上一轮回答）在 sig 上无法区分连续不同的
+    提问——旧实现会把第二个问题误判为重试并回放旧答案。按注释原意（
+    「完全相同的消息列表」）收窄：键 = sig + 末条哈希。带历史重发的正常
+    客户端 sig 本就不同，零影响；同 body 重试仍被拦。哈希截 16 位，LRU
+    内存不随消息长度膨胀。"""
+    if not messages:
+        return ""
+    last = messages[-1] if isinstance(messages[-1], dict) else {}
+    blob = json.dumps(
+        {"role": last.get("role", ""), "content": last.get("content", "")},
+        ensure_ascii=False, default=str, sort_keys=True)
+    return hashlib.sha256(blob.encode("utf-8", "ignore")).hexdigest()[:16]
+
+
+def _dup_record(sig, body, tail_key=""):
     # [v83] 失败收尾提示（"（上游……已重试 N 次仍未产出正文）"等）不缓存：
     # 它被 yield 给客户端是为了让用户知道发生了什么，不是有效回答——缓存
     # 它会让 dup-guard 在窗口内把失败提示原样回放，用户重发同一条消息
@@ -68,17 +87,21 @@ def _dup_record(sig, body):
             return
     except Exception:
         pass
-    _DUP_CACHE[sig] = {"ts": time.time(), "body": body}
+    _DUP_CACHE[sig] = {"ts": time.time(), "body": body, "tail": tail_key}
     while len(_DUP_CACHE) > _DUP_CACHE_MAX:
         _DUP_CACHE.pop(next(iter(_DUP_CACHE)))
 
 
-def _dup_lookup(sig):
+def _dup_lookup(sig, tail_key=""):
     ent = _DUP_CACHE.get(sig)
     if not ent:
         return None
     if time.time() - ent["ts"] > int(os.getenv("DEEPSEEKER_DUP_WINDOW", "120")):
         _DUP_CACHE.pop(sig, None)
+        return None
+    # [v90.4] 末条消息不同 = 不是同一请求的重试（无状态调用方连续提问），
+    # 不回放、正常执行。条目保留：真正的同 body 重试仍会被拦。
+    if ent.get("tail") != tail_key:
         return None
     return ent["body"]
 
@@ -185,6 +208,14 @@ security = HTTPBasic()
 
 
 import official_api
+try:  # 私有扩展模块：公开仓库不随行，缺失时页模式相关路径自动停用，其余功能不受影响
+    import page_chat_pipeline
+except ImportError:  # pragma: no cover
+    page_chat_pipeline = None
+
+
+def _page_mode_on():
+    return page_chat_pipeline is not None and page_chat_pipeline.page_mode_enabled()
 from functions import (
     CookieGenerationError,
     UpstreamBizError,
@@ -244,6 +275,11 @@ from functions import (
     _LeakGate,
     upload_file,
     get_file_content,
+    list_api_keys,
+    mask_api_key,
+    add_api_key,
+    delete_api_key,
+    set_api_key_disabled,
     _RetryBoundary,
 )
 
@@ -282,6 +318,8 @@ def _resolve_api_key():
 
 
 API_KEY, _api_key_generated = _resolve_api_key()
+# [v90.5] 面板追加的客户端 Key（api_keys 表）内存缓存；lifespan 里 init_db 后加载
+_API_KEYS = {}
 ADMIN_USER = os.getenv("DEEPSEEKER_ADMIN_USER", "admin")
 ADMIN_PASSWORD = os.getenv("DEEPSEEKER_ADMIN_PASSWORD", "admin")
 
@@ -445,6 +483,7 @@ async def _db(fn, *args, **kwargs):
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await _db(init_db)
+    _refresh_api_keys()  # [v90.5] init_db 后加载面板追加的客户端 Key
     _install_key_access_formatter()
     # [v57 移植 v35] 预热：wasm 编译 + 上游 TLS + PoW 池。30s 封顶，失败不影响启动。
     try:
@@ -502,7 +541,10 @@ app.add_middleware(RecovererMiddleware)
 
 
 SESSIONS = {}
-SESSION_TTL = 7 * 24 * 3600
+# [v90.5] 记住登录：项目决定 5 天（原 7 天但 cookie 是会话级、重启即失，
+# 实际体感「刷新就没」）。见 _admin_session_persist/_admin_session_resume。
+SESSION_TTL = 5 * 24 * 3600
+_ADMIN_SESS_PREFIX = "admin_sess_"
 # B12 (Stage 1 audit): NOTE — SESSIONS (and _login_fails below) are per-process
 # admin state: they reset on restart and are not shared across workers. This
 # service is single-worker by design (uvicorn workers=1); a shared store
@@ -664,7 +706,14 @@ def _release_chat_lock_stream(gen, owner, slot=None):
 
 def get_current_admin(request: Request):
     sid = request.cookies.get("session_id")
-    if not sid or sid not in SESSIONS or time.time() - SESSIONS[sid] > SESSION_TTL:
+    now = time.time()
+    if sid and sid not in SESSIONS:
+        # [v90.5] 记住登录：内存 miss（服务重启后）→ 从 settings 表恢复。
+        # 只在 miss 时读一次 DB 并回填内存；命中路径零 DB 开销。
+        ts = _admin_session_resume(sid)
+        if ts is not None:
+            SESSIONS[sid] = ts
+    if not sid or sid not in SESSIONS or now - SESSIONS[sid] > SESSION_TTL:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED)
     SESSIONS[sid] = time.time()
     origin = request.headers.get("origin", "")
@@ -686,8 +735,25 @@ def get_api_key(request: Request):
 
 
 def check_key(request: Request):
+    """[v90.5] 多 Key 鉴权：默认 key（env/生成）永远有效；面板追加的
+    Key 存 api_keys 表，启动加载 + 变更时刷新内存 dict（O(1) 查找，
+    高熵随机 key 无时序侧信道可泄漏）。禁用的 Key 视为无效。"""
     key = get_api_key(request)
-    return secrets.compare_digest(key.encode("utf-8"), API_KEY.encode("utf-8"))
+    if not key:
+        return False
+    if secrets.compare_digest(key.encode("utf-8"), API_KEY.encode("utf-8")):
+        return True
+    ent = _API_KEYS.get(key)
+    return ent is not None and not ent["disabled"]
+
+
+def _refresh_api_keys():
+    """[v90.5] 从 DB 重载追加 Key 到内存。启动与面板增删改时调用。"""
+    try:
+        global _API_KEYS
+        _API_KEYS = {k["key"]: k for k in list_api_keys()}
+    except Exception:
+        logger.exception("load api_keys failed")
 
 
 def _upstream_http_code(exc):
@@ -1261,7 +1327,7 @@ async def handle_chat(
         # （DEEPSEEKER_DUP_WINDOW）。人类"重新生成"通常先删上一条回复，
         # 消息列表变化 → 签名不同 → 不受影响。
         if not is_anthropic:
-            cached_body = _dup_lookup(sig)
+            cached_body = _dup_lookup(sig, _dup_tail_key(messages))
             _dup_dbg(f"lookup sig={str(sig)[:16]} hit={cached_body is not None} cache_n={len(_DUP_CACHE)}")
             if cached_body is not None:
                 logger.warning(
@@ -1425,7 +1491,7 @@ async def handle_chat(
                           _u.get("completion_tokens") or count_tok(_completion_usage_text(clean_text, parsed_tools)))
             # [v74] 记录完成结果：窗口内同签名重试直接回放，不重复执行
             if isinstance(_resp, dict) and "choices" in _resp:
-                _dup_record(sig, _resp)
+                _dup_record(sig, _resp, _dup_tail_key(messages))
                 _dup_dbg(f"record sig={str(sig)[:16]}")
             return _resp
     except asyncio.CancelledError:
@@ -1892,7 +1958,7 @@ async def stream_response(gen, model, messages, token_id, session_id, sig, tools
                     "id": cid, "object": "chat.completion", "created": created, "model": model,
                     "choices": [{"index": 0, "message": ast_msg,
                                  "finish_reason": "tool_calls" if parsed_tools else "stop"}],
-                })
+                }, _dup_tail_key(messages))
             except Exception:
                 pass
             try:
@@ -2514,6 +2580,149 @@ async def _official_chat_response(body, model, stream, tools, request):
     return StreamingResponse(_gen(), media_type="text/event-stream")
 
 
+def _pseudo_anthropic_stream(result: dict, model_name: str):
+    """[v90] 页面模式 · anthropic 伪事件流：从聚合结果生成最小合法
+    anthropic SSE 序列。事件形状与 stream_anthropic_response 对齐
+    （message_start → thinking 块 → text 块 → message_delta → message_stop），
+    供 /v1/messages stream=True 客户端零改动消费。"""
+    msg_id = f"msg_{uuid.uuid4().hex[:24]}"
+    message = result["choices"][0]["message"]
+    usage = result.get("usage", {})
+    yield ("event: message_start\ndata: " + json.dumps({
+        "type": "message_start",
+        "message": {"id": msg_id, "type": "message", "role": "assistant",
+                    "content": [], "model": model_name, "stop_reason": None,
+                    "stop_sequence": None,
+                    "usage": {"input_tokens": usage.get("prompt_tokens", 0),
+                              "output_tokens": 1}}}) + "\n\n")
+    idx = 0
+    think = message.get("reasoning_content")
+    if think:
+        yield ("event: content_block_start\ndata: " + json.dumps({
+            "type": "content_block_start", "index": idx,
+            "content_block": {"type": "thinking"}}) + "\n\n")
+        yield ("event: content_block_delta\ndata: " + json.dumps({
+            "type": "content_block_delta", "index": idx,
+            "delta": {"type": "thinking_delta", "thinking": think}}) + "\n\n")
+        yield ("event: content_block_stop\ndata: " + json.dumps({
+            "type": "content_block_stop", "index": idx}) + "\n\n")
+        idx += 1
+    text = message.get("content") or ""
+    yield ("event: content_block_start\ndata: " + json.dumps({
+        "type": "content_block_start", "index": idx,
+        "content_block": {"type": "text", "text": ""}}) + "\n\n")
+    if text:
+        yield ("event: content_block_delta\ndata: " + json.dumps({
+            "type": "content_block_delta", "index": idx,
+            "delta": {"type": "text_delta", "text": text}}) + "\n\n")
+    yield ("event: content_block_stop\ndata: " + json.dumps({
+        "type": "content_block_stop", "index": idx}) + "\n\n")
+    yield ("event: message_delta\ndata: " + json.dumps({
+        "type": "message_delta",
+        "delta": {"stop_reason": "end_turn", "stop_sequence": None},
+        "usage": {"output_tokens": usage.get("completion_tokens", 0)}}) + "\n\n")
+    yield "event: message_stop\ndata: " + json.dumps({"type": "message_stop"}) + "\n\n"
+
+
+# ── [v90] 页面模式（page mode）────────────────────────────────────────────
+# [Snc1] 更稳、更省、零伪装的发送路径（可选，DEEPSEEKER_PAGE_MODE 开关）。
+# 开关关闭或模块不在位时主路径原样运行，零回归面；失败显式报错，无静默回退。
+async def _page_chat_response(request, messages, model, stream, tools,
+                              scope="", json_mode=False, search=False,
+                              thinking=False, req_model=None, anthropic_wrap=False):
+    _request_tools.set(tools or [])  # 与 handle_chat L909 同源：effort/工具反推依赖
+    prompt = await build_prompt(messages, tools or [], model, is_first_message=True)
+
+    def _json_suffix(p):
+        if json_mode:
+            # [v73] JSON 模式：提示层强约束（与 handle_chat 逐字一致）
+            return p + (
+                "\n\n[OUTPUT FORMAT · 强制]\n"
+                "Respond with ONE valid JSON value (object, array, string, number or boolean) and NOTHING else.\n"
+                "No markdown fences, no explanations, no text before or after the JSON.\n"
+                "If you still need tool results, call tools first; once data is sufficient, output ONLY the final JSON."
+            )
+        return p
+
+    # 带附件显式拒绝、绝不静默丢——要传文件请关页模式走主路径。
+    for _m in messages:
+        _c = _m.get("content") if isinstance(_m, dict) else None
+        if isinstance(_c, list) and any(
+                isinstance(p, dict) and str(p.get("type", "")) in
+                ("image_url", "image", "document", "file", "input_image", "input_file")
+                for p in _c):
+            return _api_error_response(
+                page_chat_pipeline.PageChatError(
+                    400, "page mode: requests with file/image parts are not "
+                    "supported (page mode carries text only). Disable "
+                    "page mode or drop the attachment."),
+                is_anthropic=anthropic_wrap)
+
+    # 超长请求显式降级、不静默截断：
+    # 「仅最后一条用户消息」（多轮记忆改由页面会话本身承担）并打 warning
+    # 留痕——降级可查日志，绝不静默；降级后仍超长才报 400。
+    try:
+        url = page_chat_pipeline.build_autosend_url(
+            _json_suffix(prompt), search=bool(search), thinking=bool(thinking))
+    except page_chat_pipeline.PageChatError as e:
+        if e.status != 400:
+            return _api_error_response(e, is_anthropic=anthropic_wrap)
+        last_user = next((m for m in reversed(messages)
+                          if str(m.get("role", "")).lower() == "user"), None)
+        lt = last_user.get("content") if last_user else ""
+        if isinstance(lt, list):
+            lt = " ".join(p.get("text", "") for p in lt if isinstance(p, dict) and p.get("text"))
+        prompt = (lt or "").strip()
+        if not prompt:
+            return _api_error_response(e, is_anthropic=anthropic_wrap)
+        logger.warning("page mode: packed prompt over autosend limit, degraded to "
+                       "last user message only (%d chars) — multi-turn memory now "
+                       "lives in the page's own chat", len(prompt))
+        try:
+            url = page_chat_pipeline.build_autosend_url(
+                _json_suffix(prompt), search=bool(search), thinking=bool(thinking))
+        except page_chat_pipeline.PageChatError as e2:
+            # 降级后仍超长：显式 400（不截断、不静默）——绝不能让
+            # PageChatError 逃逸成 500（集成测试 F 场景抓到的隐性路径）
+            return _api_error_response(e2, is_anthropic=anthropic_wrap)
+
+    token = await _db(get_auth_token)
+    if not token:
+        return JSONResponse({"error": "No auth token. Add via dashboard."}, status_code=401)
+    page_chat_pipeline.register_intent(url, prompt)
+    logger.info("page mode: intent registered (url %d chars)", len(url))
+
+    try:
+        reply_text, think_text = await page_chat_pipeline.poll_reply(
+            token, prompt, timeout_s=page_chat_pipeline.page_timeout())
+    except page_chat_pipeline.PageChatError as e:
+        return _api_error_response(e, is_anthropic=anthropic_wrap)
+
+    if json_mode:
+        reply_text, _json_ok = _json_mode_coerce(reply_text)
+    text = (f"<think>{think_text}</think>" if think_text else "") + reply_text
+    result = format_response(text, model, messages, tools)
+    with suppress(Exception):
+        await _db(record_usage, scope, "page", model,
+                  result["usage"]["prompt_tokens"], result["usage"]["completion_tokens"])
+    if stream and anthropic_wrap:
+        # anthropic 客户端要事件流（message_start/content_block_*/message_stop），
+        # 不能吐 OpenAI chunk 帧（集成测试针对性盘点抓到的形状错位）。
+        # 页模式无上游 chunk 流，从聚合结果生成最小合法事件序列。
+        if not isinstance(result, dict) or "choices" not in result:
+            return result
+        return StreamingResponse(
+            _pseudo_anthropic_stream(result, req_model or model),
+            media_type="text/event-stream")
+    if stream:
+        return StreamingResponse(_pseudo_stream(result, model), media_type="text/event-stream")
+    if anthropic_wrap:
+        if not isinstance(result, dict) or "choices" not in result:
+            return result
+        return format_anthropic_response(result, req_model)
+    return result
+
+
 @app.post("/v1/chat/completions")
 async def chat_completions(request: Request):
     # NOTE (Stage 1 minor list): `stop` and `max_tokens` are accepted but
@@ -2533,6 +2742,12 @@ async def chat_completions(request: Request):
     # [v73] JSON 输出模式：仅当客户端显式声明时激活，正常请求零影响
     resp_fmt = body.get("response_format") or {}
     json_mode = isinstance(resp_fmt, dict) and resp_fmt.get("type") in ("json_object", "json_schema")
+    # [Snc1] 开启后走更稳的发送路径。
+    # 无静默回退——页模式失败就是失败，不偷偷回落令牌方案。
+    if _page_mode_on():
+        return await _page_chat_response(request, messages, model, stream, tools,
+                                         scope=get_api_key(request), json_mode=json_mode,
+                                         search=search, thinking=thinking)
     return await handle_chat(messages, model, thinking, search, stream, tools, scope=get_api_key(request), json_mode=json_mode)
 
 
@@ -2596,7 +2811,14 @@ async def openai_responses(request: Request):
     stream = body.get("stream", False)
     tools = body.get("tools", None)
 
-    result = await handle_chat(messages, model, thinking, search, stream, tools, scope=get_api_key(request))
+    # [v90] 页面模式短路（/v1/responses）：返回值与 handle_chat 同形状，
+    # 后续 output 转换逻辑零改动。
+    if _page_mode_on():
+        result = await _page_chat_response(request, messages, model, stream, tools,
+                                           scope=get_api_key(request),
+                                           search=search, thinking=thinking)
+    else:
+        result = await handle_chat(messages, model, thinking, search, stream, tools, scope=get_api_key(request))
 
     if stream:
         return result
@@ -2751,6 +2973,12 @@ async def anthropic_messages(request: Request):
             openai_msgs.insert(0, {"role": "system", "content": f"You MUST return valid JSON adhering strictly to this JSON Schema:\n{json.dumps(json_schema)}"})
 
     req_model = body.get("model")
+    # [v90] 页面模式短路（/v1/messages）：anthropic_wrap=True 时函数内部
+    # 完成与原入口 L2758-2760 相同的 format_anthropic_response 收尾。
+    if _page_mode_on():
+        return await _page_chat_response(request, openai_msgs, model, stream, openai_tools or None,
+                                         scope=get_api_key(request), thinking=thinking,
+                                         req_model=req_model, anthropic_wrap=True)
     if stream:
         return await handle_chat(openai_msgs, model, thinking, False, True, openai_tools or None, is_anthropic=True, req_model=req_model, scope=get_api_key(request))
 
@@ -2838,11 +3066,57 @@ async def login_page(request: Request):
 
 def _prune_admin_sessions():
     """B12: expired dashboard sessions used to stay in memory until restart.
-    Called opportunistically on login so the dict tracks live sessions only."""
+    Called opportunistically on login so the dict tracks live sessions only.
+    [v90.5] settings 表里的持久化会话同步清理（记住登录 5 天，见 SESSION_TTL）。"""
     now = time.time()
     expired = [sid for sid, ts in SESSIONS.items() if now - ts > SESSION_TTL]
     for sid in expired:
         SESSIONS.pop(sid, None)
+        _admin_session_delete(sid)
+
+
+def _admin_session_persist(sid: str, ts: float):
+    """[v90.5] 记住登录：把面板会话落到 settings 表（key=admin_sess_<sid>）。
+
+    原会话只存在内存 dict，服务重启即全部失效——cookie 还在浏览器里，
+    面板却要求重新登录，体感就是「刷新一下登录没了」。持久化后重启也能
+    恢复；有效期仍由 SESSION_TTL（5 天）统一裁定，不产生第二种口径。
+    """
+    try:
+        conn = get_db()  # _PooledConn：直接用，close=归还句柄
+        conn.execute(
+            "INSERT INTO settings (key, value) VALUES (?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            (_ADMIN_SESS_PREFIX + sid, repr(ts)))
+        conn.commit()
+    except Exception:
+        pass  # 持久化失败不阻断登录：最坏退回旧行为（重启需重登）
+
+
+def _admin_session_resume(sid: str):
+    """[v90.5] 内存 miss 时从 settings 表恢复会话时间戳；无效/过期返回 None。"""
+    try:
+        conn = get_db()
+        row = conn.execute(
+            "SELECT value FROM settings WHERE key = ?",
+            (_ADMIN_SESS_PREFIX + sid,)).fetchone()
+        ts = float(row["value"]) if row else None
+        if ts is not None and time.time() - ts > SESSION_TTL:
+            _admin_session_delete(sid)
+            return None
+        return ts
+    except Exception:
+        return None
+
+
+def _admin_session_delete(sid: str):
+    try:
+        conn = get_db()
+        conn.execute("DELETE FROM settings WHERE key = ?",
+                     (_ADMIN_SESS_PREFIX + sid,))
+        conn.commit()
+    except Exception:
+        pass
 
 
 def _parse_urlencoded_form(raw: bytes) -> dict:
@@ -2902,8 +3176,13 @@ async def login_submit(request: Request):
         _login_fails["count"] = 0
         sid = str(uuid.uuid4())
         SESSIONS[sid] = time.time()
+        _admin_session_persist(sid, SESSIONS[sid])  # [v90.5] 重启可恢复
         resp = HTMLResponse("<meta http-equiv='refresh' content='0;url=/dashboard'>")
-        resp.set_cookie("session_id", sid, httponly=True, samesite="lax")
+        # [v90.5] max_age=SESSION_TTL（5 天）：原来是会话 cookie，浏览器一关
+        # 就丢；配合持久化，5 天内刷新/重启都不掉登录。项目定时长，不给
+        # 用户开关（安全窗口由服务端统一裁定）。
+        resp.set_cookie("session_id", sid, httponly=True, samesite="lax",
+                        max_age=SESSION_TTL)
         return resp
     _login_fails["count"] += 1
     if _login_fails["count"] >= 5:
@@ -2916,6 +3195,7 @@ async def login_submit(request: Request):
 async def logout(request: Request):
     sid = request.cookies.get("session_id")
     SESSIONS.pop(sid, None)
+    _admin_session_delete(sid)  # [v90.5] 退出 = 内存与持久化一并清除
     resp = HTMLResponse("<meta http-equiv='refresh' content='0;url=/login'>")
     resp.delete_cookie("session_id")
     return resp
@@ -2928,7 +3208,11 @@ async def dashboard(request: Request):
     except HTTPException:
         return HTMLResponse("<meta http-equiv='refresh' content='0;url=/login'>")
     tokens = await _db(get_tokens)
-    return templates.TemplateResponse(request, "dashboard.html", {"tokens": tokens})
+    # [v90.5] 端点信息直接随模板下发（管理员面板本来就有权查看自己的 key，
+    # 免去新端点与前端 fetch；key 支持前端显隐切换）。
+    return templates.TemplateResponse(request, "dashboard.html",
+                                      {"tokens": tokens, "api_key": API_KEY,
+                                       "extra_keys": await _db(list_api_keys)})
 
 
 @app.post("/v1/pool/restore")
@@ -3008,8 +3292,11 @@ async def v1_pool(request: Request):
 
 
 @app.get("/v1/pool/probe")
-async def v1_pool_probe(request: Request):
+async def v1_pool_probe(request: Request, token_id: int = None):
     """[v89.7] 逐令牌探测上游真实状态（管理员，手动触发，无凭据字段）。
+
+    [v90.5] 支持单令牌探测：?token_id=N 只探测池中该令牌（面板行内
+    「检测」按钮用）；缺省探测全池，行为与旧版完全一致。
 
     对每个令牌 GET /api/v0/users/current（免 PoW、只读）：
       * ok      —— 令牌有效且账号未禁言
@@ -3025,6 +3312,10 @@ async def v1_pool_probe(request: Request):
     except HTTPException:
         return HTMLResponse("<meta http-equiv='refresh' content='0;url=/login'>")
     tokens = await _db(get_tokens)
+    if token_id is not None:
+        tokens = [t for t in tokens if t["id"] == token_id]
+        if not tokens:
+            return JSONResponse({"error": f"no token #{token_id}"}, status_code=404)
     pool_view = {t["id"]: t for t in await _db(get_pool_view)}
     report = []
     for t in tokens:
@@ -3073,6 +3364,93 @@ def _count_sessions():
         return conn.execute("SELECT COUNT(*) FROM sessions").fetchone()[0]
     finally:
         conn.close()
+
+
+# ── [v90.5] 多 Key 管理（管理员，面板用）────────────────────────────
+# 默认 key（DEEPSEEKER_API_KEY / 启动生成）不在此列、永远有效且不可删
+# ——保证「加了多 Key 也不会把唯一钥匙搞丢」（无代价要求）。
+
+def _admin_guard(request: Request):
+    try:
+        get_current_admin(request)
+        return None
+    except HTTPException:
+        return HTMLResponse("<meta http-equiv='refresh' content='0;url=/login'>")
+
+
+@app.get("/v1/keys")
+async def v1_keys_list(request: Request):
+    denied = _admin_guard(request)
+    if denied:
+        return denied
+    rows = await _db(list_api_keys)
+    return JSONResponse({"keys": rows, "primary": mask_api_key(API_KEY)})
+
+
+@app.post("/v1/keys/add")
+async def v1_keys_add(request: Request):
+    denied = _admin_guard(request)
+    if denied:
+        return denied
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "bad json"}, status_code=400)
+    key = (body.get("key") or "").strip() or ("dsk-" + secrets.token_urlsafe(24))
+    alias = (body.get("alias") or "").strip()
+    if not key.startswith("dsk-") and len(key) < 16:
+        return JSONResponse({"error": "key 太短（至少 16 字符，建议 dsk- 前缀）"}, status_code=400)
+    # 白名单：面板前端把 key 内联进 onclick 属性，非 [A-Za-z0-9_-] 字符
+    # （引号/尖括号等）会被转义层之外的路径插进去——直接源头拒绝。
+    if not re.fullmatch(r"[A-Za-z0-9_\-]{8,}", key):
+        return JSONResponse({"error": "key 只能包含字母、数字、下划线、连字符"}, status_code=400)
+    if key in _API_KEYS or secrets.compare_digest(key.encode(), API_KEY.encode()):
+        return JSONResponse({"error": "该 Key 已存在"}, status_code=409)
+    await _db(add_api_key, key, alias)
+    _refresh_api_keys()
+    logger.info("admin: api key added (%s)", mask_api_key(key))
+    return JSONResponse({"ok": True, "key": key})
+
+
+@app.post("/v1/keys/delete")
+async def v1_keys_delete(request: Request):
+    denied = _admin_guard(request)
+    if denied:
+        return denied
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "bad json"}, status_code=400)
+    key = (body.get("key") or "").strip()
+    await _db(delete_api_key, key)
+    _refresh_api_keys()
+    return JSONResponse({"ok": True})
+
+
+@app.post("/v1/keys/toggle")
+async def v1_keys_toggle(request: Request):
+    denied = _admin_guard(request)
+    if denied:
+        return denied
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "bad json"}, status_code=400)
+    key = (body.get("key") or "").strip()
+    disabled = bool(body.get("disabled"))
+    await _db(set_api_key_disabled, key, disabled)
+    _refresh_api_keys()
+    return JSONResponse({"ok": True, "disabled": disabled})
+
+
+@app.get("/page_mode/pending")
+async def page_mode_pending(request: Request):
+    """[Snc1] 配套领取点：未启用时 404，鉴权与其他端点同源。"""
+    if not _page_mode_on():
+        return JSONResponse({"error": "page mode disabled"}, status_code=404)
+    if not check_key(request):
+        return JSONResponse({"error": "Invalid API key"}, status_code=401)
+    return JSONResponse({"pending": page_chat_pipeline.take_pending()})
 
 
 @app.get("/v1/admin/stats")

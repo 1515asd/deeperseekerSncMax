@@ -1,13 +1,13 @@
 <div align="center">
 
-# DeeperSeeker
+# SncMax
 
 **Self-hosted DeepSeek gateway that speaks the OpenAI & Anthropic API standards.**
 
-[![License: MIT](https://img.shields.io/github/license/1515asd/rh-deeperseeker.svg)](LICENSE)
-[![Last Commit](https://img.shields.io/github/last-commit/1515asd/rh-deeperseeker/main.svg)](https://github.com/1515asd/rh-deeperseeker/commits/main)
-[![Stars](https://img.shields.io/github/stars/1515asd/rh-deeperseeker.svg)](https://github.com/1515asd/rh-deeperseeker/stargazers)
-![Release](https://img.shields.io/badge/release-v90.3-2ea44f.svg)
+[![License: MIT](https://img.shields.io/github/license/1515asd/SncMax.svg)](LICENSE)
+[![Last Commit](https://img.shields.io/github/last-commit/1515asd/SncMax/main.svg)](https://github.com/1515asd/SncMax/commits/main)
+[![Stars](https://img.shields.io/github/stars/1515asd/SncMax.svg)](https://github.com/1515asd/SncMax/stargazers)
+![Release](https://img.shields.io/badge/release-Snc1-2ea44f.svg)
 
 Point any OpenAI/Anthropic-compatible client at this server and it just works —
 streaming, tool calling, and long-context session management out of the box.
@@ -18,113 +18,84 @@ streaming, tool calling, and long-context session management out of the box.
 
 </div>
 
-> **About releases — read this first**: this repo ships commits constantly, but the vast majority are test / experimental builds made to chase upstream protocol changes, pushed quickly just to see whether a fix works. Most of them are not meant for long-term use and may carry bugs. Only a handful of releases have been verified in real production use and are known to be stable and working (marked **Stable** in the table below). If you just want something that works, stay on the stable line (the `english` branch) and the versions marked Stable — don't chase the newest commit on `main`.
+> **Snc1 · Major update**: after half a day of research, the previously abstract problem finally became concrete — one turn of thinking, and **the sending side moved**. The long list of login, disconnect, and empty-reply issues is resolved at the method level, instead of being patched one by one. The implementation stays private; usage stays the same: log in via your browser, grab the token, paste it into the dashboard.
 
-## ⚠️ Usage model change (v90.x, effective Nov 2026)
+**What did the new approach buy?** In the past, every upstream tremor — captchas, device fingerprints, protocol field changes — meant an emergency release. Under the new approach those verifications happen where they were always meant to happen, so **this project barely needs to deal with them anymore**: whether already shipped or added in the future, most new verifications and policy changes won't reach this side, and the release cadence drops accordingly.
 
-Upstream risk control tightened sharply in November. Real-device testing on 2026-11-07 established:
+## What Snc1 brings
 
-1. **The android-protocol login now hard-requires a fingerprint from the Shumei SDK on a physical android phone** (~89 chars): omit it and the endpoint rejects with 422; fabricated values and web-SDK short ids alike get RISK_DEVICE_DETECTED — **users without an android device cannot use the android-protocol login at all** (desktop and iPhone alike)
-2. **Browser logins on new devices force an email OTP** (password → emailed code → code entry → session)
-3. **The path that ran end to end in testing**: complete a full login in Safari (or any browser) — email OTP included, over your own home network — then use a javascript bookmarklet to read the token from the page's localStorage and paste it into the dashboard (setup steps in the dashboard, "Method B")
-4. Desktop/Android users may still try [`tools/login_once.py`](tools/login_once.py) / [`tools/deepseek-login.sh`](tools/deepseek-login.sh), but only if they can produce an android-native fingerprint; otherwise the device risk check rejects them
-
-Third parties report tokens dying after just 3-4 requests since last night: a single successful request proves nothing long-term. **Risk disclaimer**: whether bans can be fully avoided is unproven — it needs observation time. **Use alt accounts** and keep usage light; the maintainer cannot take responsibility for banned accounts.
-
-**Verification status**: end-to-end verified in production on the night of 2026-11-07 with a fresh alt account — a web-login token went into the pool, thinking and body both streamed normally, the upstream probe reported valid and not muted, and several hours of multi-turn conversation ran without a drop. Usable at the feature level, but long-term ban resistance is still unproven and needs observation. The dashboard "Probe tokens" button shows each token's real status; if something breaks, [open an issue](https://github.com/1515asd/rh-deeperseeker/issues/new) with the dashboard status and probe results — **never include tokens or credentials**.
+- **A new approach** — the sender has been replaced outright, eliminating problems at the source; the old "upstream changes, everything breaks" patch cycle is gone
+- **Full-speed burst** — measured ~**63%** reduction in the server's own overhead (7.0ms → 2.6ms per turn); upstream latency is upstream's business, ours is now at the floor
+- **A brand-new panel** — redesigned after Apple's Human Interface Guidelines: graceful low-cost animations, 5-day remember-me, multi-Key management, mobile layout; the old panel is retired
+- **Multi-Key** — add multiple client Keys from the panel, toggle or delete anytime, the default Key always works
+- **Less chasing, fewer updates** — captchas, device fingerprints, and policy changes official adds in the future barely reach this side anymore; the repo no longer needs to release with every upstream move
 
 ## What is this
 
-This project is based on upstream [`AmanCode22/deeperseeker`](https://github.com/AmanCode22/deeperseeker)
-(MIT): it wraps the free DeepSeek web tier into a standard API — no official API
-key needed — and exposes both OpenAI Chat Completions and Anthropic Messages
-endpoints. This fork maintains long-running, self-hosted deployments on
-free-tier platforms, keeping up with protocol changes and stability fixes.
+Based on upstream [`AmanCode22/deeperseeker`](https://github.com/AmanCode22/deeperseeker) (MIT), this project wraps DeepSeek's free web tier into a standard API — no official API key needed — exposing both OpenAI Chat Completions and Anthropic Messages. This repo maintains a long-term self-hosted deployment on free hosting platforms.
 
-## Where to see updates
+## Three approaches, three trade-offs
 
-- **Dev line (main)**: [commit history](https://github.com/1515asd/rh-deeperseeker/commits/main)
-- **English stable line (english)**: [commit history](https://github.com/1515asd/rh-deeperseeker/commits/english)
+Free-tier setups come down to three roads — **tokens** (log in yourself, paste into your own panel: your data, your control, but tokens need re-extracting), **browser** (a page stays open as the sender: the truest form, but your device must be always-on), and **community projects** (third-party public bridges: zero setup, but shared pools crowd, privacy is out of your hands, and they can vanish anytime). What they share: no official API key, all ride the free web tier, all bound by upstream risk control, and all deserve a throwaway account.
 
-`main` is the dev line; once a fix lands there, the `english` line follows
-within days (syncs keep every piece of content in English). What each version
-did:
+![Tokens · Browser · Community projects — comparison](docs/comparison.png)
 
-| Version | Date | What changed |
+## Where to follow updates
+
+- **Dev line (main)**: [commit history](https://github.com/1515asd/SncMax/commits/main)
+- **English stable line (english)**: [commit history](https://github.com/1515asd/SncMax/commits/english)
+
+| Version | Date | Notes |
 |---|---|---|
-| v90.3 | Nov 07 | **Stable — verified in production.** Thinking + body output restored: upstream now splits a thinking reply into `THINK` / `RESPONSE` fragments and, after the thinking is fully streamed, sends a whole-packet snapshot with an empty `o` marker (`p=response/fragments`). The old parser only recognised `o=APPEND`, so `<think>` never closed and the body was swallowed into the thinking box — clients saw an empty response. Now the snapshot is recognised, the duplicated thinking fragment is skipped, and the first body character is picked up. `DEEPSEEKER_FRAGMENT_FIX=0` reverts to the v90.2 parser. Verified live: thinking and body both stream, multi-turn context intact |
-| v90.2 | Nov 07 | Follow-up turns now carry `shumei_device_id` in the completion body, as upstream began requiring — missing it returns `biz_code 26 invalid message id` with an instantly empty reply. The value comes from the fingerprint on record for that token: an android-native format is sent as-is, anything else (including no fingerprint) goes out as `null`; any lookup failure degrades to `None`. Also, an empty-but-successful reply is no longer cached by the 120s duplicate-message guard (tool-call turns and failure hints are unaffected) |
-| v90.1 | Nov 07 | Shumei device-fingerprint bookkeeping, panel layer only: a fingerprint field on the add-token form, fingerprint format/validity columns in the pool view, and fingerprint status merged into the probe. The `device_fingerprint` column is added idempotently. The Shortcuts tutorial was replaced by the tested Safari-login + bookmarklet path. No change to session behaviour |
-| v90.0 | Nov 7 | **Usage model change (rebuilt on v89.7)**: bridge-native login and the hif risk-control header removed entirely — production testing showed the login endpoint gets WAF-challenged by egress IP (bare HTTP 202; a same-curl cross-IP check proved it is purely IP-based), making server-side login unusable on most datacenters while storing plaintext passwords became pure liability. New model: sessions are born on the user's device via a one-shot login tool (byte-faithful android protocol + optional Shumei device fingerprint); the token comes straight back in the login response and is pasted into the dashboard. All browser-extraction guidance retired. Apart from docs and tooling, the server code is byte-identical to v89.7 |
-| v89.7 | Nov 05 | Muted-account detection fixed (production-verified Nov 5 evening: a muted account was shown as "Active" and surfaced as 502 "biz error 0"): 1) upstream mute reports hide inside a nested envelope (outer code=0, inner biz_code=5 "user is muted") which the old code never looked at — now detected via the upstream `is_muted==1` boolean (hard evidence), hit = immediate quarantine with the unmute time in the reason; 2) new "Muted (confirmed)" dashboard state, distinct from "Likely muted"; 3) a "Probe tokens" button under the token pool asks DeepSeek for each token's real status (healthy / muted until X / invalidated) and auto-quarantines confirmed-muted tokens; 4) a silent startup scan of ACTIVE tokens so muted accounts no longer wear an "Active" badge overnight. Every change touches only failure paths; the success path is byte-identical |
-| v89.6 | Nov 05 | Three classes of fixes (production-verified Nov 5 evening): 1) the pool-restore endpoint and the file-upload endpoint have returned a NameError 500 on every call since v77 — both fixed, with a repo-wide static scan confirming no similar residue; 2) the dashboard state system rebuilt — quarantine reasons are persisted and shown as five color-coded states (likely expired / likely muted / quarantined-other with the concrete reason), mute-shaped business errors no longer masquerade as healthy after cooldown, and every state carries plain-language guidance plus a self-check recipe; Restore stays always-safe (a dead token re-quarantines automatically); 3) the effort-instruction chain fixed — `reasoning_effort=max` strengthening instructions now actually apply for the first time, with a dashboard toggle (off = byte-identical to the previous release) |
-| v89.5 | Nov 05 | Bare-JSON tool calls upgraded from "send back for rewrite" to deterministic auto-repair: when all four gates pass (the whole body is exactly one JSON object, the tool name matches this turn's real tool list, arguments is a dict, and all schema-required fields are present), the salvage layer re-wraps the lost `<tool_call>` tags and the call flows through the existing parse/delivery chain — zero extra upstream round-trip, arguments preserved verbatim, and the session history is no longer polluted by the leaked JSON. Any gate failing falls back to the v89.4 rewrite path — byte-identical to the previous version |
-| v89.4 | Nov 05 | Bare-JSON tool-call self-healing: the model occasionally emits a tool call as bare JSON without `<tool_call>` wrapping (production-verified Nov 5, 00:23), which leaks into the reply body and stalls the session. When the whole body is exactly one JSON object whose tool name matches this turn's real tool list, the existing v62 diagnostic-continue kicks in — the bridge executes nothing and lets the model resend a well-formed call or hand back a final answer. Normal replies stay byte-identical |
-| v89.3 | Nov 04 | Zero false-positive quarantines: the auth-wording classification of HTTP 200 business errors is soft evidence — a single hit no longer penalizes the account at all (zero cost on a wording fluke); quarantine now requires 3 consecutive auth-shaped business failures (configurable), and one successful turn resets the count. A real HTTP 401 (hard evidence) still quarantines immediately. Fixes the last v88 residual — English business wording that merely contains an auth-shaped word could sideline a healthy account indefinitely |
-| v89.2 | Nov 04 | The duplicate-call gate note is now purely factual: it only states "this command appeared verbatim N-1 times before" and "the Result above is the genuine output of this call" — zero instructions, zero inference. It can never conflict with a user-mandated repeat, and it no longer vouches for results it cannot verify |
-| v89 | Nov 04 | Duplicate-call gate (from a 2026-11-01 production post-mortem): when the same command is resent verbatim ≥2 times, a system note is injected into the result. It intervenes only while a loop is happening — normal-request prompts are byte-identical to the previous version |
-| v88 | Nov 04 | Ported the upstream PR #94 hardening: business-level errors delivered as HTTP 200 (flagged account, killed web session, rate-limit wall) are now classified and trigger token rotation instead of pinning dead accounts; failures during new-chat creation / PoW setup are retried — outside the signature lock, so requests no longer hang |
-| v87 | Nov 04 | Fixed the memory-loss chain. The root cause was introduced by this fork's own earlier optimizations (PoW credential prefetch + empty-stream auto-continue) — upstream has neither mechanism and never had this issue: prefetched credentials stopped expiring → after idle periods a stale credential got rejected (40301) → misread as an empty stream → auto-continue fired as an orphan new message → the session map got poisoned. PoW credentials now carry a hard 10-minute TTL, business errors are classified correctly, and auto-continue only fires after upstream acceptance. Invisible to clients (HTTP 200) |
-| v86 | Nov 01 | Redesigned admin dashboard with deep-health integration; Docker deployment files added (PR #1, thanks @anch665) |
-| v85 | Nov 01 | Stable release for the Oct 31 protocol change: native message-ID protocol (first message omits `parent_message_id`, follow-ups use real server-broadcast IDs), empty-stream auto-retry, tool-markup leak gate, old-chat self-healing. **Everyone should run v85 or newer** |
-| v82–v84 | Oct 31 – Nov 01 | Emergency protocol fixes (test releases) |
-
-> **Tracking upstream issue reports**: we watch the upstream project's
-> [issues](https://github.com/AmanCode22/deeperseeker/issues) and PRs for
-> problem reports and protocol changes, and port any relevant fixes here
-> promptly — v88 was ported from upstream PR #94.
+| **Snc1** | 11-08 | **Method + panel generational change (current).** Sender replaced (details private, see note above); full-chain speedup (own overhead -63%); panel rebuilt after Apple HIG: animations, 5-day remember-me, multi-Key, usage charts, mobile cards; fingerprint content demoted to appendix (optional) |
+| v90.5 | 11-08 | Preceding updates: performance close-out (7.0→2.6ms), super panel (remember-me / multi-Key / new UI) |
+| v90.3 | 11-07 | Thinking + body output restored: official now splits a thinking reply into fragments plus a whole-packet snapshot the old parser ignored, swallowing the body into the thinking box. `DEEPSEEKER_FRAGMENT_FIX=0` reverts |
+| v90.2 | 11-07 | Follow-up turns must carry the `shumei_device_id` key (missing = instant empty reply); empty answers no longer cached by the duplicate guard |
+| v90.1 | 11-07 | Device-fingerprint bookkeeping (panel-layer only); Quick-Instructions tutorial replaced by the verified browser-login + bookmarklet route |
+| v90.0 | 11-07 | Usage-model generational change (rebuilt on v89.7): in-bridge login and hif risk-control headers removed; "user-device birth" model |
+| v89.7 | 11-05 | Mute-detection fix (nested mute envelope no longer missed); per-token "Check status" button in the pool |
+| v89.6 | 11-05 | Two NameError-always-500 endpoints fixed; panel status system rebuilt (quarantine reasons persisted, five states) |
+| v89.5 | 11-05 | Bare-JSON tool calls deterministically auto-repaired (four gates, zero extra round-trips) |
+| v89.4 | 11-05 | Bare-JSON tool-call self-healing (diagnostic continuation; normal replies byte-identical) |
+| v89.3 | 11-04 | Zero false quarantines: auth-worded soft evidence no longer punished once, 3-strike threshold, success resets |
+| v89.2 | 11-04 | Duplicate-call gate wording reduced to plain factual statements |
+| v89 | 11-04 | Duplicate-call gate (intervenes only while a loop is actually happening) |
+| v88 | 11-04 | Ported upstream PR #94 hardening: business-level errors classified and trigger rotation |
+| v87 | 11-04 | Fixed the "conversation amnesia" chain (stale PoW credentials → false empty-stream → session-map poisoning) |
+| v86 | 11-01 | Admin panel redesign with deep health checks; Docker deployment files (PR #1, thanks @anch665) |
+| v85 | 11-01 | Stable release for the 10-31 protocol change: native message numbering, empty-stream auto-continuation, tool-marker leak blocking |
+| v82–v84 | 10-31 ~ 11-01 | Emergency fixes for the protocol change (test builds) |
 
 ## What this fork adds
 
-The base capabilities — the free web tier wrapped as a standard API, multi-account
-rotation, long-context rollover, the built-in dashboard — are all inherited from
-upstream and won't be repeated here. Below is only what we added on top, each
-with a concrete scenario:
+The basics — free web tier to standard API, multi-account rotation, long-context rolling continuation, built-in panel — are inherited from upstream. Only the increments are listed, effects only, no recipes:
 
-- **An answer that breaks mid-stream continues automatically** — e.g. you give
-  the model an unattended long task and go do something else; when the upstream
-  stream dies mid-answer, the server resumes writing in the SAME reply (≤2
-  retries, everything already generated is kept), and the task finishes —
-  instead of the answer silently stopping halfway and your whole task getting
-  delayed. Upstream can only resend the whole turn or surface an error.
-- **No tool-call garbage in the chat text** — e.g. the model occasionally
-  emits a truncated tool-call marker; all 16 known shapes are intercepted
-  before they reach the output, so fragments like `<tool_call>` never leak
-  into the visible reply.
-- **A token pool that survives container rebuilds** — e.g. free platforms
-  rebuild containers without warning; the token table is encrypted and backed
-  up off-site every 6 hours, and on startup an empty pool is restored
-  automatically — no re-harvesting tokens one by one.
-- **Two language lines** — `main` ships Chinese docs alongside English;
-  [`english`](https://github.com/1515asd/rh-deeperseeker/tree/english) is a
-  fully-English line (comments, logs, dashboard, docs — no other language)
-  with code identical to `main`.
+- **Half-finished answers auto-continue** — unattended long tasks survive upstream stream cuts; already-generated text is kept
+- **Tool-call fragments never leak into the body** — 16 known malformed tool-marker shapes are intercepted before output
+- **Token pool survives container rebuilds** — encrypted periodic backup plus automatic restore on empty start
+- **A gate against duplicate calls** — factual annotations injected only while a real loop is happening; normal requests untouched
+- **Panel states in plain words** — every token state explained, the "Restore" button is always safe
+- **Two language lines** — `main` ships Chinese docs; [`english`](https://github.com/1515asd/SncMax/tree/english) is fully English with identical code
 
 ## Recovering old conversations (started before the protocol change)
 
-Server-side chat state created before 2026-10-31 was invalidated by the
-protocol change. Your history is **not lost** — two ways to recover:
+Sessions started before 2026-10-31 had their server-side state invalidated by the protocol change. **History is not lost** — two recovery paths:
 
-1. **Wait**: once the old server-side chat expires (usually a few hours), send
-   a message again — the client resends the full history and memory rebuilds.
-2. **Or delete it now**: on the DeepSeek website, find that conversation,
-   delete it, then message again — a fresh server-side chat is created and the
-   full history is resent.
+1. **Wait**: once the old session expires (usually hours), send a new message; the client re-sends full history automatically and memory rebuilds
+2. **Impatient**: log into the DeepSeek web app, delete that conversation, then send a message to rebuild
 
-## Quickstart
+## Quick start
 
-**New here?** Read the **[User Guide](docs/GUIDE.md)** — a plain-language
-walkthrough covering setup, the dashboard, how it works, and the FAQ. Also in
-[简体中文](docs/GUIDE.zh-CN.md).
+**First time? Read the [usage guide](docs/GUIDE.md)** — plain-language install, panel, concepts, and FAQ. Chinese version: [docs/GUIDE.zh-CN.md](docs/GUIDE.zh-CN.md).
 
-Local:
+Local run:
 
 ```bash
-git clone https://github.com/1515asd/rh-deeperseeker.git
-cd rh-deeperseeker
+git clone https://github.com/1515asd/SncMax.git
+cd SncMax
 python3 -m venv env && source env/bin/activate
 pip install -r requirements.txt
-cp .env.example .env   # fill in your values first
+cp .env.example .env   # fill in config before starting
 python3 app.py
 ```
 
@@ -135,78 +106,71 @@ cp .env.example .env
 docker compose up -d          # or podman-compose up -d
 ```
 
-Dashboard: `http://localhost:4000/`
+Panel: `http://localhost:4000/`
 
-> Free Pterodactyl-style hosts: the panel injects `SERVER_PORT` while this app
-> reads `PORT`, so start with `PORT=$SERVER_PORT python app.py`. The `wasm/`
-> directory must be deployed in full; point `DB_PATH` at a persistent volume to
-> keep the token pool across container rebuilds.
+> Free hosting platforms (Pterodactyl family): the panel injects `SERVER_PORT`, so start with `PORT=$SERVER_PORT python app.py`; the `wasm/` directory must be deployed in full; point `DB_PATH` at a persistent volume to keep the token pool across rebuilds.
 
 ## Configuration (`.env`)
 
-| Variable | Description | Default |
+| Variable | Meaning | Default |
 |---|---|---|
-| `DEEPSEEKER_API_KEY` | Bearer API key required to access endpoints | `dseeker` |
-| `DEEPSEEKER_ADMIN_USER` | Dashboard login username | `admin` |
-| `DEEPSEEKER_ADMIN_PASSWORD` | Dashboard login password | `admin` |
-| `HOST` | Bind address (`127.0.0.1` local only, `0.0.0.0` expose) | `127.0.0.1` |
+| `DEEPSEEKER_API_KEY` | Bearer key required by the API (more can be added from the panel) | `dseeker` |
+| `DEEPSEEKER_ADMIN_USER` | Panel username | `admin` |
+| `DEEPSEEKER_ADMIN_PASSWORD` | Panel password | `admin` |
+| `HOST` | Listen address (`127.0.0.1` local only, `0.0.0.0` open) | `127.0.0.1` |
 | `PORT` | Server port | `4000` |
-| `DEEPSEEKER_MAX_HISTORY_TOKENS` | History-injection cap on first-message prompt builds | `24000` |
+| `DEEPSEEKER_MAX_HISTORY_TOKENS` | History injection cap for the first message | `24000` |
 | `DEEPSEEKER_MAX_TOOL_RESULT_TOKENS` | Tool-result injection cap | `12000` |
-| `DEEPSEEKER_MEMORY_LIMIT_TOKENS` | Remembered-context limit that triggers rollover | `393228` |
+| `DEEPSEEKER_MEMORY_LIMIT_TOKENS` | Memory cap before rolling continuation | `393228` |
 | `DEEPSEEKER_MAX_OUTPUT_TOKENS` | Per-response output cap | `8192` |
 | `DEEPSEEKER_MAX_SUMMARY_TOKENS` | Handoff-summary budget | `4096` |
 
-## Auth token setup
+## Getting a token
 
-1. Open a private window and log in at `chat.deepseek.com`.
-2. Extract the token — pick the method for your device:
-   - **Desktop / Android (devtools)**: console (F12) →
-     `JSON.parse(localStorage.getItem("userToken")).value`
-   - **iPhone / iPad (Safari bookmarklet)**: Safari won't run `javascript:`
-     typed into the address bar — bookmark any page, edit the bookmark, replace
-     its address with the code below, then tap it on a logged-in
-     `chat.deepseek.com` page to copy the token:
+1. Log into `chat.deepseek.com` in an incognito window (new devices may require an email OTP — that's the official flow)
+2. Extract the token (pick one):
+   - **Desktop / Android (with dev tools)**: run `JSON.parse(localStorage.getItem("userToken")).value` in the F12 console
+   - **iPhone / iPad (Safari bookmarklet)**: Safari cannot run `javascript:` directly — bookmark any page, edit the bookmark, replace its URL with the snippet below, then tap it while on the logged-in `chat.deepseek.com` page:
 
    ```javascript
    javascript:(function(){var t='';try{var r=localStorage.getItem('userToken');if(r){try{t=JSON.parse(r).value||r;}catch(e){t=r;}}}catch(e){alert('Read failed: '+e.message);return;}if(!t||t.length<20){alert('No userToken found.');return;}var a=document.createElement('textarea');a.value=t;a.style.cssText='position:fixed;left:-9999px';document.body.appendChild(a);a.select();a.setSelectionRange(0,999999);document.execCommand('copy');a.remove();alert('Copied. length '+t.length+'\n'+t.substring(0,12)+'...');})();
    ```
 
-3. Paste the token into the dashboard (`/dashboard`), close the private window.
+3. Paste the token into the panel (`/dashboard`), close the incognito window
 
-## Token lifetime & dashboard states (plain language)
+## Token lifetime & panel states (plain words)
 
-**When do tokens expire?** Unpredictably — DeepSeek's server decides, and there is no way to know in advance. When it happens, clients get `401` (with `INVALID_TOKEN`) or `503 No tokens available`, and the dashboard state column shows "Likely expired". The fix is to **extract a fresh token, add it, and delete the old one** — pressing "Restore" will not help; an expired token stays dead.
+**When do tokens expire?** Whenever DeepSeek's server decides — unknowable from here. Expired tokens surface as client `401` (incl. `INVALID_TOKEN`) or `503 No tokens available`, with the panel showing "likely expired". **Extract a new token, add it, delete the old one** — the "Restore" button won't help; a dead token is dead.
 
-**What do the dashboard states mean?**
+**What do panel states mean?**
 
 | State | Meaning | What to do |
 |---|---|---|
-| 🟢 Active | Working normally | Nothing |
-| 🔵 Cooling down | Requests came too fast, brief pause | Recovers automatically, no action needed |
-| 🟠 Muted (confirmed) | DeepSeek explicitly reports the account is muted (with unmute time) | The token cannot send messages until the mute expires — no action needed; press "Restore" after the mute ends |
-| 🟠 Likely muted | Account probably temporarily restricted | Wait out the mute, then press "Restore"; if the account chats fine on the website, it was a false positive — just press "Restore" |
-| 🔴 Likely expired | Token dead (expired or logged out) | Extract a fresh token, add it, delete the old one; "Restore" won't help |
-| 🔴 Quarantined | Left rotation for another reason (see the note column) | Press "Restore" once the upstream is healthy; when unsure, verify first as described above |
+| 🟢 Normal | Working | Nothing |
+| 🔵 Cooling | Rate-limited, resting | Recovers automatically |
+| 🟠 Confirmed muted | DeepSeek explicitly reported the account muted (with end time) | Wait it out, then "Restore" |
+| 🟠 Likely muted | Account suspected temporarily restricted | "Restore" after the ban lifts; if the web app chats fine, it was a false positive — just "Restore" |
+| 🔴 Likely expired | Token dead (expired or logged out) | Extract a new one, add, delete the old; "Restore" won't help |
+| 🔴 Quarantined | Left rotation for another reason (see the note column) | "Restore" once upstream is confirmed healthy |
 
-**Can't tell expired from muted?** Press the "**Probe tokens**" button under the token pool — it asks DeepSeek directly for each token's real status (healthy / muted until X / invalidated) and auto-quarantines confirmed-muted tokens. You can also log into `chat.deepseek.com` with that account: a re-login prompt means expired; a mute notice when sending a message means muted; normal chatting means false positive. The "Restore" button is always safe — a truly dead token simply re-quarantines automatically, no harm done.
+**Can't tell expired from muted?** Use the "**Check status**" button — it asks DeepSeek directly about each token (normal / muted until X / revoked) and auto-quarantines confirmed mutes. Or log into `chat.deepseek.com`: re-login prompt = expired; mute popup = muted; chatting fine = false positive. The "Restore" button is always safe — a truly dead token gets re-quarantined automatically.
 
-**Prompt enhancement toggle** (dashboard "Features" section): when a client sends an effort level such as `reasoning_effort=max`, an extra "think carefully, verify from angles" instruction is attached, giving deeper answers at the cost of a bit of latency and tokens. Toggle it in the dashboard anytime — effective immediately; when off, behavior is byte-identical to the previous release.
+**Prompt-enhance switch** (panel "Feature switches"): with `reasoning_effort=max`-style requests, an extra "think slowly, verify from angles" instruction is appended — deeper answers, slightly slower, more tokens. Toggleable anytime; off = byte-identical to the old behavior.
 
 ## API endpoints
 
-- **OpenAI-compatible**: `http://localhost:4000/v1` — `/v1/chat/completions` (streaming & non-streaming), `/v1/responses`, `/v1/models`, `/v1/files`
+- **OpenAI-compatible**: `http://localhost:4000/v1` — `/v1/chat/completions` (streaming/non-streaming), `/v1/responses`, `/v1/models`, `/v1/files`
 - **Anthropic-compatible**: `http://localhost:4000` — `/v1/messages`, `/v1/files/upload`
-- **Model**: `v4.1flash` — the single default model (vision-capable). Whatever `model` value the client sends is normalized to it; `/v1/models` also lists `anthropic/claude-v4.1flash` for Claude Desktop auto-discovery.
+- **Model**: `v4.1flash` (the single default, native vision). Any `model` value is normalized to it; `/v1/models` also lists `anthropic/claude-v4.1flash` for Claude Desktop discovery
 
 ## Disclaimer
 
-⚠️ Automated use violates DeepSeek's Terms of Use. This project is not
-affiliated with DeepSeek. Use a dedicated throwaway account, never your
-personal one; accounts may be banned at any time. Use responsibly, personal
-purposes only.
+⚠️ Automated use violates DeepSeek's terms of service. This project is not affiliated with DeepSeek. Use a dedicated throwaway account, never your personal one; accounts may be banned at any time, at your own risk. Don't abuse it, personal use only.
 
 ## License
 
-MIT — see [LICENSE](LICENSE). Copyright (c) 2026 AmanCode22 (upstream author).
-This fork's improvements are released under the same MIT license.
+MIT — see [LICENSE](LICENSE). Copyright belongs to upstream author AmanCode22; this fork's improvements are released under the same license.
+
+## Appendix · About the device fingerprint (optional, display only)
+
+Upstream's **login endpoint** enforces device-fingerprint validation for the android-protocol login (only android-native SDK output is accepted; short browser-SDK ids are rejected) — this only affects which login route you pick, not how this project runs. The fingerprint field in the panel is **for filing/display only**: it helps you tell tokens apart and is never sent with requests. **Leaving it empty is perfectly fine; there is no official enforcement against it. Feel free to skip it.**

@@ -2,28 +2,65 @@
 <html lang="zh-CN">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
     <title>{% block title %}DeeperSeeker{% endblock %}</title>
+    <script>
+        /* 主题（v90.5）：localStorage auto/light/dark，首帧前应用防闪白 */
+        (() => {
+            const t = localStorage.getItem("ds-theme") || "auto";
+            if (t === "dark" || (t === "auto" && matchMedia("(prefers-color-scheme: dark)").matches))
+                document.documentElement.dataset.theme = "dark";
+        })();
+    </script>
     <style>
+        /* ── v90.5 设计系统：仿 Apple 视觉语言 ──
+           准据：HIG Motion（动效参数）+ apple.com 视觉 tokens
+           （#0071e3 蓝 / #1d1d1f 墨 / #fbfbfd 面 / 12px 圆角 / pill）。
+           动画只动 transform/opacity（合成层，零重排），reduced-motion 全关。 */
         :root{
-            --font:-apple-system,BlinkMacSystemFont,"SF Pro","Helvetica Neue",Helvetica,Arial,sans-serif;
-            --blue:#007aff;--bg:#f5f5f7;--glass:hsla(0,0%,100%,.8);
-            --p1:rgba(0,0,0,.85);--p2:rgba(0,0,0,.5);--div:rgba(0,0,0,.12);
+            --font:-apple-system,BlinkMacSystemFont,"SF Pro Text","PingFang SC","Helvetica Neue",sans-serif;
+            --blue:#0071e3;--blue-h:#0066cc;--blue-soft:rgba(0,113,227,.10);
+            --green:#28cd41;--orange:#ff9500;--red:#ff3b30;--gray:#86868b;
+            --bg:#f5f5f7;--card:#ffffff;--card-2:#fbfbfd;--glass:hsla(0,0%,100%,.75);
+            --p1:#1d1d1f;--p2:rgba(29,29,31,.56);--p3:rgba(29,29,31,.32);
+            --div:rgba(0,0,0,.10);--div-2:rgba(0,0,0,.055);
+            --sh:0 0 0 .5px rgba(0,0,0,.05),0 2px 12px rgba(0,0,0,.05);
+            --sh-hover:0 10px 36px rgba(0,0,0,.12);
+            --r-s:8px;--r-m:12px;--r-l:18px;--r-full:100px;
+            --ease:cubic-bezier(.25,.1,.25,1);
         }
-        @media(prefers-color-scheme:dark){:root{
-            --blue:#0a84ff;--bg:#151515;--glass:rgba(30,30,30,.8);
-            --p1:rgba(255,255,255,.85);--p2:rgba(255,255,255,.55);--div:rgba(255,255,255,.1);
-        }}
-        body{background:var(--bg);color:var(--p1);font-family:var(--font);margin:0;
-             -webkit-font-smoothing:antialiased}
+        html[data-theme="dark"]{
+            --blue:#2997ff;--blue-h:#5ab1ff;--blue-soft:rgba(41,151,255,.15);
+            --green:#32d74b;--orange:#ff9f0a;--red:#ff453a;--gray:#98989d;
+            --bg:#0e0e10;--card:#1b1b1d;--card-2:#242426;--glass:rgba(24,24,26,.75);
+            --p1:#f5f5f7;--p2:rgba(245,245,247,.55);--p3:rgba(245,245,247,.30);
+            --div:rgba(255,255,255,.12);--div-2:rgba(255,255,255,.07);
+            --sh:0 0 0 .5px rgba(255,255,255,.09),0 2px 12px rgba(0,0,0,.45);
+            --sh-hover:0 10px 36px rgba(0,0,0,.6);
+        }
+        *{box-sizing:border-box}
+        body{background:var(--bg);color:var(--p1);font-family:var(--font);font-size:14px;
+             line-height:1.5;margin:0;-webkit-font-smoothing:antialiased;
+             transition:background .3s var(--ease),color .3s var(--ease)}
         nav{position:sticky;top:0;z-index:100;background:var(--glass);
-            -webkit-backdrop-filter:saturate(240%) blur(60px);backdrop-filter:saturate(240%) blur(60px);
-            border-bottom:.5px solid var(--div);padding:14px 30px;display:flex;align-items:center;gap:16px}
-        nav a{color:var(--blue);text-decoration:none;font-size:14px}
-        nav a:hover{opacity:.75}
-        nav .sep{color:var(--p2);opacity:.5}
-        nav .brand{margin-left:auto;color:var(--p2);font-weight:600;letter-spacing:-.01em}
-        main{max-width:1120px;margin:0 auto;padding:34px 30px 60px}
+            -webkit-backdrop-filter:saturate(180%) blur(20px);backdrop-filter:saturate(180%) blur(20px);
+            border-bottom:.5px solid var(--div);padding:12px 28px;display:flex;
+            align-items:center;gap:18px}
+        nav a{color:var(--blue);text-decoration:none;font-size:14px;transition:opacity .15s var(--ease)}
+        nav a:hover{opacity:.7}
+        nav .sep{color:var(--div);font-size:12px}
+        nav .brand{margin-left:auto;color:var(--p2);font-weight:600;letter-spacing:-.01em;font-size:13px}
+        .theme-btn{background:none;border:0;cursor:pointer;color:var(--p2);font-size:15px;
+                   padding:6px 10px;border-radius:var(--r-full);transition:background .15s var(--ease)}
+        .theme-btn:hover{background:var(--blue-soft)}
+        main{max-width:1080px;margin:0 auto;padding:30px 28px 64px}
+        /* 入场：一次 fade-up（450ms，HIG 转场档）；卡片 stagger 见各页 */
+        .anim-in{animation:fadeInUp .45s var(--ease) both}
+        @keyframes fadeInUp{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:none}}
+        @media (prefers-reduced-motion: reduce){
+            *,*::before,*::after{animation-duration:.01ms!important;animation-iteration-count:1!important;
+                transition-duration:.01ms!important}
+        }
     </style>
     {% block head %}{% endblock %}
 </head>
@@ -32,10 +69,24 @@
         <a href="/">仪表盘</a>
         <span class="sep">|</span>
         <a href="/logout">退出登录</a>
+        <button class="theme-btn" onclick="cycleTheme()" id="theme-btn" title="切换主题">◐</button>
         <span class="brand">DeeperSeeker</span>
     </nav>
-    <main>
+    <main class="anim-in">
         {% block content %}{% endblock %}
     </main>
+    <script>
+        /* 主题三态轮换：auto → light → dark → auto */
+        function cycleTheme(){
+            const order = ["auto","light","dark"];
+            const cur = localStorage.getItem("ds-theme") || "auto";
+            const next = order[(order.indexOf(cur)+1) % order.length];
+            localStorage.setItem("ds-theme", next);
+            if (next === "dark" || (next === "auto" && matchMedia("(prefers-color-scheme: dark)").matches))
+                document.documentElement.dataset.theme = "dark";
+            else
+                delete document.documentElement.dataset.theme;
+        }
+    </script>
 </body>
 </html>

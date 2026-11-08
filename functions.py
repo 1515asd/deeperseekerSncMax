@@ -113,6 +113,11 @@ def get_db():
         conn.row_factory = sqlite3.Row
         try:
             conn.execute("PRAGMA journal_mode=WAL")
+            # WAL 下 NORMAL：commit 不再 fsync 等盘（实测 1.66ms → 0.01ms，
+            # 全速迸发主杠杆）。进程崩溃时 WAL 仍完整；只有整机断电才可能
+            # 丢最后一条 commit——对会话/用量/rolling 缓存完全可接受，
+            # 对话真值在官方侧，丢了下一轮重发即可。
+            conn.execute("PRAGMA synchronous=NORMAL")
         except Exception:
             pass
         _DB_TLS.conn = conn
@@ -226,6 +231,18 @@ def init_db():
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_usage_day_key ON usage(day, key_alias)"
     )
+    # [v90.5] 多 Key 支持：默认 key（DEEPSEEKER_API_KEY/生成的）始终有效，
+    # 此表存放面板追加的额外客户端 Key。明文存储与令牌池的 auth_token
+    # 同一安全级别（面板是唯一持有者）；用量统计按掩码 key 分维度，
+    # 多 Key 天然兼容（usage 表 schema 不动）。
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS api_keys (
+            key TEXT PRIMARY KEY,
+            alias TEXT NOT NULL DEFAULT '',
+            created_ts REAL NOT NULL,
+            disabled INTEGER NOT NULL DEFAULT 0
+        );
+    """)
     existing_session_cols = {row[1] for row in conn.execute("PRAGMA table_info(sessions)").fetchall()}
     if "last_used" not in existing_session_cols:
         conn.execute("ALTER TABLE sessions ADD COLUMN last_used REAL")
@@ -1151,6 +1168,44 @@ def usage_by_day_key(since_ts=0.0):
             }
         )
     return out
+
+
+# ============ [v90.5] 多 Key 管理（面板追加的客户端凭据） ============
+
+def list_api_keys():
+    conn = get_db()
+    rows = conn.execute(
+        "SELECT key, alias, created_ts, disabled FROM api_keys "
+        "ORDER BY created_ts ASC").fetchall()
+    conn.close()
+    return [{"key": r["key"], "alias": r["alias"],
+             "created_ts": r["created_ts"], "disabled": bool(r["disabled"])}
+            for r in rows]
+
+
+def add_api_key(key, alias=""):
+    conn = get_db()
+    conn.execute(
+        "INSERT INTO api_keys (key, alias, created_ts, disabled) VALUES (?, ?, ?, 0) "
+        "ON CONFLICT(key) DO UPDATE SET alias=excluded.alias, disabled=0",
+        (str(key), str(alias or ""), time.time()))
+    conn.commit()
+    conn.close()
+
+
+def delete_api_key(key):
+    conn = get_db()
+    conn.execute("DELETE FROM api_keys WHERE key = ?", (str(key),))
+    conn.commit()
+    conn.close()
+
+
+def set_api_key_disabled(key, disabled):
+    conn = get_db()
+    conn.execute("UPDATE api_keys SET disabled = ? WHERE key = ?",
+                 (1 if disabled else 0, str(key)))
+    conn.commit()
+    conn.close()
 
 
 # ============ [v77 PR#67 移植] 上下文超限错误分类器 ============

@@ -2,28 +2,48 @@
 {% block title %}登录 - DeeperSeeker{% endblock %}
 {% block content %}
 <style>
-  .login-card{background:var(--card,#fff);border-radius:17px;box-shadow:inset 0 0 0 1px rgba(255,255,255,.05),
-      0 0 0 .5px rgba(0,0,0,.12),0 4px 24px rgba(0,0,0,.08);padding:38px 34px;max-width:360px;margin:9vh auto 0}
-  @media(prefers-color-scheme:dark){.login-card{box-shadow:inset 0 0 0 1px rgba(255,255,255,.05),
-      0 0 0 .5px rgba(0,0,0,.4),0 4px 24px rgba(0,0,0,.35)}}
-  .login-card h1{font-size:22px;font-weight:700;letter-spacing:-.02em;margin:0 0 4px}
-  .login-card .hint{color:var(--p2);font-size:13px;margin:0 0 22px}
-  .login-card input{width:100%;margin-bottom:14px}
-  .login-card button{width:100%;padding:11px;font-size:14px;border-radius:9px}
-  .login-card .err{color:#ff3b30;font-size:13px;margin:0 0 14px}
-  @media(prefers-color-scheme:dark){.login-card{background:#1f1f1f}}
-  @media(prefers-color-scheme:light){.login-card{background:#fff}}
+  .login-wrap{min-height:78vh;display:flex;align-items:center;justify-content:center}
+  .login-card{background:var(--card);border-radius:20px;box-shadow:var(--sh);
+      padding:42px 38px;max-width:380px;width:100%;
+      animation:cardIn .5s var(--ease) both}
+  @keyframes cardIn{from{opacity:0;transform:translateY(14px) scale(.98)}to{opacity:1;transform:none}}
+  .login-card.err-shake{animation:cardIn .5s var(--ease) both,shake .4s var(--ease) .5s}
+  @keyframes shake{0%,100%{transform:none}25%{transform:translateX(-7px)}50%{transform:translateX(6px)}75%{transform:translateX(-3px)}}
+  .login-mark{width:52px;height:52px;border-radius:14px;background:linear-gradient(160deg,var(--blue),#6f42ff);
+      margin:0 auto 16px;display:flex;align-items:center;justify-content:center;
+      color:#fff;font-size:24px;font-weight:700;box-shadow:0 6px 20px rgba(0,113,227,.30)}
+  .login-card h1{font-size:24px;font-weight:700;letter-spacing:-.02em;margin:0;text-align:center}
+  .login-card .hint{color:var(--p2);font-size:13px;margin:6px 0 26px;text-align:center}
+  .field{position:relative;margin-bottom:14px}
+  .login-card input{width:100%;padding:13px 16px;font-size:15px;border-radius:var(--r-m);
+      background:var(--card-2);border:.5px solid var(--div);color:var(--p1);
+      font-family:var(--font);transition:border-color .2s var(--ease),box-shadow .2s var(--ease),background .2s var(--ease)}
+  .login-card input:focus{outline:0;border-color:var(--blue);
+      box-shadow:0 0 0 4px var(--blue-soft);background:var(--card)}
+  .login-card button{width:100%;padding:13px;font-size:15px;font-weight:600;
+      border-radius:var(--r-full);border:0;cursor:pointer;background:var(--blue);color:#fff;
+      font-family:var(--font);margin-top:4px;
+      transition:background .2s var(--ease),transform .12s var(--ease)}
+  .login-card button:hover{background:var(--blue-h)}
+  .login-card button:active{transform:scale(.97)}
+  .login-card .err{color:var(--red);font-size:13px;margin:0 0 14px;text-align:center;
+      animation:errIn .25s var(--ease) both}
+  @keyframes errIn{from{opacity:0;transform:translateY(-4px)}to{opacity:1;transform:none}}
+  .login-card .note{color:var(--p3);font-size:12px;margin:16px 0 0;text-align:center}
+  @media (prefers-reduced-motion: reduce){.login-card,.login-card.err-shake{animation:none}}
 </style>
-<div class="login-card">
-    <h1>登录</h1>
-    <p class="hint">DeeperSeeker 管理面板</p>
-    {% if error %}
-    <p class="err">{{ error }}</p>
-    {% endif %}
+<div class="login-wrap">
+  <div class="login-card{% if error %} err-shake{% endif %}">
+    <div class="login-mark">D</div>
+    <h1>DeeperSeeker</h1>
+    <p class="hint">管理面板登录</p>
+    {% if error %}<p class="err">{{ error }}</p>{% endif %}
     <form method="post" action="/login">
-        <input type="text" name="username" placeholder="用户名" required autocomplete="username">
-        <input type="password" name="password" placeholder="密码" required autocomplete="current-password">
-        <button type="submit">登录</button>
+        <div class="field"><input type="text" name="username" placeholder="用户名" required autocomplete="username"></div>
+        <div class="field"><input type="password" name="password" placeholder="密码" required autocomplete="current-password"></div>
+        <button type="submit">登 录</button>
     </form>
+    <p class="note">登录后 5 天内免登录（免打扰期限由项目设定）</p>
+  </div>
 </div>
 {% endblock %}
