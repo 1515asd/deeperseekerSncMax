@@ -19,8 +19,8 @@ In one line: **the free web-tier quota with an official-API developer experience
 ### 1. Install and start
 
 ```bash
-git clone https://github.com/1515asd/rh-deeperseeker.git
-cd rh-deeperseeker
+git clone https://github.com/1515asd/deeperseekerSncMax.git
+cd deeperseekerSncMax
 python3 -m venv deeperseeker_env
 source deeperseeker_env/bin/activate        # Windows: deeperseeker_env\Scripts\activate
 pip install -r requirements.txt
@@ -50,7 +50,7 @@ For the OpenAI flavor (most tools use this):
 
 - **Base URL**: `http://your-host:4000/v1`
 - **API key**: the `DEEPSEEKER_API_KEY` you set in `.env`
-- **Model**: `deepseek-v4.1-flash` (or anything listed by `/v1/models`)
+- **Model**: `v4.1flash` (the single default; any model value is normalized to it)
 
 Anthropic-flavored clients (e.g. Claude Code) use Base URL `http://your-host:4000`; everything else is the same.
 
@@ -125,4 +125,4 @@ Use throwaway accounts. Banned accounts are auto-quarantined out of the pool whi
 
 ---
 
-Questions? Open an [issue](https://github.com/1515asd/rh-deeperseeker/issues) (English or Chinese both fine). Chinese version: [GUIDE.zh-CN.md](GUIDE.zh-CN.md).
+Questions? Open an [issue](https://github.com/1515asd/deeperseekerSncMax/issues) (English or Chinese both fine). Chinese version: [GUIDE.zh-CN.md](GUIDE.zh-CN.md).
