@@ -56,7 +56,63 @@ Anthropic 兼容客户端（如 Claude Code）用 Base URL `http://你的地址:
 
 ---
 
-## 三、面板功能速览
+## 三、启用页面模式（Snc1，可选）
+
+**人话**：照第二节装完，默认跑的是老办法——服务端自己组装请求发给官方。首页说的那套「让官方页面自己发」，要额外做三件事：开一个开关、在浏览器装一个小脚本、让那个页面保持登录。三样缺一样，发消息就会一直等到超时然后报错，**不会**自动退回老办法。
+
+**术语**：这条路径叫 page mode（页面模式）。服务端只拼一个带 `q=` 与 `autosend=1` 的网址挂进待发队列，不再构造 completion 请求；配套的用户脚本 `page_mode_carrier.user.js` 从 `/page_mode/pending` 领取网址，在已登录的官方页面里用 `location.href` 加载它，由页面自己把消息发出去；服务端再用只读接口 `fetch_page` / `history_messages` 把回复读回来。
+
+### 1. 打开开关
+
+编辑 `.env`，加一行后重启服务：
+
+```bash
+DEEPSEEKER_PAGE_MODE=1
+```
+
+开关只认 `1` / `true` / `yes` / `on`，`.env.example` 里有一段注释模板。删掉这行或不设，就是老办法，其余功能一点不受影响。想调等待时长可加 `DEEPSEEKER_PAGE_TIMEOUT=300`（秒，默认 300）。
+
+### 2. 在浏览器装配套脚本
+
+`page_mode_carrier.user.js` 是用户脚本，用 Tampermonkey / Violentmonkey 之类扩展安装，只在 `https://chat.deepseek.com/*` 下运行。装之前把脚本开头两行的默认值改成你自己的：
+
+```js
+const BRIDGE = GM_getValue("BRIDGE", "http://127.0.0.1:4000");  // 服务在别的机器就换成那台的地址
+const KEY    = GM_getValue("KEY",    "dseeker");                 // 填 .env 里的 DEEPSEEKER_API_KEY
+```
+
+`KEY` 也可以在官方页面的控制台执行 `localStorage.setItem("ds_page_mode_key", "你的key")` 交给脚本兜底读取。别把真实 API Key 提交到公开仓库。
+
+### 3. 保持页面登录同一个账号
+
+浏览器打开 `https://chat.deepseek.com/`，登录**和面板里那个令牌同一个**账号，标签页保持开着（后台也行）。脚本每 4 秒来取一次待发网址，取到就跳转过去发送。浏览器登录的账号和面板令牌不是同一个，会读不到回复、一直等到超时。
+
+### 4. 验证是否生效
+
+```bash
+curl -H "Authorization: Bearer 你的KEY" http://127.0.0.1:4000/page_mode/pending
+```
+
+| 返回 | 含义 |
+|---|---|
+| `404 {"error":"page mode disabled"}` | 开关没开 |
+| `200 {"pending":[]}` | 已开启，正常 |
+| `401 {"error":"Invalid API key"}` | 脚本里的 `KEY` 填错了 |
+
+然后随便发一条消息，看浏览器那个标签页是否自动跳转并发出。
+
+### 用之前要知道的几条
+
+- **不带附件**：图片 / 文件请求会明确返回 400，页面模式只承载文字；要传附件就关掉开关走老办法。
+- **单条正文上限 800 字符**：超了会降级成只发最后一条用户消息，再超才返回 400，不会静默截断。
+- **失败不静默回退**：脚本没装、页面没登录、账号不一致、标签页关了，都会等到超时后明确报错，不会偷偷切回老办法。
+- **多轮记忆交给页面**：这条路径下上下文由官方页面自己的会话承担，服务端不再做会话映射与摘要滚动。
+
+想退回老办法：删掉 `DEEPSEEKER_PAGE_MODE=1`、重启，别的都不用动。
+
+---
+
+## 四、面板功能速览
 
 新面板是一个页面搞定全部运维：
 
@@ -71,7 +127,7 @@ Anthropic 兼容客户端（如 Claude Code）用 Base URL `http://你的地址:
 
 ---
 
-## 四、它是怎么工作的（原理，想深入再看）
+## 五、它是怎么工作的（原理，想深入再看）
 
 **人话版**：
 
@@ -91,7 +147,7 @@ Anthropic 兼容客户端（如 Claude Code）用 Base URL `http://你的地址:
 
 ---
 
-## 五、常见问题
+## 六、常见问题
 
 ### Q：升级后老对话「失忆」了？
 
@@ -115,7 +171,7 @@ Anthropic 兼容客户端（如 Claude Code）用 Base URL `http://你的地址:
 
 ---
 
-## 六、安全须知（重要）
+## 七、安全须知（重要）
 
 - 面板密码一定要改（默认 admin/admin）。
 - `DEEPSEEKER_API_KEY` 是你对外服务的钥匙，别用弱值。

@@ -56,7 +56,63 @@ Anthropic-flavored clients (e.g. Claude Code) use Base URL `http://your-host:400
 
 ---
 
-## 3. Dashboard tour
+## 3. Enabling page mode (Snc1, optional)
+
+**Plain**: after section 2 you are running the classic path — the server assembles the request to official itself. The "let official's own page send it" setup described on the front page needs three extra things: turn on a switch, install a small userscript in your browser, and keep that page logged in. Miss any one of them and a message waits until timeout and then errors — it does **not** silently fall back to the classic path.
+
+**Technical**: this path is called page mode. The server only builds a URL with `q=` and `autosend=1` and queues it; it no longer constructs a completion request. The companion userscript `page_mode_carrier.user.js` fetches pending URLs from `/page_mode/pending` and loads them via `location.href` inside the logged-in official page, so the page sends the message itself. The server then reads the reply back through the read-only `fetch_page` / `history_messages` endpoints.
+
+### 1. Turn on the switch
+
+Add one line to `.env` and restart:
+
+```bash
+DEEPSEEKER_PAGE_MODE=1
+```
+
+The switch accepts `1` / `true` / `yes` / `on`; `.env.example` has a commented template. Remove the line (or leave it unset) and you are back on the classic path — nothing else changes. To tune the wait, add `DEEPSEEKER_PAGE_TIMEOUT=300` (seconds, default 300).
+
+### 2. Install the companion userscript
+
+`page_mode_carrier.user.js` is a userscript; install it with Tampermonkey / Violentmonkey or similar. It only runs on `https://chat.deepseek.com/*`. Before installing, edit the two defaults at the top:
+
+```js
+const BRIDGE = GM_getValue("BRIDGE", "http://127.0.0.1:4000");  // use the remote host if the service runs elsewhere
+const KEY    = GM_getValue("KEY",    "dseeker");                 // your DEEPSEEKER_API_KEY from .env
+```
+
+`KEY` can also be supplied by running `localStorage.setItem("ds_page_mode_key", "your-key")` in the console on the official page — the script falls back to it. Never commit a real API key to a public repo.
+
+### 3. Keep the page logged in to the same account
+
+Open `https://chat.deepseek.com/` in your browser, log in with **the same account as the token in your dashboard**, and leave the tab open (a background tab is fine). The script polls for a pending URL every 4 seconds and navigates to it to send. If the browser account differs from the token, the reply can't be read back and the request waits until timeout.
+
+### 4. Verify
+
+```bash
+curl -H "Authorization: Bearer YOUR_KEY" http://127.0.0.1:4000/page_mode/pending
+```
+
+| Response | Meaning |
+|---|---|
+| `404 {"error":"page mode disabled"}` | switch is off |
+| `200 {"pending":[]}` | on and healthy |
+| `401 {"error":"Invalid API key"}` | `KEY` in the script is wrong |
+
+Then send any message and watch the browser tab navigate and send it.
+
+### Things to know before you use it
+
+- **No attachments**: image / file parts are rejected with an explicit 400 — page mode carries text only. Turn the switch off to send attachments.
+- **800-character cap per prompt**: longer input degrades to the last user message; only if that still exceeds the cap does it return 400. Nothing is silently truncated.
+- **No silent fallback**: script missing, page logged out, account mismatch, or tab closed all end in an explicit error after timeout, never a quiet switch back to the classic path.
+- **Multi-turn memory lives in the page**: on this path the official page's own chat carries the context; the server's session mapping and summary rollover are not involved.
+
+To go back: delete `DEEPSEEKER_PAGE_MODE=1`, restart, and nothing else needs changing.
+
+---
+
+## 4. Dashboard tour
 
 One page covers all operations:
 
@@ -71,7 +127,7 @@ Everything auto-refreshes every 10 seconds. Light/dark follows your system theme
 
 ---
 
-## 4. How it works (internals — optional reading)
+## 5. How it works (internals — optional reading)
 
 **Plain version**:
 
@@ -91,7 +147,7 @@ Everything auto-refreshes every 10 seconds. Light/dark follows your system theme
 
 ---
 
-## 5. FAQ
+## 6. FAQ
 
 ### Q: My old conversations "lost their memory" after upgrading
 
@@ -115,7 +171,7 @@ Use throwaway accounts. Banned accounts are auto-quarantined out of the pool whi
 
 ---
 
-## 6. Security notes (important)
+## 7. Security notes (important)
 
 - Change the dashboard password (default admin/admin).
 - `DEEPSEEKER_API_KEY` is the key to your service — don't use a weak value.

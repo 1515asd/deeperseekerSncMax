@@ -18,7 +18,7 @@ streaming, tool calling, and long-context session management out of the box.
 
 </div>
 
-> **Snc1 · Current release**: the method change is done and usage stays the same — log in via your browser, grab the token, paste it into the dashboard. Details aren't spelled out here; the code itself is the most complete documentation.
+> **Snc1 · Current release**: the method change is done and usage stays the same — log in via your browser, grab the token, paste it into the dashboard. For how to enable page mode and how it works, see the [User Guide](docs/GUIDE.md).
 
 ## What Snc1 brings
 
@@ -27,6 +27,8 @@ streaming, tool calling, and long-context session management out of the box.
 - **A brand-new panel** — redesigned after Apple's Human Interface Guidelines: graceful low-cost animations, 5-day remember-me, multi-Key management, mobile layout; the old panel is retired
 - **Multi-Key** — add multiple client Keys from the panel, toggle or delete anytime, the default Key always works
 - **Less chasing, fewer updates** — captchas, device fingerprints, and policy changes official adds in the future barely reach this side anymore; the repo no longer needs to release with every upstream move
+
+> See the [User Guide](docs/GUIDE.md) for how to enable page mode and how it works.
 
 ## What this fork adds
 
@@ -61,7 +63,7 @@ Free-tier setups come down to three roads — **tokens** (log in yourself, paste
 
 | Version | Date | Notes |
 |---|---|---|
-| **Snc1** | 11-08 | **Method + panel generational change (current).** Sender replaced (details not spelled out here — the code itself is the most complete documentation; the full chain is still fairly complex and hard to summarize, docs will follow once it settles); full-chain speedup (own overhead -63%); panel rebuilt after Apple HIG: animations, 5-day remember-me, multi-Key, usage charts, mobile cards; fingerprint content demoted to appendix (optional), and absorbs the preceding test-period updates (performance close-out, super panel) |
+| **Snc1** | 11-08 | **Method + panel generational change (current).** Sender replaced (how to enable it and how it works are in the User Guide; the send step is handed to the logged-in official page itself); full-chain speedup (own overhead -63%); panel rebuilt after Apple HIG: animations, 5-day remember-me, multi-Key, usage charts, mobile cards; fingerprint content demoted to appendix (optional), and absorbs the preceding test-period updates (performance close-out, super panel) |
 | v90.3 | 11-07 | Thinking + body output restored: official now splits a thinking reply into fragments plus a whole-packet snapshot the old parser ignored, swallowing the body into the thinking box. `DEEPSEEKER_FRAGMENT_FIX=0` reverts |
 | v90.2 | 11-07 | Follow-up turns must carry the `shumei_device_id` key (missing = instant empty reply); empty answers no longer cached by the duplicate guard |
 | v90.1 | 11-07 | Device-fingerprint bookkeeping (panel-layer only); Quick-Instructions tutorial replaced by the verified browser-login + bookmarklet route |
