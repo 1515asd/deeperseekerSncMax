@@ -109,6 +109,7 @@ banned = [
     "details not spelled out here", "rh-deeperseeker", "cd SncMax",
     "deepseek-v4.1-flash", "照着做就能跑起来", "follow along and it runs",
     "DEEPSEEKER_ALLOW_DEFAULT_ADMIN", "REFUSES to boot",
+    "refuses default credentials",
 ]
 leftovers = [f"{p.name}:{b}" for p, t in docs.items() for b in banned if b in t]
 check("已废弃/不实措辞无残留", not leftovers, ", ".join(leftovers))

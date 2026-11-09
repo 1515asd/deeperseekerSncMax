@@ -10,9 +10,11 @@ Reference combination: Python 3.11.1 + the exact pins in requirements.txt.
 from __future__ import annotations
 
 import os
+import shutil
 import socket
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.request
@@ -43,17 +45,38 @@ def status(port: int, path: str, key: str | None = None):
 
 def boot(page_mode: bool):
     port = free_port()
+    # DB_PATH decides where the main DB, the generated api_key.txt and the
+    # cookie file land (see functions.data_dir / cookie_file_path), so one
+    # value moves all three off the repo root into a throwaway directory.
+    sandbox = tempfile.mkdtemp(prefix="deeperseeker-smoke-")
     env = dict(os.environ)
+    # app.py calls load_dotenv() on the repo-root .env with override=False,
+    # which only fills in keys that are NOT already present. Pre-seed every
+    # sensitive key with a safe value instead of deleting it: deleting would
+    # let .env re-inject a developer real backup target and credentials.
     env.update({
         "HOST": "127.0.0.1",
         "PORT": str(port),
         "DEEPSEEKER_API_KEY": KEY,
         "DEEPSEEKER_ADMIN_PASSWORD": "ci-smoke-only",
+        "DB_PATH": os.path.join(sandbox, "deeperseeker.db"),
+        "DEEPSEEKER_COOKIE_PATH": os.path.join(sandbox, "aws_cookies_deepseek.json"),
+        "DEEPSEEKER_BACKUP_TARGET": "none",
+        "DEEPSEEKER_BACKUP_SECRET": "",
+        "DEEPSEEKER_BACKUP_INTERVAL": "21600",
+        "DEEPSEEKER_BACKUP_TG_BOT_TOKEN": "",
+        "DEEPSEEKER_BACKUP_TG_CHAT_ID": "",
+        "DEEPSEEKER_BACKUP_GIST_TOKEN": "",
+        "DEEPSEEKER_BACKUP_GIST_ID": "",
+        "DEEPSEEKER_BACKUP_FILE_PATH": "",
+        "DEEPSEEKER_STREAM_DEBUG": "0",
     })
     if page_mode:
         env["DEEPSEEKER_PAGE_MODE"] = "1"
     else:
-        env.pop("DEEPSEEKER_PAGE_MODE", None)
+        # Keep the key present (as "0") rather than popping it: an absent key
+        # is exactly what load_dotenv() would fill back in from a local .env.
+        env["DEEPSEEKER_PAGE_MODE"] = "0"
 
     p = subprocess.Popen(
         [sys.executable, "app.py"], cwd=ROOT, env=env,
@@ -85,6 +108,7 @@ def boot(page_mode: bool):
             p.wait(timeout=5)
         except subprocess.TimeoutExpired:
             p.kill()
+        shutil.rmtree(sandbox, ignore_errors=True)
 
 
 checks: list[bool] = []

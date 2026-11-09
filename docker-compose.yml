@@ -14,7 +14,7 @@ services:
       # anyway. Set both admin variables yourself in that case. See README
       # "Security defaults".
       - DEEPSEEKER_ADMIN_USER=${DEEPSEEKER_ADMIN_USER:-admin}
-      - DEEPSEEKER_ADMIN_PASSWORD=${DEEPSEEKER_ADMIN_PASSWORD:?Set DEEPSEEKER_ADMIN_PASSWORD in .env (P0-8 refuses default credentials on exposed binds)}
+      - DEEPSEEKER_ADMIN_PASSWORD=${DEEPSEEKER_ADMIN_PASSWORD:?Set a strong DEEPSEEKER_ADMIN_PASSWORD in .env}
     env_file:
       - path: .env
         required: false
