@@ -38,10 +38,10 @@ jobs:
       - name: Boot the service and assert documented endpoints
         run: python tools/smoke_test.py
 
-  # The Dockerfile uses python:3.13-slim. A local sandbox build of CPython
-  # 3.13.0 boot-tested the pinned deps + cold-start smoke successfully, but
-  # that is not this runner's setup-python 3.13 / PyPI environment. Keep this
-  # job non-blocking until it is verified green on GitHub Actions itself.
+  # The Dockerfile uses python:3.13-slim. Pinned deps + cold-start smoke were
+  # verified both locally (CPython 3.13.0 built from source) and on GitHub
+  # Actions: this job's install and boot steps ran green. It stays non-blocking
+  # (observation only); promoting it to a required gate is a separate decision.
   py313:
     name: Python 3.13 compatibility (observation only)
     runs-on: ubuntu-latest
