@@ -38,9 +38,10 @@ jobs:
       - name: Boot the service and assert documented endpoints
         run: python tools/smoke_test.py
 
-  # The Dockerfile uses python:3.13-slim, which cannot be boot-tested in the
-  # maintainer's environment. This job watches that base for compatibility
-  # without blocking merges. Promote it to a required job once it is green.
+  # The Dockerfile uses python:3.13-slim. A local sandbox build of CPython
+  # 3.13.0 boot-tested the pinned deps + cold-start smoke successfully, but
+  # that is not this runner's setup-python 3.13 / PyPI environment. Keep this
+  # job non-blocking until it is verified green on GitHub Actions itself.
   py313:
     name: Python 3.13 compatibility (observation only)
     runs-on: ubuntu-latest

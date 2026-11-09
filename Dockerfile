@@ -37,7 +37,11 @@ ENV DEEPSEEKER_COOKIE_PATH=/app/data/aws_cookies_deepseek.json
 ENV HOST=0.0.0.0
 ENV DEEPSEEKER_BUILD_COMMIT=${DEEPSEEKER_BUILD_COMMIT}
 
-HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 CMD curl -sf http://localhost:4000/health || exit 1
+# Liveness only: /health returns 503 until a token is configured, so probing
+# it marked every fresh install unhealthy. /login is a public page that is
+# always 200 once the process is up; upstream/token readiness is checked by
+# the dashboard deep probe (/health?deep=1), not by container liveness.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 CMD curl -sf http://localhost:4000/login || exit 1
 
 # Non-root from here on (P0-8). Rollback note: a data volume already chown'd
 # to appuser (uid 10001) also works under a root-era image of this service —
