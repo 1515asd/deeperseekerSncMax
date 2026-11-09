@@ -9,8 +9,11 @@
 # Scope, stated honestly: this pins DIRECT dependencies only. A full
 # transitive lock (uv pip compile / requirements.lock.txt) was attempted but
 # dependency resolution timed out on this network, so it remains a known gap.
-# The Dockerfile base is python:3.13-slim, which cannot be boot-tested here;
-# the "py313" CI job tracks that as a non-blocking observation job.
+# Python 3.13 was also boot-tested locally (CPython 3.13.0 built from source,
+# all 8 pins installed, compileall + consistency + cold-start smoke passed).
+# That is ONE version in a sandbox, not "every 3.x", and the "py313" CI job
+# stays a non-blocking observation job: its GitHub-runner environment
+# (setup-python 3.13 + PyPI) was not verified here.
 fastapi==0.128.2
 uvicorn==0.40.0
 aiohttp==3.13.3
