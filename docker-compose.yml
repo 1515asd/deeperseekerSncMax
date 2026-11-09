@@ -6,12 +6,13 @@ services:
       - "0.0.0.0:4000:4000"
     environment:
       - HOST=0.0.0.0
-      # P0-8: the image REFUSES to boot with the default admin/admin
-      # credentials (it cannot see your host port mapping, so an in-container
-      # 0.0.0.0 bind is treated as exposed). Set a real password in .env or
-      # in your shell environment before `docker compose up` — see README
-      # "Security defaults". DEEPSEEKER_ALLOW_DEFAULT_ADMIN=1 overrides, not
-      # recommended.
+      # The :? below aborts `docker compose up` when the password is UNSET —
+      # this is enforced by compose at the variable layer, BEFORE the container
+      # starts. The image itself does NOT refuse to boot: when run without
+      # compose (plain `docker run` / `python app.py`), app.py only logs a
+      # warning on loopback and an error on a non-loopback bind, then starts
+      # anyway. Set both admin variables yourself in that case. See README
+      # "Security defaults".
       - DEEPSEEKER_ADMIN_USER=${DEEPSEEKER_ADMIN_USER:-admin}
       - DEEPSEEKER_ADMIN_PASSWORD=${DEEPSEEKER_ADMIN_PASSWORD:?Set DEEPSEEKER_ADMIN_PASSWORD in .env (P0-8 refuses default credentials on exposed binds)}
     env_file:

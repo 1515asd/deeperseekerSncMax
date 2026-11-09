@@ -128,6 +128,10 @@ docker compose up -d          # 或 podman-compose up -d
 | `DEEPSEEKER_MAX_OUTPUT_TOKENS` | 单次响应输出上限 | `8192` |
 | `DEEPSEEKER_MAX_SUMMARY_TOKENS` | 交接摘要预算 | `4096` |
 
+> **两处容易踩的默认值**：① 上表 `dseeker` 是 `.env.example` 的预填值——按「复制为 `.env`」部署时就是它；若**不设** `DEEPSEEKER_API_KEY`（直接 `python app.py` / `docker run`、没挂 `.env`），服务会**自动生成**随机 `dsk-` 密钥写入数据目录的 `api_key.txt`（权限 0600，仅在首次启动日志打印一次），此时要从该文件取值，填 `dseeker` 会一直返回 401。② `docker compose` 会强制要求 `DEEPSEEKER_ADMIN_PASSWORD`，但直接跑代码时默认 `admin/admin` 只告警、不会拦。详见 [中文使用指南 · 安全须知](docs/GUIDE.zh-CN.md)。
+>
+> 完整配置项（备份、流式、上下文阈值等内部可调项）见 [`.env.example`](.env.example)；备份快照会加密后外发，启用前先看指南的「备份与数据外发」。
+
 ## 获取令牌
 
 1. 开无痕窗口登录 `chat.deepseek.com`（新设备可能要求邮箱验证码，属官方流程）

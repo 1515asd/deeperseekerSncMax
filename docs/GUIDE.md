@@ -49,7 +49,7 @@ Click "Add token" in the dashboard → paste → done. Adding several accounts i
 For the OpenAI flavor (most tools use this):
 
 - **Base URL**: `http://your-host:4000/v1`
-- **API key**: the `DEEPSEEKER_API_KEY` you set in `.env`
+- **API key**: the `DEEPSEEKER_API_KEY` you set in `.env`; if unset, a random `dsk-` key is generated and saved to `api_key.txt` — read it there
 - **Model**: `v4.1flash` (the single default; any model value is normalized to it)
 
 Anthropic-flavored clients (e.g. Claude Code) use Base URL `http://your-host:4000`; everything else is the same.
@@ -80,6 +80,8 @@ The switch accepts `1` / `true` / `yes` / `on`; `.env.example` has a commented t
 const BRIDGE = GM_getValue("BRIDGE", "http://127.0.0.1:4000");  // use the remote host if the service runs elsewhere
 const KEY    = GM_getValue("KEY",    "dseeker");                 // your DEEPSEEKER_API_KEY from .env
 ```
+
+> If the service uses a **generated** key (no `DEEPSEEKER_API_KEY` in `.env`), the `dseeker` default above will not work — read the `dsk-` key from `api_key.txt` in the data dir and use that instead.
 
 `KEY` can also be supplied by running `localStorage.setItem("ds_page_mode_key", "your-key")` in the console on the official page — the script falls back to it. Never commit a real API key to a public repo.
 
@@ -178,6 +180,21 @@ Use throwaway accounts. Banned accounts are auto-quarantined out of the pool whi
 - A token equals the account itself; never share it or paste it into someone else's dashboard.
 - Automated use violates DeepSeek's terms; ban risk is yours. Don't run a public relay.
 - Prefer binding to localhost (HOST=127.0.0.1); if you need remote access, put it behind a VPN or reverse proxy with HTTPS.
+- `docker compose` enforces the password at the variable layer: an unset `DEEPSEEKER_ADMIN_PASSWORD` aborts the start. Running `python app.py` / `docker run` without compose only **logs** a warning for the default `admin/admin` and still starts — change it yourself.
+
+### Backup and outbound data (off by default)
+
+`ds_backup.py` periodically packs the **token pool, sessions, file index and chat memory** from the DB, encrypts it with `DEEPSEEKER_BACKUP_SECRET`, and ships it out. The default `DEEPSEEKER_BACKUP_TARGET=none` means nothing leaves the host; setting `telegram` / `gist` / `file` does send data off-host:
+
+| Target | Required variables | Destination |
+|---|---|---|
+| `telegram` | `DEEPSEEKER_BACKUP_TG_BOT_TOKEN`, `DEEPSEEKER_BACKUP_TG_CHAT_ID` | Telegram Bot `sendDocument` |
+| `gist` | `DEEPSEEKER_BACKUP_GIST_TOKEN`, `DEEPSEEKER_BACKUP_GIST_ID` | A GitHub private Gist (create it first; the module creates one if the ID is empty) |
+| `file` | `DEEPSEEKER_BACKUP_FILE_PATH` | A local path on this host |
+
+- Every target other than `none` **requires** `DEEPSEEKER_BACKUP_SECRET` (24+ random chars); the snapshot is encrypted before upload. Lose the secret and the backup is unrecoverable.
+- `DEEPSEEKER_BACKUP_INTERVAL` defaults to 21600 seconds (6h), clamped to a minimum of 300 in code.
+- These 9 variables used to live only in the `ds_backup.py` header comment; all of them are now listed in `.env.example`. The Gist token needs the `gist` scope; never commit bot tokens or the encryption secret.
 
 ---
 
