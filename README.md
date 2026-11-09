@@ -18,9 +18,7 @@ streaming, tool calling, and long-context session management out of the box.
 
 </div>
 
-> **Snc1 · Major update**: after half a day of research, the previously abstract problem finally became concrete — one turn of thinking, and **the sending side moved**. The long list of login, disconnect, and empty-reply issues is resolved at the method level, instead of being patched one by one. Details aren't spelled out here — the code itself is the most complete documentation, so feel free to read the source; the full chain is still fairly complex and hard to summarize, and docs will follow once it settles. Usage stays the same: log in via your browser, grab the token, paste it into the dashboard.
-
-**What did the new approach buy?** In the past, every upstream tremor — captchas, device fingerprints, protocol field changes — meant an emergency release. Under the new approach those verifications happen where they were always meant to happen, so **this project barely needs to deal with them anymore**: whether already shipped or added in the future, most new verifications and policy changes won't reach this side, and the release cadence drops accordingly.
+> **Snc1 · Current release**: the method change is done and usage stays the same — log in via your browser, grab the token, paste it into the dashboard. Details aren't spelled out here; the code itself is the most complete documentation.
 
 ## What Snc1 brings
 
@@ -30,13 +28,29 @@ streaming, tool calling, and long-context session management out of the box.
 - **Multi-Key** — add multiple client Keys from the panel, toggle or delete anytime, the default Key always works
 - **Less chasing, fewer updates** — captchas, device fingerprints, and policy changes official adds in the future barely reach this side anymore; the repo no longer needs to release with every upstream move
 
+## What this fork adds
+
+Compared with upstream DeeperSeeker (AmanCode22/deeperseeker) and, for that matter, the whole DeepSeek reverse-proxy scene, we are without question the most balanced. The basics are all inherited from upstream; here we list only what we added, effects only, no recipes:
+
+- **Thinking and body each in their place, no empty replies** — official now splits a thinking reply into fragments plus a whole-packet snapshot; the body is no longer swallowed into the thinking box, and follow-up turns no longer answer empty because of a missing field
+- **Long tasks run to the end** — a half-written answer picks up where it cut off, already-generated text is kept, unattended jobs don't lose the whole run
+- **Which account works and which is limited, spelled out** — the panel marks every account normal / cooling / muted / expired with plain-word notes, "Check status" asks each one for its real state, and "Restore" is always safe
+- **Reinstall or switch machines, the pool comes back** — the token table is encrypted and backed up on a schedule; an empty pool on startup restores itself, container rebuilds lose nothing
+- **Malformed tool calls never reach the body** — the 16 known shapes of broken tool markers are intercepted before output
+- **A gate against duplicate calls** — a factual note is injected only when the same command is resent verbatim; loops are caught as they happen, normal requests are untouched
+- **Tutorials in both Chinese and English** — the panel and the guide ship in two languages, follow along and it runs
+
+And the biggest one: the entire DeepSeek reverse-proxy scene is fighting bans and detection head-on. Official keeps shipping all kinds of risk control and sending assembly parts, so every other project has to adapt again and again, hits an error halfway through a run, and then you wait for it to slowly update. Our upgrade hands the sending step back to official's own page — we are almost the same as official sending it itself. Not finding a loophole, not fighting it, we simply don't take that road.
+
+What does that get you? Your account will not be banned in the vast majority of cases, no longer thrown into head-on confrontation, and you don't need to stockpile a pile of accounts. Official keeps updating risk control and sending parts, none of this is worth trying to understand, you only need to know that you will absolutely never again hit an error halfway through a project and have to wait for other projects to slowly update and adapt their protocol — we don't need any of that. Unless official closes this road one day, or something we cannot foresee turns up; that little bit left we cannot pin down. Overall it comes down to this: your account no longer takes the hits, and you no longer need constant updates and waiting on every adaptation.
+
 ## What is this
 
 Based on upstream [`AmanCode22/deeperseeker`](https://github.com/AmanCode22/deeperseeker) (MIT), this project wraps DeepSeek's free web tier into a standard API — no official API key needed — exposing both OpenAI Chat Completions and Anthropic Messages. This repo maintains a long-term self-hosted deployment on free hosting platforms.
 
 ## Three approaches, three trade-offs
 
-Free-tier setups come down to three roads — **tokens** (log in yourself, paste into your own panel: your data, your control, but tokens need re-extracting), **browser** (a page stays open as the sender: the truest form, but your device must be always-on), and **community projects** (third-party public bridges: zero setup, but shared pools crowd, privacy is out of your hands, and they can vanish anytime). What they share: no official API key, all ride the free web tier, all bound by upstream risk control, and all deserve a throwaway account.
+Free-tier setups come down to three roads — **tokens** (log in yourself, paste into your own panel: your data, your control, but tokens need re-extracting), **browser** (a page stays open as the sender: the truest form, but your device must be always-on), and **community projects** (third-party public bridges: zero setup, but shared pools crowd, privacy is out of your hands, and they can vanish anytime). What they share: no official API key, all ride the free web tier, all deserve a throwaway account. As for risk control, we've handed the sending step back to official's own page — no more head-on confrontation, and accounts are not banned in the vast majority of cases; only if official closes this route one day, or something unforeseeable happens.
 
 ![Tokens · Browser · Community projects — comparison](docs/comparison-en.png)
 
@@ -64,17 +78,6 @@ Free-tier setups come down to three roads — **tokens** (log in yourself, paste
 | v86 | 11-01 | Admin panel redesign with deep health checks; Docker deployment files (PR #1, thanks @anch665) |
 | v85 | 11-01 | Stable release for the 10-31 protocol change: native message numbering, empty-stream auto-continuation, tool-marker leak blocking |
 | v82–v84 | 10-31 ~ 11-01 | Emergency fixes for the protocol change (test builds) |
-
-## What this fork adds
-
-The basics — free web tier to standard API, multi-account rotation, long-context rolling continuation, built-in panel — are inherited from upstream. Only the increments are listed, effects only, no recipes:
-
-- **Half-finished answers auto-continue** — unattended long tasks survive upstream stream cuts; already-generated text is kept
-- **Tool-call fragments never leak into the body** — 16 known malformed tool-marker shapes are intercepted before output
-- **Token pool survives container rebuilds** — encrypted periodic backup plus automatic restore on empty start
-- **A gate against duplicate calls** — factual annotations injected only while a real loop is happening; normal requests untouched
-- **Panel states in plain words** — every token state explained, the "Restore" button is always safe
-- **Two language lines** — `main` ships Chinese docs; [`english`](https://github.com/1515asd/deeperseekerSncMax/tree/english) is fully English with identical code
 
 ## Recovering old conversations (started before the protocol change)
 
@@ -164,7 +167,7 @@ Panel: `http://localhost:4000/`
 
 ## Disclaimer
 
-⚠️ Automated use violates DeepSeek's terms of service. This project is not affiliated with DeepSeek. Use a dedicated throwaway account, never your personal one; accounts may be banned at any time, at your own risk. Don't abuse it, personal use only.
+⚠️ Automated use violates DeepSeek's terms of service. This project is not affiliated with DeepSeek. Use a dedicated throwaway account, never your personal one. Under the new approach accounts are not banned in the vast majority of cases — only if official closes this route one day, or something we cannot foresee happens; that remaining risk is yours. Don't abuse it, personal use only.
 
 ## License
 
