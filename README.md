@@ -38,7 +38,7 @@ Compared with upstream DeeperSeeker (AmanCode22/deeperseeker) and, for that matt
 - **Reinstall or switch machines, the pool comes back** — the token table is encrypted and backed up on a schedule; an empty pool on startup restores itself, container rebuilds lose nothing
 - **Malformed tool calls never reach the body** — the 16 known shapes of broken tool markers are intercepted before output
 - **A gate against duplicate calls** — a factual note is injected only when the same command is resent verbatim; loops are caught as they happen, normal requests are untouched
-- **Tutorials in both Chinese and English** — the panel and the guide ship in two languages, follow along and it runs
+- **Tutorials in both Chinese and English** — the panel and the full guide ship in two languages, covering install, the dashboard, and the FAQ
 
 And the biggest one: the entire DeepSeek reverse-proxy scene is fighting bans and detection head-on. Official keeps shipping all kinds of risk control and sending assembly parts, so every other project has to adapt again and again, hits an error halfway through a run, and then you wait for it to slowly update. Our upgrade hands the sending step back to official's own page — we are almost the same as official sending it itself. Not finding a loophole, not fighting it, we simply don't take that road.
 
@@ -94,7 +94,7 @@ Local run:
 
 ```bash
 git clone https://github.com/1515asd/deeperseekerSncMax.git
-cd SncMax
+cd deeperseekerSncMax
 python3 -m venv env && source env/bin/activate
 pip install -r requirements.txt
 cp .env.example .env   # fill in config before starting

@@ -19,8 +19,8 @@
 ### 1. 装依赖并启动
 
 ```bash
-git clone https://github.com/1515asd/rh-deeperseeker.git
-cd rh-deeperseeker
+git clone https://github.com/1515asd/deeperseekerSncMax.git
+cd deeperseekerSncMax
 python3 -m venv deeperseeker_env
 source deeperseeker_env/bin/activate        # Windows: deeperseeker_env\Scripts\activate
 pip install -r requirements.txt
@@ -50,7 +50,7 @@ python3 app.py
 
 - **接口地址（Base URL）**：`http://你的地址:4000/v1`
 - **API Key**：`.env` 里你设置的 `DEEPSEEKER_API_KEY`
-- **模型名**：`deepseek-v4.1-flash`（或 `/v1/models` 列出的其他模型）
+- **模型名**：`v4.1flash`（唯一默认模型，客户端传什么都会归一化到它）
 
 Anthropic 兼容客户端（如 Claude Code）用 Base URL `http://你的地址:4000` 即可，其余同上。
 
@@ -125,4 +125,4 @@ Anthropic 兼容客户端（如 Claude Code）用 Base URL `http://你的地址:
 
 ---
 
-有问题去仓库提 [Issue](https://github.com/1515asd/rh-deeperseeker/issues)（英文/中文都可以）。英文版指南见 [GUIDE.md](GUIDE.md)。
+有问题去仓库提 [Issue](https://github.com/1515asd/deeperseekerSncMax/issues)（英文/中文都可以）。英文版指南见 [GUIDE.md](GUIDE.md)。
