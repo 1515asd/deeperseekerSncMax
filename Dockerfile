@@ -27,8 +27,9 @@ RUN useradd --uid 10001 --home-dir /app --no-create-home --shell /usr/sbin/nolog
 
 EXPOSE 4000
 
-# P0-2 (Day 20): stamped by release CI so the startup log states the exact
-# commit the image was built from. Defaults keep local builds honest ("-").
+# Optional build stamp: pass --build-arg DEEPSEEKER_BUILD_COMMIT=<sha> when
+# building so the startup log states the exact commit. Local builds stay
+# honest ("-"). .github/workflows/ci.yml verifies the source, not the image.
 ARG DEEPSEEKER_BUILD_COMMIT=-
 
 ENV DB_PATH=/app/data/deeperseeker.db

@@ -1,8 +1,21 @@
-fastapi
-uvicorn
-aiohttp
-python-dotenv
-deepseek-tokenizer
-wasmtime
-jinja2
-python-multipart
+# Runtime dependencies — EXACT pins for direct dependencies.
+#
+# These exact versions are the combination this service was boot-tested with
+# (Python 3.11.1, 2026-11-09): pip install + cold start + endpoint smoke test
+# (tools/smoke_test.py). Pinning stops an upstream release from silently
+# changing what a fresh `docker build` produces. To upgrade, bump a version
+# here and let .github/workflows/ci.yml re-run the smoke test first.
+#
+# Scope, stated honestly: this pins DIRECT dependencies only. A full
+# transitive lock (uv pip compile / requirements.lock.txt) was attempted but
+# dependency resolution timed out on this network, so it remains a known gap.
+# The Dockerfile base is python:3.13-slim, which cannot be boot-tested here;
+# the "py313" CI job tracks that as a non-blocking observation job.
+fastapi==0.128.2
+uvicorn==0.40.0
+aiohttp==3.13.3
+python-dotenv==1.2.1
+deepseek-tokenizer==0.3.0
+wasmtime==50.0.1
+jinja2==3.1.6
+python-multipart==0.0.21

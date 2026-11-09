@@ -1,0 +1,56 @@
+name: consistency
+
+on:
+  push:
+    branches: [main, english]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  # Pure static checks. No third-party install needed, so this job cannot be
+  # broken by an upstream dependency release.
+  consistency:
+    name: Docs / config / code consistency
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Compile every Python file
+        run: python -m compileall -q .
+      - name: Check prose against code
+        run: python tools/check_consistency.py
+
+  # Cold-start smoke on the combination that was actually boot-tested.
+  smoke:
+    name: Cold-start smoke (Python 3.11, pinned deps)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install pinned runtime dependencies
+        run: pip install -r requirements.txt
+      - name: Boot the service and assert documented endpoints
+        run: python tools/smoke_test.py
+
+  # The Dockerfile uses python:3.13-slim, which cannot be boot-tested in the
+  # maintainer's environment. This job watches that base for compatibility
+  # without blocking merges. Promote it to a required job once it is green.
+  py313:
+    name: Python 3.13 compatibility (observation only)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Install pinned runtime dependencies
+        run: pip install -r requirements.txt
+      - name: Boot the service and assert documented endpoints
+        run: python tools/smoke_test.py

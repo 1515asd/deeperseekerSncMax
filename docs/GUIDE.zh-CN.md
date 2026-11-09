@@ -49,7 +49,7 @@ python3 app.py
 以 OpenAI 兼容为例（绝大多数工具都是这个）：
 
 - **接口地址（Base URL）**：`http://你的地址:4000/v1`
-- **API Key**：`.env` 里你设置的 `DEEPSEEKER_API_KEY`
+- **API Key**：`.env` 里你设置的 `DEEPSEEKER_API_KEY`；若未设置，服务会自动生成随机 `dsk-` 密钥写入 `api_key.txt`，去那个文件取
 - **模型名**：`v4.1flash`（唯一默认模型，客户端传什么都会归一化到它）
 
 Anthropic 兼容客户端（如 Claude Code）用 Base URL `http://你的地址:4000` 即可，其余同上。
@@ -80,6 +80,8 @@ DEEPSEEKER_PAGE_MODE=1
 const BRIDGE = GM_getValue("BRIDGE", "http://127.0.0.1:4000");  // 服务在别的机器就换成那台的地址
 const KEY    = GM_getValue("KEY",    "dseeker");                 // 填 .env 里的 DEEPSEEKER_API_KEY
 ```
+
+> 若服务用的是**自动生成**的密钥（没在 `.env` 里设 `DEEPSEEKER_API_KEY`），上面的默认值 `dseeker` 就不能用——去数据目录的 `api_key.txt` 读出那串 `dsk-` 开头的密钥再填。
 
 `KEY` 也可以在官方页面的控制台执行 `localStorage.setItem("ds_page_mode_key", "你的key")` 交给脚本兜底读取。别把真实 API Key 提交到公开仓库。
 
@@ -178,6 +180,21 @@ curl -H "Authorization: Bearer 你的KEY" http://127.0.0.1:4000/page_mode/pendin
 - 令牌 = 账号本体，不要发给任何人、不要贴进别人的面板。
 - 自动化使用违反 DeepSeek 服务条款，封号风险自担；请勿搭建公共转发站。
 - 建议只绑定本机（HOST=127.0.0.1），需要远程访问时套 VPN/反向代理 + HTTPS。
+- `docker compose` 会在变量层强制：未设 `DEEPSEEKER_ADMIN_PASSWORD` 就拒绝启动；但用 `python app.py` / `docker run` 绕过 compose 时，默认 `admin/admin` **只打日志、不会拦**，务必自己改。
+
+### 备份与数据外发（默认关闭）
+
+`ds_backup.py` 会定期把数据库里的**令牌池、会话、文件索引与聊天记忆**打包，用 `DEEPSEEKER_BACKUP_SECRET` 加密后传到外部。默认 `DEEPSEEKER_BACKUP_TARGET=none`，不设置就完全不外发；一旦设为 `telegram` / `gist` / `file`，就有数据离开本机：
+
+| 目标 | 必需配置 | 去向 |
+|---|---|---|
+| `telegram` | `DEEPSEEKER_BACKUP_TG_BOT_TOKEN`、`DEEPSEEKER_BACKUP_TG_CHAT_ID` | Telegram Bot 的 `sendDocument` |
+| `gist` | `DEEPSEEKER_BACKUP_GIST_TOKEN`、`DEEPSEEKER_BACKUP_GIST_ID` | GitHub 私有 Gist（需先手动创建；未填 ID 时模块会新建） |
+| `file` | `DEEPSEEKER_BACKUP_FILE_PATH` | 本机指定路径 |
+
+- 任何非 `none` 目标都**必须**设置 `DEEPSEEKER_BACKUP_SECRET`（建议 24+ 字符随机串），快照加密后才上传；密码丢了备份就解不开。
+- 间隔 `DEEPSEEKER_BACKUP_INTERVAL` 默认 21600 秒（6 小时），代码里最小夹到 300 秒。
+- 这 9 个变量此前只写在 `ds_backup.py` 头部注释里，现已全部列进 `.env.example`。Gist token 需要 `gist` 权限，Bot Token 与加密密码都别提交进仓库。
 
 ---
 

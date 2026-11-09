@@ -129,6 +129,10 @@ Panel: `http://localhost:4000/`
 | `DEEPSEEKER_MAX_OUTPUT_TOKENS` | Per-response output cap | `8192` |
 | `DEEPSEEKER_MAX_SUMMARY_TOKENS` | Handoff-summary budget | `4096` |
 
+> **Two defaults that bite**: (1) `dseeker` above is the value pre-filled in `.env.example` — it applies when you copy that file to `.env`. If `DEEPSEEKER_API_KEY` is **not set** at all (plain `python app.py` / `docker run` with no `.env`), the service **generates** a random `dsk-` key into `api_key.txt` in the data dir (mode 0600, printed once on first boot); read it there, since `dseeker` will then return 401. (2) `docker compose` requires `DEEPSEEKER_ADMIN_PASSWORD`, but running the code directly with the default `admin/admin` only logs a warning and still starts. See the [User Guide, Security notes](docs/GUIDE.md).
+>
+> For the full variable list (backup, streaming and context tunables), see [`.env.example`](.env.example). Backup snapshots are encrypted and sent off-host — read "Backup and outbound data" in the guide before enabling it.
+
 ## Getting a token
 
 1. Log into `chat.deepseek.com` in an incognito window (new devices may require an email OTP — that's the official flow)
