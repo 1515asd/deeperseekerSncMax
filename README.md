@@ -22,17 +22,17 @@ streaming, tool calling, and long-context session management out of the box.
 
 ## What Snc1 brings
 
-- **A new approach** — problems are eliminated at the source; the old "upstream changes, everything breaks" patch cycle is gone
+- **A new approach** — the sending step is handed back to the official page itself, so we no longer go head-on against the official sending protocol
 - **Full-speed burst** — measured ~**63%** reduction in the server's own overhead (7.0ms → 2.6ms per turn); upstream latency is upstream's business, ours is now at the floor
 - **A brand-new panel** — redesigned after Apple's Human Interface Guidelines: graceful low-cost animations, 5-day remember-me, multi-Key management, mobile layout; the old panel is retired
 - **Multi-Key** — add multiple client Keys from the panel, toggle or delete anytime, the default Key always works
-- **Less chasing, fewer updates** — captchas, device fingerprints, and policy changes official adds in the future barely reach this side anymore; the repo no longer needs to release with every upstream move
+- **Less chasing, fewer updates** — when official updates its sending protocol or verifications, in most cases this side no longer needs to patch and ship a release; account risk control is a separate matter, and the ban risk is still there (see below)
 
 > See the [User Guide](docs/GUIDE.md) for how to enable page mode and how it works.
 
 ## What this fork adds
 
-Compared with upstream DeeperSeeker (AmanCode22/deeperseeker) and, for that matter, the whole DeepSeek reverse-proxy scene, we are without question the most balanced. The basics are all inherited from upstream; here we list only what we added, effects only, no recipes:
+The basics all come from upstream DeeperSeeker (AmanCode22/deeperseeker). Below is only what we added — effects only, no recipes:
 
 - **Thinking and body each in their place, no empty replies** — official now splits a thinking reply into fragments plus a whole-packet snapshot; the body is no longer swallowed into the thinking box, and follow-up turns no longer answer empty because of a missing field
 - **Long tasks run to the end** — a half-written answer picks up where it cut off, already-generated text is kept, unattended jobs don't lose the whole run
