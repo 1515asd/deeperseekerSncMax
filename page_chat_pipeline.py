@@ -17,6 +17,24 @@ logger = logging.getLogger("page_chat_pipeline")
 
 PAGE_MODE_ENV = "DEEPSEEKER_PAGE_MODE"
 PAGE_TIMEOUT_ENV = "DEEPSEEKER_PAGE_TIMEOUT"
+# [Snc2] Read-back shape alignment: optional, OFF by default. See GUIDE ch.3.
+# Page mode hands "send" to the official page, but read-back still uses the
+# Android headers from functions.get_headers(), so send/read shapes mismatch
+# within one session. This switch lets read-back use web-shaped headers (shape
+# only): token host and egress stay untouched. Effectiveness is NOT verified,
+# hence OFF by default, opt-in only, and with no silent fallback.
+PAGE_WEB_READ_ENV = "DEEPSEEKER_PAGE_WEB_READ"
+# Key set for web read-back headers (single source of truth, aligned with the adapter).
+WEB_READ_HEADER_KEYS = (
+    "accept", "accept-language", "content-type", "origin", "referer",
+    "user-agent", "authorization",
+    "sec-ch-ua", "sec-ch-ua-mobile", "sec-ch-ua-platform",
+    "sec-fetch-dest", "sec-fetch-mode", "sec-fetch-site",
+)
+READ_NEVER_HAS = ("x-ds-pow-response", "x-hif-leim")  # never present on read-back; only completion carries these
+_WEB_READ_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36")
+_WEB_READ_BASE = "https://chat.deepseek.com"
 POLL_INTERVAL_S = 2.0
 AUTOSEND_MAX_LEN = 800
 PENDING_MAX = 64
@@ -38,6 +56,38 @@ def page_timeout():
         return v if v > 0 else 300.0
     except (TypeError, ValueError):
         return 300.0
+
+
+def page_web_read_enabled():
+    """Off unless DEEPSEEKER_PAGE_WEB_READ is set; off = read-back reuses the old headers verbatim, behavior unchanged."""
+    return os.getenv(PAGE_WEB_READ_ENV, "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def web_read_headers(token):
+    """Web-shaped read-back headers: key set matches WEB_READ_HEADER_KEYS verbatim; values carry no local fingerprint.
+
+    The token is joined into authorization in memory only, never persisted.
+    Two assertions guard against drift: a wrong key set, or PoW/leim leaking in
+    (those belong to completion only, and must not appear on read-back).
+    """
+    h = {
+        "accept": "application/json",
+        "accept-language": "zh-CN,zh;q=0.9",
+        "content-type": "application/json",
+        "origin": _WEB_READ_BASE,
+        "referer": _WEB_READ_BASE + "/",
+        "user-agent": _WEB_READ_UA,
+        "authorization": "Bearer " + token,  # in-memory only
+        "sec-ch-ua": '"Chromium";v="126", "Not:A-Brand";v="24"',
+        "sec-ch-ua-mobile": "?0",
+        "sec-ch-ua-platform": '"Windows"',
+        "sec-fetch-dest": "empty",
+        "sec-fetch-mode": "cors",
+        "sec-fetch-site": "same-origin",
+    }
+    assert set(h) == set(WEB_READ_HEADER_KEYS), set(h) ^ set(WEB_READ_HEADER_KEYS)
+    assert not (set(h) & set(READ_NEVER_HAS))
+    return h
 
 
 class PageChatError(Exception):
@@ -99,10 +149,16 @@ def pending_count():
 async def _get_json(url, token, timeout_s=15.0):
     """One GET, returns (status, body); network errors are returned, not raised."""
     session = await functions.get_session()
+    # [Snc2] OFF -> reuse functions.get_headers() verbatim (legacy path, unchanged);
+    # ON -> web-shaped read-back headers. No silent "fall back to Android on failure":
+    # failures go through the existing _assert_alive()/timeout errors, so the two
+    # shapes never mix within one session.
+    headers = (web_read_headers(token) if page_web_read_enabled()
+               else functions.get_headers(token))
     try:
         async with session.get(
             url,
-            headers=functions.get_headers(token),
+            headers=headers,
             timeout=aiohttp.ClientTimeout(total=timeout_s),
         ) as resp:
             body = await resp.json(content_type=None)
