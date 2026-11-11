@@ -1,4 +1,4 @@
-"""Server-side pipeline for page mode: build the URL, register the intent, read the reply back. The send itself happens in the official page."""
+"""页面模式（page mode）服务器侧管线：生成链接、登记待发意图、读回回复；「发」这一步由官方页面自己完成。"""
 
 import asyncio
 import logging
@@ -17,6 +17,22 @@ logger = logging.getLogger("page_chat_pipeline")
 
 PAGE_MODE_ENV = "DEEPSEEKER_PAGE_MODE"
 PAGE_TIMEOUT_ENV = "DEEPSEEKER_PAGE_TIMEOUT"
+# [Snc2] 读回形态归位：可选，默认关。详见 docs/GUIDE.md 第 3 章。
+# 页模式把「发」交给官方页面，读回却仍用 functions.get_headers() 的安卓头，
+# 同一会话里发/读形态对不上。本开关让读回改穿 web 形态，只换形状，
+# 令牌宿主与出口一律不动；有效性未验证，故默认关、显式开、无静默回退。
+PAGE_WEB_READ_ENV = "DEEPSEEKER_PAGE_WEB_READ"
+# web 读回头的键集合（单一事实源，与读回适配器的键集合对齐）。
+WEB_READ_HEADER_KEYS = (
+    "accept", "accept-language", "content-type", "origin", "referer",
+    "user-agent", "authorization",
+    "sec-ch-ua", "sec-ch-ua-mobile", "sec-ch-ua-platform",
+    "sec-fetch-dest", "sec-fetch-mode", "sec-fetch-site",
+)
+READ_NEVER_HAS = ("x-ds-pow-response", "x-hif-leim")  # 读回不带，只有 completion 带
+_WEB_READ_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36")
+_WEB_READ_BASE = "https://chat.deepseek.com"
 POLL_INTERVAL_S = 2.0
 AUTOSEND_MAX_LEN = 800
 PENDING_MAX = 64
@@ -28,7 +44,7 @@ _WIP = {"PENDING", "WIP", "GENERATING", "IN_PROGRESS", "RUNNING", "CREATED", ""}
 
 
 def page_mode_enabled():
-    """Off unless DEEPSEEKER_PAGE_MODE is set."""
+    """默认关：仅当 DEEPSEEKER_PAGE_MODE 置位时启用。"""
     return os.getenv(PAGE_MODE_ENV, "").strip().lower() in ("1", "true", "yes", "on")
 
 
@@ -40,8 +56,39 @@ def page_timeout():
         return 300.0
 
 
+def page_web_read_enabled():
+    """默认关：仅当 DEEPSEEKER_PAGE_WEB_READ 置位时启用；关时读回逐字沿用旧头，行为不变。"""
+    return os.getenv(PAGE_WEB_READ_ENV, "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def web_read_headers(token):
+    """web 形态读回头：键集合 = WEB_READ_HEADER_KEYS 逐字对齐；值不含本机指纹。
+
+    令牌只在内存里拼进 authorization，绝不落盘。断言同时挡住两处漂移：
+    键集合不符、或混入 PoW/leim（那是取食物 completion 才带的，读回不该有）。
+    """
+    h = {
+        "accept": "application/json",
+        "accept-language": "zh-CN,zh;q=0.9",
+        "content-type": "application/json",
+        "origin": _WEB_READ_BASE,
+        "referer": _WEB_READ_BASE + "/",
+        "user-agent": _WEB_READ_UA,
+        "authorization": "Bearer " + token,  # 只进内存
+        "sec-ch-ua": '"Chromium";v="126", "Not:A-Brand";v="24"',
+        "sec-ch-ua-mobile": "?0",
+        "sec-ch-ua-platform": '"Windows"',
+        "sec-fetch-dest": "empty",
+        "sec-fetch-mode": "cors",
+        "sec-fetch-site": "same-origin",
+    }
+    assert set(h) == set(WEB_READ_HEADER_KEYS), set(h) ^ set(WEB_READ_HEADER_KEYS)
+    assert not (set(h) & set(READ_NEVER_HAS))
+    return h
+
+
 class PageChatError(Exception):
-    """Error carrying an HTTP status for the caller."""
+    """携带 HTTP 状态码、供调用方使用的异常。"""
 
     def __init__(self, status, detail):
         super().__init__(detail)
@@ -50,7 +97,7 @@ class PageChatError(Exception):
 
 
 def build_autosend_url(prompt, search=False, thinking=False, base=None):
-    """Build the autosend URL. Pure string construction; overlong prompts are rejected, never truncated."""
+    """构造 autosend URL，纯字符串拼接；超长 prompt 直接拒绝，绝不截断。"""
     q = (prompt or "").strip()
     if not q:
         raise PageChatError(400, "page mode: empty prompt")
@@ -84,7 +131,7 @@ def register_intent(url, prompt):
 
 
 def take_pending():
-    """Hand off all pending URLs and clear the queue."""
+    """取出全部待发 URL 并清空队列。"""
     with _pending_lock:
         out = _pending[:]
         _pending.clear()
@@ -97,12 +144,17 @@ def pending_count():
 
 
 async def _get_json(url, token, timeout_s=15.0):
-    """One GET, returns (status, body); network errors are returned, not raised."""
+    """单次 GET，返回 (status, body)；网络错误作为返回值，不抛出。"""
     session = await functions.get_session()
+    # [Snc2] 默认关 -> 逐字沿用 functions.get_headers()（老路径，行为不变）;
+    # 显式开 -> web 形态读回头。此处不做任何「失败就退回安卓头」的静默回退：
+    # 失败一律走既有 _assert_alive()/超时报错，避免两种形态混进一次会话。
+    headers = (web_read_headers(token) if page_web_read_enabled()
+               else functions.get_headers(token))
     try:
         async with session.get(
             url,
-            headers=functions.get_headers(token),
+            headers=headers,
             timeout=aiohttp.ClientTimeout(total=timeout_s),
         ) as resp:
             body = await resp.json(content_type=None)
@@ -112,7 +164,7 @@ async def _get_json(url, token, timeout_s=15.0):
 
 
 async def _assert_alive(token):
-    """Fail early when the read token is invalid or muted."""
+    """读回令牌无效或被禁言时提前失败。"""
     r = await functions.probe_token_mute(token)
     v = r.get("verdict")
     if v == "invalid":
@@ -122,7 +174,7 @@ async def _assert_alive(token):
 
 
 def _g(d, *names):
-    """Tolerant key lookup across several candidate names."""
+    """在多个候选键名间做容错查找。"""
     for n in names:
         v = d.get(n)
         if v is not None:
@@ -135,7 +187,7 @@ def _norm(s):
 
 
 def _find_dict_lists(obj, key_pred):
-    """Find lists whose items are dicts carrying one of the given keys."""
+    """找出「元素为 dict 且带指定键之一」的列表。"""
     found = []
 
     def walk(x):
@@ -173,7 +225,7 @@ def _frag_text(msg, types):
 
 
 def _locate_user_message(msgs, marker, t0):
-    """Find this turn's user message by prompt tail, falling back to timestamp."""
+    """按 prompt 尾部定位本轮用户消息，失败时回退到时间戳。"""
     best = (-1, None)
     for i, m in enumerate(msgs):
         role = str(_g(m, "role") or "").upper()
@@ -195,7 +247,7 @@ def _locate_user_message(msgs, marker, t0):
 
 
 def _locate_reply(msgs, user_idx):
-    """Find the reply via parent id, falling back to the next assistant message."""
+    """按 parent id 定位回复，失败时回退到下一条 assistant 消息。"""
     if user_idx < 0 or user_idx >= len(msgs):
         return None
     um = msgs[user_idx]
@@ -214,7 +266,7 @@ def _locate_reply(msgs, user_idx):
 
 
 def _settled(reply, unknown_status):
-    """Done when status is finished (or status is absent and a body exists)."""
+    """状态为已完成即判完成（或状态缺失但已有正文）。"""
     if reply is None:
         return False
     sv = _g(reply, "status", "message_status", "state", "gen_status")
@@ -233,7 +285,7 @@ def _settled(reply, unknown_status):
 
 
 def _log_field_observation(msgs, unknown_status):
-    """On timeout, log key names and status enums only, never message content."""
+    """超时时只记录键名与状态枚举，绝不记录消息正文。"""
     try:
         roles = sorted({str(_g(m, "role")) for m in msgs if isinstance(m, dict)})
         keys = sorted({k for m in msgs[:5] if isinstance(m, dict) for k in m.keys()})
@@ -246,7 +298,7 @@ def _log_field_observation(msgs, unknown_status):
 
 async def poll_reply(token, prompt, timeout_s=None, interval=POLL_INTERVAL_S,
                      base=None, search=False):
-    """Poll the read-only endpoints until the reply is finished; return (body, thinking)."""
+    """轮询只读端点直到回复完成，返回 (body, thinking)。"""
     timeout_s = timeout_s or page_timeout()
     base = (base or functions.UPSTREAM_BASES[0]).rstrip("/")
     deadline = time.time() + timeout_s
