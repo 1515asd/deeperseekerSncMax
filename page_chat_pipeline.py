@@ -17,11 +17,10 @@ logger = logging.getLogger("page_chat_pipeline")
 
 PAGE_MODE_ENV = "DEEPSEEKER_PAGE_MODE"
 PAGE_TIMEOUT_ENV = "DEEPSEEKER_PAGE_TIMEOUT"
-# [Snc2] 读回形态归位：可选，默认关。详见 docs/GUIDE.md 第 3 章。
-# 页模式把「发」交给官方页面，读回却仍用 functions.get_headers() 的安卓头，
-# 同一会话里发/读形态对不上。本开关让读回改穿 web 形态，只换形状，
-# 令牌宿主与出口一律不动；有效性未验证，故默认关、显式开、无静默回退。
-PAGE_WEB_READ_ENV = "DEEPSEEKER_PAGE_WEB_READ"
+# [Snc2] 读回形态归位：页面模式下读回恒用 web 形态头（无开关、无回退）。
+# 页模式把「发」交给官方页面，读回改穿 web 形态，消掉同一会话里发/读形态不一致；
+# 老路安卓头分支已移除。只换形状，令牌宿主与出口一律不动；有效性未验证。
+# 详见 docs/GUIDE.zh-CN.md 第 3.7 节。
 # web 读回头的键集合（单一事实源，与读回适配器的键集合对齐）。
 WEB_READ_HEADER_KEYS = (
     "accept", "accept-language", "content-type", "origin", "referer",
@@ -54,11 +53,6 @@ def page_timeout():
         return v if v > 0 else 300.0
     except (TypeError, ValueError):
         return 300.0
-
-
-def page_web_read_enabled():
-    """默认关：仅当 DEEPSEEKER_PAGE_WEB_READ 置位时启用；关时读回逐字沿用旧头，行为不变。"""
-    return os.getenv(PAGE_WEB_READ_ENV, "").strip().lower() in ("1", "true", "yes", "on")
 
 
 def web_read_headers(token):
@@ -146,11 +140,9 @@ def pending_count():
 async def _get_json(url, token, timeout_s=15.0):
     """单次 GET，返回 (status, body)；网络错误作为返回值，不抛出。"""
     session = await functions.get_session()
-    # [Snc2] 默认关 -> 逐字沿用 functions.get_headers()（老路径，行为不变）;
-    # 显式开 -> web 形态读回头。此处不做任何「失败就退回安卓头」的静默回退：
+    # [Snc2] 读回恒用 web 形态头：无开关、无回退；老路安卓头分支已移除。
     # 失败一律走既有 _assert_alive()/超时报错，避免两种形态混进一次会话。
-    headers = (web_read_headers(token) if page_web_read_enabled()
-               else functions.get_headers(token))
+    headers = web_read_headers(token)
     try:
         async with session.get(
             url,
