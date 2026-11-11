@@ -415,75 +415,36 @@ Then send any message and watch the browser tab navigate and send it.
 
 Delete `DEEPSEEKER_PAGE_MODE=1`, restart, and nothing else needs changing.
 
-### 3.7 Read-back shape (optional, OFF by default, effectiveness NOT verified)
+### 3.7 Read-back shape (always web-shaped in page mode, effectiveness NOT verified)
 
-#### In plain words
+In page mode, the **send** step is done by the official page itself, but reading the reply back is still the server making requests. In the old code those read-back requests wore an **Android outfit** we stitched together (`Dalvik/2.1.0`, `x-client-platform: android`), while the send step in that same session wore the official page's web outfit. It is like swiping your own face at the door, then handing over a fake ID when someone checks the record — the problem is not how good the fake ID is, it is that the ID should not exist at all: a real official session's read-back traffic has no Android headers.
 
-In page mode, the **send** step is done by the official page itself, but reading
-the reply back is still the server making requests. In the old code those
-read-back requests wore an **Android outfit** we stitched together
-(`Dalvik/2.1.0`, `x-client-platform: android`), while the send step in that
-same session wore the official page's web outfit. It is like swiping your own
-face at the door, then handing over a fake ID when someone checks the record —
-the problem is not how good the fake ID is, it is that the ID should not exist
-at all: a real official session's read-back traffic has no Android headers.
+This step now has **no switch and nothing to turn on**: as long as page mode (see 3.4) is enabled, the two read-only read-back GETs always use web-shaped headers, and the legacy Android read-back branch has been removed. To name a concrete string: the read-back `user-agent` changes from `Dalvik/2.1.0 (Linux; U; Android 14; Pixel 7)` to `Mozilla/5.0 ... Chrome/126`, plus the `sec-ch-ua` / `sec-fetch-*` headers a real browser always sends.
 
-This step adds an optional switch so the **read-back also wears the web outfit**
-and that extra ID disappears. To name a concrete string: the read-back
-`user-agent` changes from `Dalvik/2.1.0 (Linux; U; Android 14; Pixel 7)` to
-`Mozilla/5.0 ... Chrome/126`, plus the `sec-ch-ua` / `sec-fetch-*` headers a
-real browser always sends.
-
-**Three things to be clear about**: (1) it changes the *shape only* — the token
-still lives in the server DB and the outbound IP is unchanged, both left alone
-by this project's red lines; (2) whether the upstream accepts this read-back
-shape, and whether the account is any safer with it on, has **no measured
-evidence here — no promises**; (3) therefore it is **OFF by default**: leave it
-off and the old read-back headers are used, with no change in behavior. Turn it
-on yourself if you want to try it, and judge the result yourself.
+**Three things to be clear about**: (1) it changes the *shape only* — the token still lives in the server DB and the outbound IP is unchanged, both left alone by this project's red lines; (2) whether the upstream accepts this read-back shape, and whether the account is any safer with it, has **no measured evidence here — no promises**; (3) it follows page mode — **without page mode the read-back path is never reached**, so this step does nothing.
 
 #### The technical version
 
-The switch `DEEPSEEKER_PAGE_WEB_READ=1` only matters in page mode
-(`DEEPSEEKER_PAGE_MODE=1`). With it on, the two read-only GETs in
-`page_chat_pipeline.py` (`fetch_page` / `history_messages`) use a set of
-web-shaped headers (13 keys, listed in `WEB_READ_HEADER_KEYS`) and do NOT carry
-PoW / `x-hif-leim` (those belong to completion requests).
-`functions.get_headers()` itself is **not touched by a single character** — the
-classic path, probes, token and outbound IP all stay as they were. This change
-lands only on page mode's own read-back pipeline.
+The two read-only GETs in `page_chat_pipeline.py` (`fetch_page` / `history_messages`) always use a set of web-shaped headers (13 keys, listed in `WEB_READ_HEADER_KEYS`) and do NOT carry PoW / `x-hif-leim` (those belong to completion requests). `functions.get_headers()` itself is **not touched by a single character** — the classic path, probes, token and outbound IP all stay as they were. This change lands only on page mode's own read-back pipeline.
 
-As with the existing "no silent fallback" rule: if read-back fails with this
-on, it will NOT quietly switch back to the Android headers; it still ends in
-the same explicit error / timeout (see 3.5, 7.9). You can tell at a glance that
-this header set did not work, instead of getting an answer from who-knows-where;
-the trade-off is that it will not quietly cover for you either.
+As with the existing "no silent fallback" rule: a failed read-back will NOT quietly switch back to any legacy header set; it still ends in the same explicit error / timeout (see 3.5, 7.9). You can tell at a glance that this header set did not work, instead of getting an answer from who-knows-where; the trade-off is that it will not quietly cover for you either.
 
-#### Turn it on / off
+#### How to go back
 
-Add one line next to `DEEPSEEKER_PAGE_MODE=1` in `.env`, then **restart**:
-
-```bash
-DEEPSEEKER_PAGE_WEB_READ=1
-```
-
-- The switch accepts `1` / `true` / `yes` / `on`; `.env.example` has a commented
-  template line, just remove the leading `#`.
-- Delete the line and restart to go back to the old read-back headers; nothing
-  else changes.
-- **Without page mode this line does nothing** (the read-back path is never reached).
+There is no separate switch for this step. To return to the classic path used before page mode, remove `DEEPSEEKER_PAGE_MODE=1` from `.env` and restart (see 3.4); nothing else changes.
 
 #### If something goes wrong
 
 | Symptom | Cause | What to do |
 |---|---|---|
-| Messages time out after turning it on | Upstream did not accept this read-back shape, or the token / IP was flagged | Remove `DEEPSEEKER_PAGE_WEB_READ=1`, restart, confirm read-back works again; do not keep retrying in the page |
-| No effect after editing | The variable is read once at startup | Restart the service, see 7.7 |
-| Want to know which headers were used | — | See `_get_json` in `page_chat_pipeline.py`: switch off -> `functions.get_headers()`, on -> `web_read_headers()` |
+| Messages keep timing out | Upstream did not accept this read-back shape, or the token / IP was flagged | Remove `DEEPSEEKER_PAGE_MODE=1`, restart back to the classic path, confirm read-back works again; do not keep retrying in the page |
+| No effect after editing | Page mode is off, or the variable is read once at startup | Make sure `DEEPSEEKER_PAGE_MODE=1` is in `.env`, then restart the service, see 7.7 |
+| Want to know which headers were used | — | See `_get_json` in `page_chat_pipeline.py`: read-back is always `web_read_headers()`, with no other branch |
 | Worried about account risk | This step is shape only, it changes neither token nor IP | See the README for the honest account-risk wording; this item does not promise "no ban" |
 
-> This step puts a shape back where theory says it belongs; it is not "no more
-> bans after this change". The ③-layer token host and outbound IP stay per the
+> This step puts a shape back where theory says it belongs; it is not "no more bans after this change". The token host and outbound IP stay per the red lines, and effectiveness is left to real-world use to verify.
+
+y per the
 > red lines, and effectiveness is left to real-world use to verify.
 
 ---

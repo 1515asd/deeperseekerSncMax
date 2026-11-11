@@ -17,13 +17,11 @@ logger = logging.getLogger("page_chat_pipeline")
 
 PAGE_MODE_ENV = "DEEPSEEKER_PAGE_MODE"
 PAGE_TIMEOUT_ENV = "DEEPSEEKER_PAGE_TIMEOUT"
-# [Snc2] Read-back shape alignment: optional, OFF by default. See GUIDE ch.3.
-# Page mode hands "send" to the official page, but read-back still uses the
-# Android headers from functions.get_headers(), so send/read shapes mismatch
-# within one session. This switch lets read-back use web-shaped headers (shape
-# only): token host and egress stay untouched. Effectiveness is NOT verified,
-# hence OFF by default, opt-in only, and with no silent fallback.
-PAGE_WEB_READ_ENV = "DEEPSEEKER_PAGE_WEB_READ"
+# [Snc2] Read-back shape alignment: always web-shaped in page mode (no switch,
+# no fallback). Page mode hands "send" to the official page, and read-back now
+# wears the same web shape, removing the send/read mismatch within one session;
+# the legacy Android read-back branch is removed. Shape only: token host and
+# egress stay untouched. Effectiveness is NOT verified. See GUIDE ch.3.7.
 # Key set for web read-back headers (single source of truth, aligned with the adapter).
 WEB_READ_HEADER_KEYS = (
     "accept", "accept-language", "content-type", "origin", "referer",
@@ -56,11 +54,6 @@ def page_timeout():
         return v if v > 0 else 300.0
     except (TypeError, ValueError):
         return 300.0
-
-
-def page_web_read_enabled():
-    """Off unless DEEPSEEKER_PAGE_WEB_READ is set; off = read-back reuses the old headers verbatim, behavior unchanged."""
-    return os.getenv(PAGE_WEB_READ_ENV, "").strip().lower() in ("1", "true", "yes", "on")
 
 
 def web_read_headers(token):
@@ -149,12 +142,10 @@ def pending_count():
 async def _get_json(url, token, timeout_s=15.0):
     """One GET, returns (status, body); network errors are returned, not raised."""
     session = await functions.get_session()
-    # [Snc2] OFF -> reuse functions.get_headers() verbatim (legacy path, unchanged);
-    # ON -> web-shaped read-back headers. No silent "fall back to Android on failure":
-    # failures go through the existing _assert_alive()/timeout errors, so the two
-    # shapes never mix within one session.
-    headers = (web_read_headers(token) if page_web_read_enabled()
-               else functions.get_headers(token))
+    # [Snc2] Read-back always uses web-shaped headers: no switch, no fallback;
+    # the legacy Android read-back branch is removed. Failures go through the
+    # existing _assert_alive()/timeout errors, so shapes never mix in one session.
+    headers = web_read_headers(token)
     try:
         async with session.get(
             url,
